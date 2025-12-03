@@ -1,0 +1,652 @@
+mod functions;
+mod identifiers;
+mod literals;
+mod operators;
+mod predicates;
+mod special;
+mod subqueries;
+
+use sqlparser::ast;
+use yachtsql_core::error::{Error, Result};
+use yachtsql_ir::expr::{BinaryOp, Expr, LiteralValue, UnaryOp};
+
+use super::LogicalPlanBuilder;
+
+impl LogicalPlanBuilder {
+    pub(super) fn sql_expr_to_expr(&self, expr: &ast::Expr) -> Result<Expr> {
+        match expr {
+            ast::Expr::Identifier(ident) => Ok(Expr::column(ident.value.clone())),
+
+            ast::Expr::CompoundIdentifier(idents) => self.convert_compound_identifier_expr(idents),
+
+            ast::Expr::CompoundFieldAccess { root, access_chain } => {
+                self.convert_composite_access(root, access_chain)
+            }
+
+            ast::Expr::Nested(nested) => self.sql_expr_to_expr(nested),
+
+            ast::Expr::Value(value) => Ok(Expr::Literal(self.sql_value_to_literal(value)?)),
+
+            ast::Expr::TypedString(typed) => {
+                let value_owned = typed.value.value.clone().into_string().ok_or_else(|| {
+                    Error::invalid_query("Typed string literal must be a string value".to_string())
+                })?;
+                self.convert_typed_string(&typed.data_type, &value_owned)
+            }
+
+            ast::Expr::Collate { expr, collation } => self.convert_collate(expr, collation),
+
+            ast::Expr::BinaryOp { left, op, right } => match op {
+                ast::BinaryOperator::Arrow => {
+                    self.make_json_arrow_function("JSON_EXTRACT_JSON", left, right)
+                }
+                ast::BinaryOperator::LongArrow => {
+                    self.make_json_arrow_function("JSON_VALUE_TEXT", left, right)
+                }
+                ast::BinaryOperator::AtArrow => {
+                    let left_expr = self.sql_expr_to_expr(left)?;
+                    let right_expr = self.sql_expr_to_expr(right)?;
+                    Ok(Expr::binary_op(
+                        left_expr,
+                        yachtsql_ir::BinaryOp::ArrayContains,
+                        right_expr,
+                    ))
+                }
+                ast::BinaryOperator::HashArrow => {
+                    self.make_json_path_array_function("JSON_EXTRACT_PATH_ARRAY", left, right)
+                }
+                ast::BinaryOperator::HashLongArrow => {
+                    self.make_json_path_array_function("JSON_EXTRACT_PATH_ARRAY_TEXT", left, right)
+                }
+                ast::BinaryOperator::Custom(op_str) => match op_str.as_str() {
+                    "#>" => {
+                        self.make_json_path_array_function("JSON_EXTRACT_PATH_ARRAY", left, right)
+                    }
+                    "#>>" => self.make_json_path_array_function(
+                        "JSON_EXTRACT_PATH_ARRAY_TEXT",
+                        left,
+                        right,
+                    ),
+                    _ => {
+                        let left_expr = self.sql_expr_to_expr(left)?;
+                        let right_expr = self.sql_expr_to_expr(right)?;
+                        let binary_op = self.sql_binary_op_to_op(op)?;
+                        Ok(Expr::binary_op(left_expr, binary_op, right_expr))
+                    }
+                },
+                _ => {
+                    let left_expr = self.sql_expr_to_expr(left)?;
+                    let right_expr = self.sql_expr_to_expr(right)?;
+                    let binary_op = self.sql_binary_op_to_op(op)?;
+                    Ok(Expr::binary_op(left_expr, binary_op, right_expr))
+                }
+            },
+
+            ast::Expr::UnaryOp { op, expr } => {
+                let inner_expr = self.sql_expr_to_expr(expr)?;
+                let unary_op = self.sql_unary_op_to_op(op)?;
+                Ok(Expr::unary_op(unary_op, inner_expr))
+            }
+
+            ast::Expr::Function(function) => {
+                let name_str = function.name.to_string();
+                let name = yachtsql_ir::FunctionName::from_str(&name_str);
+                let (args, has_distinct, order_by_clauses) = match &function.args {
+                    ast::FunctionArguments::None => (Vec::new(), false, None),
+                    ast::FunctionArguments::Subquery(_) => {
+                        return Err(Error::unsupported_feature(
+                            "Subquery in function not supported".to_string(),
+                        ));
+                    }
+                    ast::FunctionArguments::List(arg_list) => {
+                        let distinct = matches!(
+                            arg_list.duplicate_treatment,
+                            Some(ast::DuplicateTreatment::Distinct)
+                        );
+                        let args = arg_list
+                            .args
+                            .iter()
+                            .map(|arg| match arg {
+                                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
+                                    self.sql_expr_to_expr(e)
+                                }
+                                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => {
+                                    Ok(Expr::Wildcard)
+                                }
+                                ast::FunctionArg::Named {
+                                    arg: ast::FunctionArgExpr::Expr(e),
+                                    ..
+                                } => self.sql_expr_to_expr(e),
+                                _ => Err(Error::unsupported_feature(
+                                    "Function arg type not supported".to_string(),
+                                )),
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+
+                        let order_by = if !arg_list.clauses.is_empty() {
+                            let mut order_exprs = Vec::new();
+                            for clause in &arg_list.clauses {
+                                if let ast::FunctionArgumentClause::OrderBy(order_by_list) = clause
+                                {
+                                    for order_expr in order_by_list {
+                                        let expr = self.sql_expr_to_expr(&order_expr.expr)?;
+                                        order_exprs.push(yachtsql_ir::expr::OrderByExpr {
+                                            expr,
+                                            asc: order_expr.options.asc,
+                                            nulls_first: order_expr.options.nulls_first,
+                                            collation: None,
+                                        });
+                                    }
+                                }
+                            }
+                            if order_exprs.is_empty() {
+                                None
+                            } else {
+                                Some(order_exprs)
+                            }
+                        } else {
+                            None
+                        };
+
+                        (args, distinct, order_by)
+                    }
+                };
+
+                if let Some(normalized) = self.normalize_dialect_function(&name_str, &args)? {
+                    return Ok(normalized);
+                }
+
+                if (name_str.eq_ignore_ascii_case("IFNULL")
+                    || name_str.eq_ignore_ascii_case("NULLIF"))
+                    && args.len() != 2
+                {
+                    return Err(Error::invalid_query(format!(
+                        "{} requires exactly 2 arguments, got {}",
+                        name_str.to_uppercase(),
+                        args.len()
+                    )));
+                }
+
+                let order_by_clauses = if !function.within_group.is_empty() {
+                    let mut order_exprs = Vec::new();
+                    for order_expr in &function.within_group {
+                        let expr = self.sql_expr_to_expr(&order_expr.expr)?;
+                        order_exprs.push(yachtsql_ir::expr::OrderByExpr {
+                            expr,
+                            asc: order_expr.options.asc,
+                            nulls_first: order_expr.options.nulls_first,
+                            collation: None,
+                        });
+                    }
+                    Some(order_exprs)
+                } else {
+                    order_by_clauses
+                };
+
+                if let Some(over) = &function.over {
+                    let spec = match over {
+                        ast::WindowType::WindowSpec(spec) => {
+                            if let Some(window_name_ident) = &spec.window_name {
+                                let window_name = window_name_ident.value.clone();
+                                let base_spec =
+                                    self.get_named_window(&window_name).ok_or_else(|| {
+                                        Error::invalid_query(format!(
+                                            "Undefined window name '{}' in OVER clause",
+                                            window_name
+                                        ))
+                                    })?;
+
+                                self.merge_window_specs(&base_spec, spec)?
+                            } else {
+                                spec.clone()
+                            }
+                        }
+                        ast::WindowType::NamedWindow(ident) => {
+                            let window_name = ident.value.clone();
+                            self.get_named_window(&window_name).ok_or_else(|| {
+                                Error::invalid_query(format!(
+                                    "Undefined window name '{}' in OVER clause",
+                                    window_name
+                                ))
+                            })?
+                        }
+                    };
+
+                    let partition_by = spec
+                        .partition_by
+                        .iter()
+                        .map(|e| self.sql_expr_to_expr(e))
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let order_by = spec
+                        .order_by
+                        .iter()
+                        .map(|order_expr| {
+                            let expr = self.sql_expr_to_expr(&order_expr.expr)?;
+                            Ok(yachtsql_ir::expr::OrderByExpr {
+                                expr,
+                                asc: order_expr.options.asc,
+                                nulls_first: order_expr.options.nulls_first,
+                                collation: None,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let frame_units =
+                        spec.window_frame
+                            .as_ref()
+                            .map(|window_frame| match window_frame.units {
+                                ast::WindowFrameUnits::Rows => {
+                                    yachtsql_ir::expr::WindowFrameUnits::Rows
+                                }
+                                ast::WindowFrameUnits::Range => {
+                                    yachtsql_ir::expr::WindowFrameUnits::Range
+                                }
+                                ast::WindowFrameUnits::Groups => {
+                                    yachtsql_ir::expr::WindowFrameUnits::Groups
+                                }
+                            });
+
+                    let (frame_start_offset, frame_end_offset) =
+                        if let Some(window_frame) = &spec.window_frame {
+                            let start_offset = Self::parse_frame_bound(&window_frame.start_bound);
+                            let end_offset = if let Some(ref end_bound) = window_frame.end_bound {
+                                Self::parse_frame_bound(end_bound)
+                            } else {
+                                Some(0)
+                            };
+                            (start_offset, end_offset)
+                        } else {
+                            (None, Some(0))
+                        };
+
+                    let exclude = self.parse_exclude_from_current_sql();
+
+                    return Ok(Expr::WindowFunction {
+                        name,
+                        args,
+                        partition_by,
+                        order_by,
+                        frame_units,
+                        frame_start_offset,
+                        frame_end_offset,
+                        exclude,
+                        null_treatment: None,
+                    });
+                }
+
+                let filter = if let Some(filter_expr) = &function.filter {
+                    Some(Box::new(self.sql_expr_to_expr(filter_expr)?))
+                } else {
+                    None
+                };
+
+                if name_str.eq_ignore_ascii_case("GROUPING") {
+                    if args.len() != 1 {
+                        return Err(Error::invalid_query(format!(
+                            "GROUPING() requires exactly 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+
+                    let column_name = match &args[0] {
+                        Expr::Column { name, .. } => name.clone(),
+                        _ => {
+                            return Err(Error::invalid_query(
+                                "GROUPING() argument must be a column reference".to_string(),
+                            ));
+                        }
+                    };
+                    return Ok(Expr::Grouping {
+                        column: column_name,
+                    });
+                }
+
+                if name.is_aggregate() && has_distinct {
+                    Ok(Expr::Aggregate {
+                        name,
+                        args,
+                        distinct: true,
+                        order_by: order_by_clauses,
+                        filter,
+                    })
+                } else if name.is_aggregate() {
+                    Ok(Expr::Aggregate {
+                        name,
+                        args,
+                        distinct: false,
+                        order_by: order_by_clauses,
+                        filter,
+                    })
+                } else {
+                    Ok(Expr::Function { name, args })
+                }
+            }
+
+            ast::Expr::Wildcard(_) => Ok(Expr::Wildcard),
+
+            ast::Expr::IsNull(expr) => {
+                let inner = self.sql_expr_to_expr(expr)?;
+                Ok(Expr::unary_op(UnaryOp::IsNull, inner))
+            }
+
+            ast::Expr::IsNotNull(expr) => {
+                let inner = self.sql_expr_to_expr(expr)?;
+                Ok(Expr::unary_op(UnaryOp::IsNotNull, inner))
+            }
+
+            ast::Expr::Case {
+                operand,
+                conditions,
+                else_result,
+                ..
+            } => self.convert_case(operand, conditions, else_result),
+
+            ast::Expr::InList {
+                expr,
+                list,
+                negated,
+            } => self.convert_in_list(expr, list, *negated),
+
+            ast::Expr::Between {
+                expr,
+                negated,
+                low,
+                high,
+            } => self.convert_between(expr, low, high, *negated),
+
+            ast::Expr::Like {
+                negated,
+                expr,
+                pattern,
+                escape_char: _,
+                any: _,
+            } => self.convert_like_expr(expr, pattern, *negated, BinaryOp::Like, BinaryOp::NotLike),
+
+            ast::Expr::ILike {
+                negated,
+                expr,
+                pattern,
+                escape_char: _,
+                any: _,
+            } => {
+                self.convert_like_expr(expr, pattern, *negated, BinaryOp::ILike, BinaryOp::NotILike)
+            }
+
+            ast::Expr::SimilarTo {
+                negated,
+                expr,
+                pattern,
+                escape_char: _,
+            } => self.convert_like_expr(
+                expr,
+                pattern,
+                *negated,
+                BinaryOp::SimilarTo,
+                BinaryOp::NotSimilarTo,
+            ),
+
+            ast::Expr::Cast {
+                kind,
+                expr,
+                data_type,
+                ..
+            } => self.convert_cast(expr, data_type, kind),
+
+            ast::Expr::Subquery(query) => self.convert_scalar_subquery(query),
+
+            ast::Expr::Exists { subquery, negated } => self.convert_exists(subquery, *negated),
+
+            ast::Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => self.convert_in_subquery(expr, subquery, *negated),
+
+            ast::Expr::Trim {
+                expr,
+                trim_where,
+                trim_what,
+                trim_characters,
+            } => self.convert_trim(expr, trim_where, trim_what, trim_characters),
+
+            ast::Expr::Position { expr, r#in } => self.convert_position(expr, r#in),
+
+            ast::Expr::Ceil { expr, .. } => {
+                let arg_expr = self.sql_expr_to_expr(expr)?;
+                Ok(Expr::Function {
+                    name: yachtsql_ir::FunctionName::Ceil,
+                    args: vec![arg_expr],
+                })
+            }
+
+            ast::Expr::Floor { expr, .. } => {
+                let arg_expr = self.sql_expr_to_expr(expr)?;
+                Ok(Expr::Function {
+                    name: yachtsql_ir::FunctionName::Floor,
+                    args: vec![arg_expr],
+                })
+            }
+
+            ast::Expr::AnyOp {
+                left,
+                compare_op,
+                right,
+                is_some: _,
+            } => self.convert_any_op(left, compare_op, right),
+
+            ast::Expr::AllOp {
+                left,
+                compare_op,
+                right,
+            } => self.convert_all_op(left, compare_op, right),
+
+            ast::Expr::Interval(interval) => self.convert_interval(interval),
+
+            ast::Expr::Extract {
+                field,
+                syntax: _,
+                expr: extract_expr,
+            } => self.convert_extract(field, extract_expr.as_ref()),
+
+            ast::Expr::Array(ast::Array { elem, .. }) => {
+                let elements = elem
+                    .iter()
+                    .map(|e| self.sql_expr_to_expr(e))
+                    .collect::<Result<Vec<_>>>()?;
+
+                self.validate_array_type_homogeneity(&elements)?;
+
+                Ok(Expr::Literal(LiteralValue::Array(elements)))
+            }
+
+            ast::Expr::Struct { values, fields } => {
+                let struct_fields = self.build_struct_literal_fields(values, fields)?;
+                Ok(Expr::StructLiteral {
+                    fields: struct_fields,
+                })
+            }
+
+            ast::Expr::Named { expr, .. } => self.sql_expr_to_expr(expr),
+
+            ast::Expr::Tuple(exprs) => {
+                let tuple_exprs = exprs
+                    .iter()
+                    .map(|e| self.sql_expr_to_expr(e))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Expr::Tuple(tuple_exprs))
+            }
+
+            _ => Err(Error::unsupported_feature(format!(
+                "Expression type not supported: {:?}",
+                expr
+            ))),
+        }
+    }
+
+    fn validate_array_type_homogeneity(&self, elements: &[Expr]) -> Result<()> {
+        if elements.is_empty() {
+            return Ok(());
+        }
+
+        let first_type = elements
+            .iter()
+            .find_map(|elem| Self::get_literal_type_category(elem));
+
+        if let Some(expected_type) = first_type {
+            for elem in elements {
+                if let Some(elem_type) = Self::get_literal_type_category(elem) {
+                    if elem_type != expected_type {
+                        return Err(Error::invalid_query(format!(
+                            "Array elements must have compatible types, found both {:?} and {:?}",
+                            expected_type, elem_type
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_literal_type_category(expr: &Expr) -> Option<&'static str> {
+        match expr {
+            Expr::Literal(lit) => match lit {
+                LiteralValue::Null => None,
+                LiteralValue::Int64(_) => Some("integer"),
+                LiteralValue::Float64(_) | LiteralValue::Numeric(_) => Some("numeric"),
+                LiteralValue::String(_) => Some("string"),
+                LiteralValue::Boolean(_) => Some("boolean"),
+                LiteralValue::Date(_) => Some("date"),
+                LiteralValue::Timestamp(_) => Some("timestamp"),
+                LiteralValue::Interval(_) => Some("interval"),
+                LiteralValue::Array(_) => Some("array"),
+                LiteralValue::Bytes(_) => Some("bytes"),
+                LiteralValue::Uuid(_) => Some("uuid"),
+                LiteralValue::Json(_) => Some("json"),
+                LiteralValue::Vector(_) => Some("vector"),
+                LiteralValue::Range(_) => Some("range"),
+                LiteralValue::Point(_) => Some("point"),
+                LiteralValue::PgBox(_) => Some("box"),
+                LiteralValue::Circle(_) => Some("circle"),
+                LiteralValue::MacAddr(_) => Some("macaddr"),
+                LiteralValue::MacAddr8(_) => Some("macaddr8"),
+            },
+
+            _ => None,
+        }
+    }
+
+    fn normalize_dialect_function(&self, name_str: &str, args: &[Expr]) -> Result<Option<Expr>> {
+        use yachtsql_ir::expr::{BinaryOp, CastDataType, LiteralValue, StructLiteralField};
+
+        use crate::DialectType;
+
+        match name_str.to_uppercase().as_str() {
+            "ROW" => {
+                let fields: Vec<StructLiteralField> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, expr)| StructLiteralField {
+                        name: format!("f{}", idx + 1),
+                        expr: expr.clone(),
+                        declared_type: None,
+                    })
+                    .collect();
+
+                return Ok(Some(Expr::StructLiteral { fields }));
+            }
+            _ => {}
+        }
+
+        let normalized = match self.dialect {
+            DialectType::BigQuery => match name_str.to_uppercase().as_str() {
+                "SAFE_DIVIDE" => {
+                    if args.len() != 2 {
+                        return Err(Error::invalid_query(format!(
+                            "SAFE_DIVIDE requires exactly 2 arguments, got {}",
+                            args.len()
+                        )));
+                    }
+
+                    let numerator = args[0].clone();
+                    let denominator = args[1].clone();
+
+                    Some(Expr::Case {
+                        operand: None,
+                        when_then: vec![(
+                            Expr::BinaryOp {
+                                left: Box::new(denominator.clone()),
+                                op: BinaryOp::Equal,
+                                right: Box::new(Expr::Literal(LiteralValue::Int64(0))),
+                            },
+                            Expr::Literal(LiteralValue::Null),
+                        )],
+                        else_expr: Some(Box::new(Expr::BinaryOp {
+                            left: Box::new(numerator),
+                            op: BinaryOp::Divide,
+                            right: Box::new(denominator),
+                        })),
+                    })
+                }
+                _ => None,
+            },
+            DialectType::ClickHouse => match name_str.to_uppercase().as_str() {
+                "TO_INT64" | "TOINT64" => {
+                    if args.len() != 1 {
+                        return Err(Error::invalid_query(format!(
+                            "TO_INT64 requires exactly 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    Some(Expr::Cast {
+                        expr: Box::new(args[0].clone()),
+                        data_type: CastDataType::Int64,
+                    })
+                }
+                "TO_STRING" | "TOSTRING" => {
+                    if args.len() != 1 {
+                        return Err(Error::invalid_query(format!(
+                            "TO_STRING requires exactly 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    Some(Expr::Cast {
+                        expr: Box::new(args[0].clone()),
+                        data_type: CastDataType::String,
+                    })
+                }
+                "TO_FLOAT64" | "TOFLOAT64" => {
+                    if args.len() != 1 {
+                        return Err(Error::invalid_query(format!(
+                            "TO_FLOAT64 requires exactly 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    Some(Expr::Cast {
+                        expr: Box::new(args[0].clone()),
+                        data_type: CastDataType::Float64,
+                    })
+                }
+                "IF" => {
+                    if args.len() != 3 {
+                        return Err(Error::invalid_query(format!(
+                            "IF requires exactly 3 arguments, got {}",
+                            args.len()
+                        )));
+                    }
+
+                    Some(Expr::Case {
+                        operand: None,
+                        when_then: vec![(args[0].clone(), args[1].clone())],
+                        else_expr: Some(Box::new(args[2].clone())),
+                    })
+                }
+                _ => None,
+            },
+            DialectType::PostgreSQL => None,
+        };
+
+        Ok(normalized)
+    }
+}

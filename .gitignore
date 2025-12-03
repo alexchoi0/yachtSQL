@@ -1,0 +1,14 @@
+target/
+**/*.rs.bk
+vendor/
+.claude/
+logs/.clade.out.txt
+.commit_description.txt
+logs/
+.idea/
+.venv/
+__pycache__/
+output.jsonl
+*.bak
+*.backup
+*.tmp

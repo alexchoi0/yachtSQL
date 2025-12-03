@@ -1,0 +1,41 @@
+use yachtsql_core::error::{Error, Result};
+use yachtsql_core::types::Value;
+use yachtsql_optimizer::expr::Expr;
+
+use super::super::super::ProjectionWithExprExec;
+use crate::RecordBatch;
+
+impl ProjectionWithExprExec {
+    pub(in crate::query_executor::evaluator::physical_plan) fn eval_net_function(
+        _name: &str,
+        _args: &[Expr],
+        _batch: &RecordBatch,
+        _row_idx: usize,
+    ) -> Result<Value> {
+        Err(Error::unsupported_feature(
+            "NET.* functions need migration from core.rs".to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use yachtsql_core::types::{DataType, Value};
+    use yachtsql_optimizer::expr::Expr;
+    use yachtsql_storage::{Field, Schema};
+
+    use super::*;
+    use crate::query_executor::evaluator::physical_plan::expression::test_utils::*;
+    use crate::tests::support::assert_error_contains;
+
+    #[test]
+    fn returns_unsupported_feature_error() {
+        let schema = Schema::from_fields(vec![Field::nullable("ip_str", DataType::String)]);
+        let batch = create_batch(schema, vec![vec![Value::string("192.168.1.1".into())]]);
+        let args = vec![Expr::column("ip_str")];
+        let err = ProjectionWithExprExec::eval_net_function("IP_FROM_STRING", &args, &batch, 0)
+            .expect_err("not yet implemented");
+        assert_error_contains(&err, "NET");
+        assert_error_contains(&err, "migration");
+    }
+}

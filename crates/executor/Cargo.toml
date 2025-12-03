@@ -1,0 +1,107 @@
+[package]
+name = "yachtsql-executor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "YachtSQL execution engine"
+
+[dependencies]
+# YachtSQL crates
+yachtsql-core = { path = "../core" }
+yachtsql-storage = { path = "../storage" }
+yachtsql-optimizer = { path = "../optimizer" }
+yachtsql-parser = { path = "../parser" }
+yachtsql-ir = { path = "../ir" }
+yachtsql-functions = { path = "../functions" }
+yachtsql-capability = { path = "../capability" }
+
+# SQL parsing
+sqlparser = { version = "0.59", features = ["visitor"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_json_path = "0.7"
+toml = "0.8"
+
+# Utilities
+itertools = "0.13"
+indexmap = { version = "2.12", features = ["serde"] }
+hashbrown = "0.15"
+ordered-float = "4.5"
+natord = "1.0"
+log = "0.4"
+debug_print = "1.0"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# Regular expressions
+regex = "1.11"
+
+# Random number generation
+rand = "0.8"
+
+# Decimal arithmetic for NUMERIC/DECIMAL types
+rust_decimal = { version = "1.36", features = ["serde"] }
+
+# UUID support
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Unicode normalization for collations
+unicode-normalization = "0.1"
+
+# SIMD alignment
+aligned-vec = "0.6"
+
+# Bloom filter
+bloomfilter = "3.0"
+
+# Fast non-cryptographic hash for probabilistic data structures
+ahash = "0.8"
+
+# Cryptographic hash functions
+md5 = "0.7"
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+# Non-cryptographic hash functions
+farmhash = "1.1"
+
+# Network operations
+ipnetwork = "0.20"
+url = "2.5"
+publicsuffix = "2.2"
+lazy_static = "1.5"
+
+# Caching infrastructure
+moka = { version = "0.12", features = ["sync"] }
+
+# Async runtime (optional, for parallel execution)
+tokio = { version = "1.42", features = ["rt-multi-thread", "sync", "macros"], optional = true }
+futures = { version = "0.3", optional = true }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Features
+[features]
+default = []
+
+# Linting configuration
+[lints.clippy]
+large-enum-variant = "warn"
+enum-variant-names = "warn"
+wildcard-enum-match-arm = "warn"
+
+[dev-dependencies]
+yachtsql = { path = "../.." }
+yachtsql-test-utils = { path = "../test-utils" }
+mockall = "0.13"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+

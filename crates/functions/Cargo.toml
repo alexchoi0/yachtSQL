@@ -1,0 +1,77 @@
+[package]
+name = "yachtsql-functions"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Function implementations for YachtSQL"
+
+[features]
+default = ["core", "json", "network", "encryption", "approximate"]
+core = []
+json = ["dep:serde_json", "dep:serde_json_path", "dep:sqlparser"]
+network = ["dep:ipnetwork", "dep:url", "dep:publicsuffix"]
+encryption = ["dep:md5", "dep:sha1", "dep:sha2", "dep:hex", "dep:farmhash"]
+approximate = ["dep:bloomfilter", "dep:ahash"]
+all = ["core", "json", "network", "encryption", "approximate"]
+
+[dependencies]
+# Core types and errors
+yachtsql-core = { path = "../core" }
+yachtsql-parser = { path = "../parser" }
+
+# SQL parsing (needed for JSON functions)
+sqlparser = { version = "0.59", features = ["visitor"], optional = true }
+
+# Serialization
+serde_json = { version = "1.0", optional = true }
+serde_json_path = { version = "0.7", optional = true }
+
+# Utilities
+indexmap = { version = "2.12", features = ["serde"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regular expressions
+regex = "1.11"
+
+# Random number generation
+rand = "0.8"
+
+# Decimal arithmetic
+rust_decimal = { version = "1.36", features = ["serde"] }
+
+# UUID support
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Bloom filter
+bloomfilter = { version = "3.0", optional = true }
+
+# Fast non-cryptographic hash for probabilistic data structures
+ahash = { version = "0.8", optional = true }
+
+# Cryptographic hash functions
+md5 = { version = "0.7", optional = true }
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+base64 = "0.22"
+
+# Non-cryptographic hash functions
+farmhash = { version = "1.1", optional = true }
+
+# Network operations
+ipnetwork = { version = "0.20", optional = true }
+url = { version = "2.5", optional = true }
+publicsuffix = { version = "2.2", optional = true }
+
+debug_print = "1.0.0"
+
+[dev-dependencies]
+yachtsql = { path = "../.." }
+yachtsql-core = { path = "../core" }
+yachtsql-storage = { path = "../storage" }
+yachtsql-test-utils = { path = "../test-utils" }

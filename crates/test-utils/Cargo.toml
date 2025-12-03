@@ -1,0 +1,14 @@
+[package]
+name = "yachtsql-test-utils"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Test utilities for YachtSQL workspace crates"
+
+[dependencies]
+yachtsql = { path = "../.." }
+yachtsql-core = { path = "../core" }
+yachtsql-capability = { path = "../capability" }
+yachtsql-parser = { path = "../parser" }
+yachtsql-storage = { path = "../storage" }
+rust_decimal = "1.37"

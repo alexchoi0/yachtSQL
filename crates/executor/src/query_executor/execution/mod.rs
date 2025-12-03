@@ -1,0 +1,1415 @@
+mod ddl;
+mod dispatcher;
+mod dml;
+mod query;
+mod session;
+mod transaction;
+mod utility;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::str::FromStr;
+
+use chrono::Datelike;
+pub use ddl::{
+    AlterTableExecutor, DdlDropExecutor, DdlExecutor, DomainExecutor, ExtensionExecutor,
+    MaterializedViewExecutor, SchemaExecutor, SequenceExecutor, TriggerExecutor, TypeExecutor,
+};
+use debug_print::debug_eprintln;
+pub use dispatcher::{
+    CopyOperation, DdlOperation, Dispatcher, DmlOperation, MergeOperation, StatementJob,
+    TxOperation, UtilityOperation,
+};
+pub use dml::{
+    DmlDeleteExecutor, DmlInsertExecutor, DmlMergeExecutor, DmlTruncateExecutor, DmlUpdateExecutor,
+};
+pub use query::QueryExecutorTrait;
+use rust_decimal::prelude::ToPrimitive;
+pub use session::{DiagnosticsSnapshot, SessionDiagnostics};
+pub use utility::{
+    apply_interval_to_date, apply_numeric_precision_scale, calculate_date_diff,
+    decode_values_match, evaluate_condition_as_bool, evaluate_numeric_op,
+    evaluate_vector_cosine_distance, evaluate_vector_inner_product, evaluate_vector_l2_distance,
+    infer_scalar_subquery_type_static, perform_cast, safe_add, safe_divide, safe_multiply,
+    safe_negate, safe_subtract,
+};
+use yachtsql_capability::FeatureId;
+use yachtsql_capability::error::CapabilityError;
+use yachtsql_capability::feature_ids::{
+    F781_SELF_REFERENCING_OPERATIONS, F782_COMMIT_STATEMENT, F783_ROLLBACK_STATEMENT,
+    F784_SAVEPOINT_STATEMENT, F785_ROLLBACK_TO_SAVEPOINT_STATEMENT, F786_SAVEPOINTS,
+};
+use yachtsql_core::error::{Error, Result};
+use yachtsql_core::types::{DataType, Value};
+use yachtsql_optimizer::rules::{
+    IndexSelectionRule, SubqueryFlattening, UnionOptimization, WindowOptimization,
+};
+use yachtsql_parser::DialectType;
+use yachtsql_storage::{Schema, SharedTransactionState, StorageLayout};
+
+use self::session::SessionState;
+use self::transaction::SessionTransactionController;
+use crate::RecordBatch;
+
+fn create_default_optimizer() -> yachtsql_optimizer::Optimizer {
+    yachtsql_optimizer::Optimizer::new()
+        .with_rule(Box::new(IndexSelectionRule::new()))
+        .with_rule(Box::new(SubqueryFlattening::new()))
+        .with_rule(Box::new(WindowOptimization::new()))
+        .with_rule(Box::new(UnionOptimization::new()))
+}
+
+pub struct QueryExecutor {
+    pub storage: Rc<RefCell<yachtsql_storage::Storage>>,
+
+    pub transaction_manager: Rc<RefCell<yachtsql_storage::TransactionManager>>,
+
+    pub temporary_storage: Rc<RefCell<yachtsql_storage::TempStorage>>,
+    session: SessionState,
+    session_tx: SessionTransactionController,
+
+    resource_limits: crate::resource_limits::ResourceLimitsConfig,
+
+    optimizer: yachtsql_optimizer::Optimizer,
+
+    plan_cache: Rc<RefCell<crate::plan_cache::PlanCache>>,
+
+    memory_pool: Option<Rc<crate::resource_limits::MemoryPool>>,
+
+    query_registry: Option<Rc<crate::resource_limits::QueryRegistry>>,
+}
+
+impl QueryExecutor {
+    pub fn new() -> Self {
+        let storage = Rc::new(RefCell::new(yachtsql_storage::Storage::new()));
+        let session = SessionState::new(DialectType::PostgreSQL);
+
+        let executor = Self {
+            storage,
+            transaction_manager: Rc::new(RefCell::new(yachtsql_storage::TransactionManager::new())),
+            temporary_storage: Rc::new(RefCell::new(yachtsql_storage::TempStorage::new())),
+            session,
+            session_tx: SessionTransactionController::new(),
+            resource_limits: crate::resource_limits::ResourceLimitsConfig::default(),
+            optimizer: create_default_optimizer(),
+            plan_cache: Rc::new(RefCell::new(crate::plan_cache::PlanCache::new())),
+            memory_pool: None,
+            query_registry: None,
+        };
+
+        executor
+    }
+
+    pub fn with_resource_limits(
+        mut self,
+        config: crate::resource_limits::ResourceLimitsConfig,
+    ) -> Self {
+        self.resource_limits = config;
+        self
+    }
+
+    pub fn with_memory_pool(mut self, pool: Rc<crate::resource_limits::MemoryPool>) -> Self {
+        self.memory_pool = Some(pool);
+        self
+    }
+
+    pub fn memory_pool(&self) -> Option<&Rc<crate::resource_limits::MemoryPool>> {
+        self.memory_pool.as_ref()
+    }
+
+    pub fn with_query_registry(
+        mut self,
+        registry: Rc<crate::resource_limits::QueryRegistry>,
+    ) -> Self {
+        self.query_registry = Some(registry);
+        self
+    }
+
+    pub fn query_registry(&self) -> Option<&Rc<crate::resource_limits::QueryRegistry>> {
+        self.query_registry.as_ref()
+    }
+
+    pub fn with_dialect(dialect: DialectType) -> Self {
+        let mut executor = Self::new();
+        executor.session = SessionState::new(dialect);
+        executor.session_tx = SessionTransactionController::new();
+        executor
+    }
+
+    pub fn dialect(&self) -> DialectType {
+        self.session.dialect()
+    }
+
+    pub fn with_shared_session(existing: &mut QueryExecutor) -> Self {
+        let shared_state = existing.ensure_shared_transaction_state();
+
+        let default_level = {
+            let tm = existing.transaction_manager.borrow_mut();
+            tm.default_isolation_level()
+        };
+
+        let mut transaction_manager =
+            yachtsql_storage::TransactionManager::with_shared_state(shared_state);
+        transaction_manager.set_default_isolation_level(default_level);
+
+        let temp_layout = {
+            let temp = existing.temporary_storage.borrow_mut();
+            temp.storage_layout()
+        };
+
+        let session = SessionState::with_registry(
+            existing.session.dialect(),
+            Rc::clone(existing.session.feature_registry()),
+        );
+
+        let mut executor = Self {
+            storage: Rc::clone(&existing.storage),
+            transaction_manager: Rc::new(RefCell::new(transaction_manager)),
+            temporary_storage: Rc::new(RefCell::new(yachtsql_storage::TempStorage::with_layout(
+                temp_layout,
+            ))),
+            session,
+            session_tx: SessionTransactionController::with_autocommit(
+                existing.session_tx.autocommit(),
+            ),
+            resource_limits: crate::resource_limits::ResourceLimitsConfig::default(),
+            optimizer: create_default_optimizer(),
+            plan_cache: Rc::clone(&existing.plan_cache),
+            memory_pool: existing.memory_pool.clone(),
+            query_registry: existing.query_registry.clone(),
+        };
+        executor.reset_session_diagnostics();
+        executor
+    }
+
+    pub fn with_storage_and_transaction(
+        storage: Rc<RefCell<yachtsql_storage::Storage>>,
+        transaction_manager: Rc<RefCell<yachtsql_storage::TransactionManager>>,
+    ) -> Self {
+        Self {
+            storage,
+            transaction_manager,
+            temporary_storage: Rc::new(RefCell::new(yachtsql_storage::TempStorage::new())),
+            session: SessionState::new(DialectType::PostgreSQL),
+            session_tx: SessionTransactionController::new(),
+            resource_limits: crate::resource_limits::ResourceLimitsConfig::default(),
+            optimizer: create_default_optimizer(),
+            plan_cache: Rc::new(RefCell::new(crate::plan_cache::PlanCache::new())),
+            memory_pool: None,
+            query_registry: None,
+        }
+    }
+
+    pub fn with_feature_registry(
+        mut self,
+        registry: Rc<yachtsql_capability::FeatureRegistry>,
+    ) -> Self {
+        self.session.set_feature_registry(registry);
+        self
+    }
+
+    pub fn feature_registry(&self) -> Rc<yachtsql_capability::FeatureRegistry> {
+        Rc::clone(self.session.feature_registry())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn feature_registry_arc(&self) -> &Rc<yachtsql_capability::FeatureRegistry> {
+        self.session.feature_registry()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn feature_registry_arc_mut(
+        &mut self,
+    ) -> &mut Rc<yachtsql_capability::FeatureRegistry> {
+        self.session.feature_registry_mut()
+    }
+
+    pub fn require_feature(
+        &self,
+        feature_id: yachtsql_capability::FeatureId,
+        feature_name: &str,
+    ) -> Result<()> {
+        if self.session.feature_registry().is_enabled(feature_id) {
+            Ok(())
+        } else {
+            Err(Error::unsupported_feature(format!(
+                "Feature {} ({}) is not enabled",
+                feature_id, feature_name
+            )))
+        }
+    }
+
+    fn ensure_shared_transaction_state(&mut self) -> SharedTransactionState {
+        if let Some(shared) = self.transaction_manager.borrow_mut().shared_state() {
+            return shared;
+        }
+
+        let default_level = {
+            let tm = self.transaction_manager.borrow_mut();
+            debug_assert!(
+                !tm.is_active(),
+                "Cannot enable shared state while a transaction is active"
+            );
+            tm.default_isolation_level()
+        };
+
+        let shared_state = SharedTransactionState::new();
+        let mut manager =
+            yachtsql_storage::TransactionManager::with_shared_state(shared_state.clone());
+        manager.set_default_isolation_level(default_level);
+        self.transaction_manager = Rc::new(RefCell::new(manager));
+        shared_state
+    }
+
+    pub fn clear_exception_diagnostic(&mut self) {
+        self.session.diagnostics_mut().clear_exception();
+    }
+
+    pub fn record_row_count(&mut self, count: usize) {
+        self.session.diagnostics_mut().record_row_count(count);
+    }
+
+    pub fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+        self.session.diagnostics_snapshot()
+    }
+
+    fn reset_session_diagnostics(&mut self) {
+        self.session.reset_diagnostics();
+    }
+
+    fn create_subquery_executor(&self) -> crate::query_executor::evaluator::SubqueryExecutorImpl {
+        crate::query_executor::evaluator::SubqueryExecutorImpl::new(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.transaction_manager),
+            Rc::clone(&self.temporary_storage),
+            Rc::clone(self.session.feature_registry()),
+            self.session.dialect(),
+        )
+    }
+
+    pub fn parse_table_name(&self, table_name: &str) -> (Option<String>, String) {
+        if let Some(dot_pos) = table_name.find('.') {
+            let dataset = table_name[..dot_pos].to_string();
+            let table = table_name[dot_pos + 1..].to_string();
+            (Some(dataset), table)
+        } else {
+            (None, table_name.to_string())
+        }
+    }
+
+    pub fn should_defer_fk_check(&self) -> bool {
+        false
+    }
+
+    pub(super) fn empty_result() -> Result<RecordBatch> {
+        Ok(RecordBatch::empty(Schema::from_fields(vec![])))
+    }
+
+    pub fn qualify_table_name(dataset_id: &str, table_id: &str) -> String {
+        format!("{}.{}", dataset_id, table_id)
+    }
+
+    fn check_exclude_not_supported(sql: &str) -> Result<()> {
+        let patterns = [
+            "EXCLUDE CURRENT ROW",
+            "EXCLUDE CURRENT_ROW",
+            "exclude current row",
+            "exclude current_row",
+            "Exclude Current Row",
+            "EXCLUDE NO OTHERS",
+            "EXCLUDE NO_OTHERS",
+            "exclude no others",
+            "exclude no_others",
+            "Exclude No Others",
+            "EXCLUDE GROUP",
+            "exclude group",
+            "Exclude Group",
+            "EXCLUDE TIES",
+            "exclude ties",
+            "Exclude Ties",
+        ];
+
+        for pattern in &patterns {
+            if sql.contains(pattern) {
+                return Err(Error::unsupported_feature(format!(
+                    "EXCLUDE clauses in window frames are not supported. \
+                    This is an intentional limitation because sqlparser-rs (the underlying SQL parser) \
+                    does not support EXCLUDE syntax. The parser will fail before we can convert to IR. \
+                    \n\nFound: {}\n\nNote: YachtSQL's IR fully supports EXCLUDE, but we cannot parse it yet. \
+                    This limitation will be removed when sqlparser-rs adds EXCLUDE support.",
+                    pattern
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_sql_before_parse(sql: &str, dialect: DialectType) -> Result<()> {
+        match dialect {
+            DialectType::BigQuery => {
+                Self::check_exclude_not_supported(sql)?;
+            }
+            DialectType::ClickHouse | DialectType::PostgreSQL => {}
+        }
+        Ok(())
+    }
+
+    pub fn execute_sql(&mut self, sql: &str) -> Result<RecordBatch> {
+        use yachtsql_parser::validator::CustomStatement;
+        use yachtsql_parser::{Parser, Statement};
+
+        Self::validate_sql_before_parse(sql, self.dialect())?;
+
+        let _registry_guard =
+            crate::query_executor::evaluator::physical_plan::ProjectionWithExprExec::enter_feature_registry_context(
+                Rc::clone(self.session.feature_registry()),
+            );
+
+        let subquery_executor = self.create_subquery_executor();
+        let _subquery_guard =
+            crate::query_executor::evaluator::physical_plan::SubqueryExecutorContextGuard::set(
+                Rc::new(subquery_executor),
+            );
+
+        let parser = Parser::with_dialect(self.dialect());
+        let statements = parser
+            .parse_sql(sql)
+            .map_err(|e| Error::parse_error(format!("Failed to parse SQL: {}", e)))?;
+
+        if statements.is_empty() {
+            return Err(Error::parse_error("No SQL statement provided".to_string()));
+        }
+
+        if statements.len() > 1 {
+            return Err(Error::parse_error(format!(
+                "Multiple statements not supported (found {})",
+                statements.len()
+            )));
+        }
+
+        let statement = &statements[0];
+        crate::query_executor::validate_statement(statement, self.session.feature_registry())?;
+
+        if let Statement::Custom(custom_stmt) = statement {
+            return match custom_stmt {
+                CustomStatement::CreateSequence { .. } => self.execute_create_sequence(custom_stmt),
+                CustomStatement::AlterSequence { .. } => self.execute_alter_sequence(custom_stmt),
+                CustomStatement::DropSequence { .. } => self.execute_drop_sequence(custom_stmt),
+                CustomStatement::RefreshMaterializedView { .. } => {
+                    self.execute_refresh_materialized_view(custom_stmt)
+                }
+                CustomStatement::DropMaterializedView { .. } => {
+                    self.execute_drop_materialized_view(custom_stmt)
+                }
+                CustomStatement::CreateDomain { .. } => self.execute_create_domain(custom_stmt),
+                CustomStatement::AlterDomain { .. } => self.execute_alter_domain(custom_stmt),
+                CustomStatement::DropDomain { .. } => self.execute_drop_domain(custom_stmt),
+                CustomStatement::CreateType { .. } => {
+                    self.execute_create_composite_type(custom_stmt)
+                }
+                CustomStatement::DropType { .. } => self.execute_drop_composite_type(custom_stmt),
+                _ => Err(Error::unsupported_feature(format!(
+                    "Custom statement not yet supported: {:?}",
+                    custom_stmt
+                ))),
+            };
+        }
+
+        let dispatcher =
+            Dispatcher::with_capabilities(self.session.feature_registry().snapshot_view());
+        let job = dispatcher.classify_statement(statement)?;
+
+        match job {
+            StatementJob::Transaction { operation } => {
+                self.execute_transaction_control(operation)?;
+                Self::empty_result()
+            }
+
+            StatementJob::DDL { operation, stmt } => {
+                let result = match operation {
+                    DdlOperation::CreateTable => {
+                        self.execute_create_table(&stmt, sql)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::DropTable => {
+                        self.execute_drop_table(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateView => {
+                        self.execute_create_view(&stmt, sql)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateMaterializedView => {
+                        self.execute_create_view(&stmt, sql)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::DropView => {
+                        self.execute_drop_view(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateIndex => {
+                        self.execute_create_index(&stmt, sql)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::DropIndex => {
+                        self.execute_drop_index(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateTrigger => {
+                        self.execute_create_trigger(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::DropTrigger => {
+                        self.execute_drop_trigger(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateType => {
+                        self.execute_create_type(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::DropType => {
+                        self.execute_drop_type(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::AlterTable => {
+                        self.execute_alter_table(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateExtension => {
+                        self.execute_create_extension(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::DropExtension => {
+                        self.execute_drop_extension(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateSchema => {
+                        self.execute_create_schema(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::DropSchema => {
+                        self.execute_drop_schema(&stmt)?;
+                        Self::empty_result()
+                    }
+                    DdlOperation::CreateFunction => Self::empty_result(),
+                    _ => Err(Error::unsupported_feature(format!(
+                        "DDL operation {:?} not yet implemented",
+                        operation
+                    ))),
+                };
+
+                if result.is_ok() {
+                    self.plan_cache.borrow_mut().invalidate_all();
+                }
+
+                result
+            }
+
+            StatementJob::DML { operation, stmt } => match operation {
+                DmlOperation::Insert => self.execute_insert(&stmt, sql),
+                DmlOperation::Update => self.execute_update(&stmt, sql),
+                DmlOperation::Delete => self.execute_delete(&stmt, sql),
+                DmlOperation::Truncate => {
+                    let _rows_affected = self.execute_truncate(&stmt)?;
+                    Self::empty_result()
+                }
+            },
+
+            StatementJob::Query { stmt } => self.execute_select(&stmt, sql),
+
+            StatementJob::Merge { operation } => {
+                self.execute_merge(&operation.stmt, sql, operation.merge_returning.clone())
+            }
+
+            StatementJob::Utility { operation } => match operation {
+                UtilityOperation::SetCapabilities { enable, features } => {
+                    self.execute_set_capabilities(enable, &features)
+                }
+                UtilityOperation::Explain {
+                    stmt,
+                    analyze,
+                    verbose,
+                } => self.execute_explain(&stmt, analyze, verbose),
+                UtilityOperation::SetSearchPath { schemas } => {
+                    self.execute_set_search_path(&schemas)
+                }
+                UtilityOperation::Show { variable } => self.execute_show(variable.as_deref()),
+            },
+
+            StatementJob::Procedure { name, args } => self.execute_procedure(&name, &args),
+
+            StatementJob::Copy { operation } => self.execute_copy(&operation.stmt),
+        }
+    }
+
+    fn execute_transaction_control(&mut self, operation: TxOperation) -> Result<()> {
+        match operation {
+            TxOperation::Begin => {
+                self.require_feature(F781_SELF_REFERENCING_OPERATIONS, "BEGIN statement")?;
+                self.execute_begin_transaction()
+            }
+
+            TxOperation::Commit => {
+                self.require_feature(F782_COMMIT_STATEMENT, "COMMIT statement")?;
+                self.execute_commit_transaction()
+            }
+
+            TxOperation::Rollback => {
+                self.require_feature(F783_ROLLBACK_STATEMENT, "ROLLBACK statement")?;
+                self.execute_rollback_transaction()
+            }
+
+            TxOperation::Savepoint { name } => {
+                self.require_feature(F784_SAVEPOINT_STATEMENT, "SAVEPOINT statement")?;
+                self.execute_savepoint(name)
+            }
+
+            TxOperation::ReleaseSavepoint { name } => {
+                self.require_feature(F786_SAVEPOINTS, "RELEASE SAVEPOINT statement")?;
+                self.execute_release_savepoint(name)
+            }
+
+            TxOperation::RollbackToSavepoint { name } => {
+                self.require_feature(
+                    F785_ROLLBACK_TO_SAVEPOINT_STATEMENT,
+                    "ROLLBACK TO SAVEPOINT statement",
+                )?;
+                self.execute_rollback_to_savepoint(name)
+            }
+
+            TxOperation::SetAutocommit { enabled } => self.execute_set_session_autocommit(enabled),
+
+            TxOperation::SetTransactionIsolation { .. } => Err(Error::unsupported_feature(
+                "SET TRANSACTION ISOLATION LEVEL not yet implemented".to_string(),
+            )),
+        }
+    }
+
+    fn execute_set_capabilities(
+        &mut self,
+        enable: bool,
+        features: &[String],
+    ) -> Result<RecordBatch> {
+        if features.is_empty() {
+            return Err(Error::invalid_query(
+                "SET yachtsql.capability requires at least one feature identifier".to_string(),
+            ));
+        }
+
+        let registry_arc = self.feature_registry_arc_mut();
+        let registry = Rc::make_mut(registry_arc);
+        let mut resolved: Vec<FeatureId> = Vec::with_capacity(features.len());
+
+        for feature_name in features {
+            if let Some(feature) = registry
+                .all_features()
+                .find(|candidate| candidate.id.as_str().eq_ignore_ascii_case(feature_name))
+            {
+                resolved.push(feature.id);
+            } else {
+                return Err(Error::unsupported_feature(format!(
+                    "Unknown SQL feature identifier '{}'",
+                    feature_name
+                )));
+            }
+        }
+
+        if enable {
+            let ids = resolved.clone();
+            registry
+                .enable_features_strict(ids.into_iter())
+                .map_err(Self::map_capability_error)?;
+        } else {
+            for feature_id in &resolved {
+                if let Some(feature) = registry.all_features().find(|f| f.id == *feature_id)
+                    && feature.is_core
+                {
+                    return Err(Error::unsupported_feature(format!(
+                        "Cannot disable core feature '{}' ({})",
+                        feature_id.as_str(),
+                        feature.name
+                    )));
+                }
+            }
+
+            for feature_id in resolved {
+                registry
+                    .disable(feature_id)
+                    .map_err(Self::map_capability_error)?;
+            }
+        }
+
+        self.record_row_count(0);
+        Self::empty_result()
+    }
+
+    fn map_capability_error(err: CapabilityError) -> Error {
+        Error::unsupported_feature(format!("Capability update failed: {}", err))
+    }
+
+    fn execute_set_search_path(&mut self, schemas: &[String]) -> Result<RecordBatch> {
+        self.session.set_search_path(schemas.to_vec());
+        self.record_row_count(0);
+        Self::empty_result()
+    }
+
+    fn execute_show(&mut self, variable: Option<&str>) -> Result<RecordBatch> {
+        let var_name = variable.unwrap_or("all");
+
+        match var_name.to_lowercase().as_str() {
+            "search_path" => {
+                let path = self.session.search_path();
+                let path_str = path.join(", ");
+                let schema = Schema::from_fields(vec![yachtsql_storage::Field::required(
+                    "search_path".to_string(),
+                    DataType::String,
+                )]);
+                let rows = vec![vec![Value::string(path_str)]];
+                RecordBatch::from_values(schema, rows)
+            }
+            _ => Err(Error::unsupported_feature(format!(
+                "SHOW {} is not supported",
+                var_name
+            ))),
+        }
+    }
+
+    fn execute_procedure(
+        &mut self,
+        name: &str,
+        args: &[sqlparser::ast::Value],
+    ) -> Result<RecordBatch> {
+        match name.to_lowercase().as_str() {
+            "enable_feature" => {
+                if args.is_empty() {
+                    return Err(Error::invalid_query(
+                        "enable_feature() requires at least one argument".to_string(),
+                    ));
+                }
+
+                let features: Vec<String> = args
+                    .iter()
+                    .filter_map(|v| match v {
+                        sqlparser::ast::Value::SingleQuotedString(s)
+                        | sqlparser::ast::Value::DoubleQuotedString(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if features.is_empty() {
+                    return Err(Error::invalid_query(
+                        "enable_feature() requires string arguments".to_string(),
+                    ));
+                }
+
+                self.execute_set_capabilities(true, &features)
+            }
+
+            "disable_feature" => {
+                if args.is_empty() {
+                    return Err(Error::invalid_query(
+                        "disable_feature() requires at least one argument".to_string(),
+                    ));
+                }
+
+                let features: Vec<String> = args
+                    .iter()
+                    .filter_map(|v| match v {
+                        sqlparser::ast::Value::SingleQuotedString(s)
+                        | sqlparser::ast::Value::DoubleQuotedString(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if features.is_empty() {
+                    return Err(Error::invalid_query(
+                        "disable_feature() requires string arguments".to_string(),
+                    ));
+                }
+
+                self.execute_set_capabilities(false, &features)
+            }
+
+            _ => Err(Error::unsupported_feature(format!(
+                "Unknown procedure: {}",
+                name
+            ))),
+        }
+    }
+
+    fn execute_explain(
+        &mut self,
+        stmt: &sqlparser::ast::Statement,
+        analyze: bool,
+        verbose: bool,
+    ) -> Result<RecordBatch> {
+        use sqlparser::ast::Statement as SqlStatement;
+
+        match stmt {
+            SqlStatement::Query(query) => {
+                let plan_builder = yachtsql_parser::LogicalPlanBuilder::new()
+                    .with_storage(Rc::clone(&self.storage))
+                    .with_dialect(self.dialect());
+                let logical_plan = plan_builder.query_to_plan(query)?;
+
+                let optimized = self.optimizer.optimize(logical_plan)?;
+                let query_plan = optimized.root().clone();
+
+                let mut output = String::new();
+                if analyze {
+                    output.push_str("EXPLAIN ANALYZE:\n");
+
+                    let start = crate::explain::FastTimestamp::now();
+                    let exec_result = self.execute_select(stmt, "")?;
+                    let elapsed = start.elapsed();
+
+                    let actual_rows = exec_result.num_rows();
+
+                    output.push_str(&format!(
+                        "  Execution time: {:.2}ms\n",
+                        elapsed.as_secs_f64() * 1000.0
+                    ));
+                    output.push_str(&format!("  Actual rows: {}\n\n", actual_rows));
+                }
+
+                let options = crate::explain::ExplainOptions {
+                    analyze,
+                    verbose,
+                    profiler_metrics: None,
+                };
+
+                let plan_output = crate::explain::explain_query(&query_plan, options)?;
+
+                if analyze {
+                    let mut combined_rows: Vec<Vec<Value>> = vec![vec![Value::string(output)]];
+                    if let Ok(plan_rows) = plan_output.rows() {
+                        for row in plan_rows {
+                            combined_rows.push(row.values().to_vec());
+                        }
+                    }
+
+                    let schema = plan_output.schema().clone();
+                    RecordBatch::from_values(schema, combined_rows)
+                } else {
+                    Ok(plan_output)
+                }
+            }
+
+            SqlStatement::Insert { .. } => {
+                let schema = Schema::from_fields(vec![yachtsql_storage::Field::required(
+                    "QUERY PLAN".to_string(),
+                    DataType::String,
+                )]);
+                let rows = vec![vec![Value::string(format!(
+                    "Insert Statement:\n  {}",
+                    stmt
+                ))]];
+                RecordBatch::from_values(schema, rows)
+            }
+
+            SqlStatement::Update { .. } => {
+                let schema = Schema::from_fields(vec![yachtsql_storage::Field::required(
+                    "QUERY PLAN".to_string(),
+                    DataType::String,
+                )]);
+                let rows = vec![vec![Value::string(format!(
+                    "Update Statement:\n  {}",
+                    stmt
+                ))]];
+                RecordBatch::from_values(schema, rows)
+            }
+
+            SqlStatement::Delete { .. } => {
+                let schema = Schema::from_fields(vec![yachtsql_storage::Field::required(
+                    "QUERY PLAN".to_string(),
+                    DataType::String,
+                )]);
+                let rows = vec![vec![Value::string(format!(
+                    "Delete Statement:\n  {}",
+                    stmt
+                ))]];
+                RecordBatch::from_values(schema, rows)
+            }
+
+            _ => {
+                let schema = Schema::from_fields(vec![yachtsql_storage::Field::required(
+                    "QUERY PLAN".to_string(),
+                    DataType::String,
+                )]);
+                let rows = vec![vec![Value::string(format!("Statement:\n  {}", stmt))]];
+                RecordBatch::from_values(schema, rows)
+            }
+        }
+    }
+
+    pub(crate) fn parse_returning_clause(
+        &self,
+        returning: &[sqlparser::ast::SelectItem],
+        _schema: &Schema,
+    ) -> Result<crate::query_executor::returning::ReturningSpec> {
+        use sqlparser::ast::SelectItem;
+
+        use crate::query_executor::returning::{
+            ReturningAstItem, ReturningColumn, ReturningColumnOrigin, ReturningSpec,
+        };
+
+        if returning.is_empty() {
+            return Ok(ReturningSpec::None);
+        }
+
+        if returning.len() == 1 && matches!(returning[0], SelectItem::Wildcard(_)) {
+            return Ok(ReturningSpec::AllColumns);
+        }
+
+        let all_simple_columns = returning.iter().all(|item| match item {
+            SelectItem::UnnamedExpr(expr) => matches!(expr, sqlparser::ast::Expr::Identifier(_)),
+            SelectItem::ExprWithAlias { expr, .. } => {
+                matches!(expr, sqlparser::ast::Expr::Identifier(_))
+            }
+            _ => false,
+        });
+
+        if all_simple_columns {
+            let mut columns = Vec::new();
+            for item in returning {
+                match item {
+                    SelectItem::UnnamedExpr(expr) => {
+                        if let sqlparser::ast::Expr::Identifier(ident) = expr {
+                            columns.push(ReturningColumn {
+                                source_name: ident.value.clone(),
+                                output_name: ident.value.clone(),
+                                origin: ReturningColumnOrigin::Target,
+                            });
+                        }
+                    }
+                    SelectItem::ExprWithAlias { expr, alias } => {
+                        if let sqlparser::ast::Expr::Identifier(ident) = expr {
+                            columns.push(ReturningColumn {
+                                source_name: ident.value.clone(),
+                                output_name: alias.value.clone(),
+                                origin: ReturningColumnOrigin::Target,
+                            });
+                        }
+                    }
+                    SelectItem::Wildcard(_) => {
+                        return Err(Error::InvalidQuery(
+                            "RETURNING * cannot be combined with other columns".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Unsupported RETURNING item".to_string(),
+                        ));
+                    }
+                }
+            }
+            return Ok(ReturningSpec::Columns(columns));
+        }
+
+        let mut ast_items = Vec::new();
+        for item in returning {
+            let output_name = match item {
+                SelectItem::UnnamedExpr(expr) => derive_output_name_from_expr(expr),
+                SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
+                SelectItem::Wildcard(_) => {
+                    return Err(Error::InvalidQuery(
+                        "RETURNING * cannot be combined with other columns".to_string(),
+                    ));
+                }
+
+                SelectItem::QualifiedWildcard(kind, _) => match kind {
+                    sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
+                        format!("{}.*", name)
+                    }
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Expression-qualified wildcard not supported in RETURNING".to_string(),
+                        ));
+                    }
+                },
+            };
+
+            ast_items.push(ReturningAstItem {
+                item: item.clone(),
+                output_name,
+            });
+        }
+
+        Ok(ReturningSpec::AstItems(ast_items))
+    }
+
+    pub fn plan_cache_stats(&self) -> crate::plan_cache::PlanCacheStats {
+        self.plan_cache.borrow().stats()
+    }
+
+    pub fn invalidate_plan_cache(&mut self) {
+        self.plan_cache.borrow_mut().invalidate_all();
+    }
+
+    pub fn refresh_materialized_view(&mut self, dataset_id: &str, view_id: &str) -> Result<usize> {
+        let view_sql = {
+            let storage = self.storage.borrow_mut();
+            let dataset = storage.get_dataset(dataset_id).ok_or_else(|| {
+                Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id))
+            })?;
+
+            let view = dataset.views().get_view(view_id).ok_or_else(|| {
+                Error::InvalidQuery(format!("View '{}.{}' not found", dataset_id, view_id))
+            })?;
+
+            if !view.is_materialized() {
+                return Err(Error::InvalidQuery(format!(
+                    "View '{}.{}' is not a materialized view",
+                    dataset_id, view_id
+                )));
+            }
+
+            view.sql.clone()
+        };
+
+        let result = self.execute_sql(&view_sql)?;
+        let result_schema = result.schema().clone();
+        let result_rows: Vec<yachtsql_storage::Row> =
+            result.rows().map(|rows| rows.to_vec()).unwrap_or_default();
+
+        let row_count = result_rows.len();
+
+        let mut storage = self.storage.borrow_mut();
+        let dataset = storage
+            .get_dataset_mut(dataset_id)
+            .ok_or_else(|| Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id)))?;
+
+        let view = dataset.views_mut().get_view_mut(view_id).ok_or_else(|| {
+            Error::InvalidQuery(format!("View '{}.{}' not found", dataset_id, view_id))
+        })?;
+
+        view.refresh_materialized_data(result_rows, result_schema);
+
+        debug_eprintln!(
+            "[executor::execution] Refreshed materialized view '{}.{}' with {} rows",
+            dataset_id,
+            view_id,
+            row_count
+        );
+
+        Ok(row_count)
+    }
+
+    fn execute_copy(&mut self, stmt: &sqlparser::ast::Statement) -> Result<RecordBatch> {
+        use sqlparser::ast::{CopyOption, CopySource, CopyTarget, Statement as SqlStatement};
+
+        let (source, to, target, options) = match stmt {
+            SqlStatement::Copy {
+                source,
+                to,
+                target,
+                options,
+                ..
+            } => (source, *to, target, options),
+            _ => {
+                return Err(Error::InternalError(
+                    "execute_copy called with non-COPY statement".to_string(),
+                ));
+            }
+        };
+
+        let mut delimiter = ',';
+        let mut has_header = false;
+        let mut null_string = String::new();
+        let mut _quote_char = '"';
+        let mut _escape_char = '\\';
+
+        for opt in options {
+            match opt {
+                CopyOption::Delimiter(c) => delimiter = *c,
+                CopyOption::Header(h) => has_header = *h,
+                CopyOption::Null(s) => null_string = s.clone(),
+                CopyOption::Quote(c) => _quote_char = *c,
+                CopyOption::Escape(c) => _escape_char = *c,
+                CopyOption::Format(ident) => {
+                    let format_name = ident.value.to_uppercase();
+                    if format_name == "BINARY" {
+                        return Err(Error::unsupported_feature(
+                            "COPY with BINARY format is not yet supported".to_string(),
+                        ));
+                    }
+
+                    if format_name == "TEXT" && delimiter == ',' {
+                        delimiter = '\t';
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if to {
+            self.execute_copy_to(source, target, delimiter, has_header, null_string)
+        } else {
+            self.execute_copy_from(source, target, delimiter, has_header, null_string)
+        }
+    }
+
+    fn execute_copy_from(
+        &mut self,
+        source: &sqlparser::ast::CopySource,
+        target: &sqlparser::ast::CopyTarget,
+        delimiter: char,
+        has_header: bool,
+        null_string: String,
+    ) -> Result<RecordBatch> {
+        use sqlparser::ast::{CopySource, CopyTarget};
+        use yachtsql_storage::Row;
+
+        let (table_name, columns) = match source {
+            CopySource::Table {
+                table_name,
+                columns,
+            } => {
+                let name = table_name.to_string();
+                let cols: Vec<String> = columns.iter().map(|c| c.value.clone()).collect();
+                (name, if cols.is_empty() { None } else { Some(cols) })
+            }
+            CopySource::Query(_) => {
+                return Err(Error::invalid_query(
+                    "COPY (query) FROM is not supported - use COPY table FROM".to_string(),
+                ));
+            }
+        };
+
+        let file_path = match target {
+            CopyTarget::File { filename } => filename.clone(),
+            CopyTarget::Stdin => {
+                return Err(Error::unsupported_feature(
+                    "COPY FROM STDIN is not yet supported".to_string(),
+                ));
+            }
+            CopyTarget::Stdout => {
+                return Err(Error::invalid_query(
+                    "COPY FROM STDOUT is not valid - use COPY TO STDOUT".to_string(),
+                ));
+            }
+            CopyTarget::Program { .. } => {
+                return Err(Error::unsupported_feature(
+                    "COPY FROM PROGRAM is not yet supported".to_string(),
+                ));
+            }
+        };
+
+        let content = std::fs::read_to_string(&file_path).map_err(|e| {
+            Error::invalid_query(format!(
+                "Could not open file '{}' for reading: {}",
+                file_path, e
+            ))
+        })?;
+
+        let (dataset_id, table_id) = self.parse_table_name(&table_name);
+        let dataset_id = dataset_id.unwrap_or_else(|| "default".to_string());
+
+        let schema = {
+            let storage = self.storage.borrow_mut();
+            let dataset = storage.get_dataset(&dataset_id).ok_or_else(|| {
+                Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id))
+            })?;
+            let table = dataset.get_table(&table_id).ok_or_else(|| {
+                Error::TableNotFound(format!("Table '{}.{}' not found", dataset_id, table_id))
+            })?;
+            table.schema().clone()
+        };
+
+        let target_columns: Vec<String> = match &columns {
+            Some(cols) => cols.clone(),
+            None => schema.fields().iter().map(|f| f.name.clone()).collect(),
+        };
+
+        let mut rows_imported = 0;
+        let lines: Vec<&str> = content.lines().collect();
+        let start_line = if has_header { 1 } else { 0 };
+
+        for line in lines.iter().skip(start_line) {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let values = self.parse_csv_line(line, delimiter)?;
+
+            if values.len() != target_columns.len() {
+                return Err(Error::invalid_query(format!(
+                    "CSV row has {} columns but expected {} columns",
+                    values.len(),
+                    target_columns.len()
+                )));
+            }
+
+            let mut row_values = Vec::with_capacity(schema.fields().len());
+            for field in schema.fields() {
+                if let Some(idx) = target_columns.iter().position(|c| c == &field.name) {
+                    let val = &values[idx];
+                    if val.is_empty() || val == &null_string {
+                        row_values.push(Value::null());
+                    } else {
+                        let typed_value = self.parse_value_for_type(val, &field.data_type)?;
+                        row_values.push(typed_value);
+                    }
+                } else {
+                    row_values.push(Value::null());
+                }
+            }
+
+            {
+                let mut storage = self.storage.borrow_mut();
+                let dataset = storage.get_dataset_mut(&dataset_id).ok_or_else(|| {
+                    Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id))
+                })?;
+                let table = dataset.get_table_mut(&table_id).ok_or_else(|| {
+                    Error::TableNotFound(format!("Table '{}.{}' not found", dataset_id, table_id))
+                })?;
+                table.insert_row(Row::from_values(row_values))?;
+            }
+
+            rows_imported += 1;
+        }
+
+        self.record_row_count(rows_imported);
+        Self::empty_result()
+    }
+
+    fn execute_copy_to(
+        &mut self,
+        source: &sqlparser::ast::CopySource,
+        target: &sqlparser::ast::CopyTarget,
+        delimiter: char,
+        has_header: bool,
+        null_string: String,
+    ) -> Result<RecordBatch> {
+        use sqlparser::ast::{CopySource, CopyTarget};
+
+        let file_path = match target {
+            CopyTarget::File { filename } => Some(filename.clone()),
+            CopyTarget::Stdout => None,
+            CopyTarget::Stdin => {
+                return Err(Error::invalid_query(
+                    "COPY TO STDIN is not valid - use COPY FROM STDIN".to_string(),
+                ));
+            }
+            CopyTarget::Program { .. } => {
+                return Err(Error::unsupported_feature(
+                    "COPY TO PROGRAM is not yet supported".to_string(),
+                ));
+            }
+        };
+
+        let (data, column_names): (Vec<Vec<Value>>, Vec<String>) = match source {
+            CopySource::Table {
+                table_name,
+                columns,
+            } => {
+                let name = table_name.to_string();
+                let col_filter: Option<Vec<String>> = if columns.is_empty() {
+                    None
+                } else {
+                    Some(columns.iter().map(|c| c.value.clone()).collect())
+                };
+
+                let (dataset_id, table_id) = self.parse_table_name(&name);
+                let dataset_id = dataset_id.unwrap_or_else(|| "default".to_string());
+
+                let storage = self.storage.borrow_mut();
+                let dataset = storage.get_dataset(&dataset_id).ok_or_else(|| {
+                    Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id))
+                })?;
+                let table = dataset.get_table(&table_id).ok_or_else(|| {
+                    Error::TableNotFound(format!("Table '{}.{}' not found", dataset_id, table_id))
+                })?;
+
+                let schema = table.schema();
+                let cols = match col_filter {
+                    Some(ref filter) => filter.clone(),
+                    None => schema.fields().iter().map(|f| f.name.clone()).collect(),
+                };
+
+                let all_rows = table.get_all_rows();
+                let rows: Vec<Vec<Value>> = all_rows
+                    .iter()
+                    .map(|row| {
+                        cols.iter()
+                            .map(|col_name| {
+                                if let Some(idx) =
+                                    schema.fields().iter().position(|f| &f.name == col_name)
+                                {
+                                    row.values().get(idx).cloned().unwrap_or(Value::null())
+                                } else {
+                                    Value::null()
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                (rows, cols)
+            }
+            CopySource::Query(query) => {
+                let sql = format!("{}", query);
+                let result = self.execute_sql(&sql)?;
+                let cols: Vec<String> = result
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                let rows: Vec<Vec<Value>> = result
+                    .rows()
+                    .map(|rs| rs.iter().map(|r| r.values().to_vec()).collect())
+                    .unwrap_or_default();
+                (rows, cols)
+            }
+        };
+
+        let mut output = String::new();
+
+        if has_header {
+            output.push_str(&column_names.join(&delimiter.to_string()));
+            output.push('\n');
+        }
+
+        for row in &data {
+            let line: Vec<String> = row
+                .iter()
+                .map(|v| self.value_to_csv_string(v, &null_string))
+                .collect();
+            output.push_str(&line.join(&delimiter.to_string()));
+            output.push('\n');
+        }
+
+        if let Some(path) = file_path {
+            std::fs::write(&path, &output).map_err(|e| {
+                Error::invalid_query(format!("Could not write to file '{}': {}", path, e))
+            })?;
+        } else {
+            print!("{}", output);
+        }
+
+        self.record_row_count(data.len());
+        Self::empty_result()
+    }
+
+    fn parse_csv_line(&self, line: &str, delimiter: char) -> Result<Vec<String>> {
+        let mut values = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut chars = line.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if in_quotes {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        current.push('"');
+                        chars.next();
+                    } else {
+                        in_quotes = false;
+                    }
+                } else {
+                    current.push(c);
+                }
+            } else if c == '"' {
+                in_quotes = true;
+            } else if c == delimiter {
+                values.push(current.clone());
+                current.clear();
+            } else {
+                current.push(c);
+            }
+        }
+        values.push(current);
+
+        Ok(values)
+    }
+
+    fn parse_value_for_type(&self, val: &str, data_type: &DataType) -> Result<Value> {
+        match data_type {
+            DataType::Int64 => val
+                .parse::<i64>()
+                .map(Value::int64)
+                .map_err(|_| Error::invalid_query(format!("Cannot parse '{}' as INT64", val))),
+            DataType::Float64 => val
+                .parse::<f64>()
+                .map(Value::float64)
+                .map_err(|_| Error::invalid_query(format!("Cannot parse '{}' as FLOAT64", val))),
+            DataType::String => Ok(Value::string(val.to_string())),
+            DataType::Bool => match val.to_lowercase().as_str() {
+                "true" | "t" | "1" | "yes" => Ok(Value::bool_val(true)),
+                "false" | "f" | "0" | "no" => Ok(Value::bool_val(false)),
+                _ => Err(Error::invalid_query(format!(
+                    "Cannot parse '{}' as BOOL",
+                    val
+                ))),
+            },
+            DataType::Date => {
+                let date = chrono::NaiveDate::parse_from_str(val, "%Y-%m-%d")
+                    .map_err(|_| Error::invalid_query(format!("Cannot parse '{}' as DATE", val)))?;
+                Ok(Value::date(date))
+            }
+            DataType::Timestamp => {
+                use chrono::TimeZone;
+
+                if let Ok(naive_ts) =
+                    chrono::NaiveDateTime::parse_from_str(val, "%Y-%m-%d %H:%M:%S")
+                {
+                    let ts = chrono::Utc.from_utc_datetime(&naive_ts);
+                    return Ok(Value::timestamp(ts));
+                }
+                if let Ok(naive_ts) =
+                    chrono::NaiveDateTime::parse_from_str(val, "%Y-%m-%dT%H:%M:%S")
+                {
+                    let ts = chrono::Utc.from_utc_datetime(&naive_ts);
+                    return Ok(Value::timestamp(ts));
+                }
+                Err(Error::invalid_query(format!(
+                    "Cannot parse '{}' as TIMESTAMP",
+                    val
+                )))
+            }
+            _ => Ok(Value::string(val.to_string())),
+        }
+    }
+
+    fn value_to_csv_string(&self, value: &Value, null_string: &str) -> String {
+        if value.is_null() {
+            return null_string.to_string();
+        }
+
+        if value.data_type() == DataType::String {
+            if let Some(s) = value.as_str() {
+                if s.contains(',') || s.contains('"') || s.contains('\n') {
+                    return format!("\"{}\"", s.replace('"', "\"\""));
+                } else {
+                    return s.to_string();
+                }
+            }
+        }
+
+        value.to_string()
+    }
+}
+
+impl Default for QueryExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn derive_output_name_from_expr(expr: &sqlparser::ast::Expr) -> String {
+    match expr {
+        sqlparser::ast::Expr::Identifier(ident) => ident.value.clone(),
+        sqlparser::ast::Expr::CompoundIdentifier(parts) => parts
+            .last()
+            .map(|p| p.value.clone())
+            .unwrap_or_else(|| "?column?".to_string()),
+        sqlparser::ast::Expr::Function(func) => func.name.to_string().to_lowercase(),
+        sqlparser::ast::Expr::BinaryOp { .. } => "?column?".to_string(),
+        sqlparser::ast::Expr::UnaryOp { expr: inner, .. } => derive_output_name_from_expr(inner),
+        sqlparser::ast::Expr::Nested(inner) => derive_output_name_from_expr(inner),
+        sqlparser::ast::Expr::Cast { .. } => "?column?".to_string(),
+        _ => "?column?".to_string(),
+    }
+}

@@ -1,0 +1,233 @@
+use sqlparser::ast;
+use yachtsql_core::error::{Error, Result};
+use yachtsql_ir::expr::{Expr, LiteralValue};
+
+use super::super::LogicalPlanBuilder;
+
+impl LogicalPlanBuilder {
+    pub(super) fn build_json_arrow_path(expr: &ast::Expr) -> Result<String> {
+        match expr {
+            ast::Expr::BinaryOp {
+                left,
+                op: ast::BinaryOperator::Arrow,
+                right,
+            } => {
+                let left_path = Self::build_json_arrow_path(left)?;
+                let right_key = match right.as_ref() {
+                    ast::Expr::Value(ast::ValueWithSpan {
+                        value: ast::Value::SingleQuotedString(s),
+                        ..
+                    }) => s.clone(),
+                    ast::Expr::Value(ast::ValueWithSpan {
+                        value: ast::Value::Number(n, _),
+                        ..
+                    }) => n.to_string(),
+                    _ => {
+                        return Err(Error::invalid_query(
+                            "JSON arrow operator right side must be string or number".to_string(),
+                        ));
+                    }
+                };
+
+                if left_path.is_empty() {
+                    Ok(Self::format_json_path_key(&right_key))
+                } else {
+                    Ok(format!(
+                        "{}.{}",
+                        left_path,
+                        Self::format_json_path_key(&right_key)
+                    ))
+                }
+            }
+            _ => Ok(String::new()),
+        }
+    }
+
+    pub(super) fn format_json_path_key(key: &str) -> String {
+        if key.parse::<usize>().is_ok() {
+            format!("[{}]", key)
+        } else {
+            key.to_string()
+        }
+    }
+
+    pub(super) fn make_json_arrow_function(
+        &self,
+        func_name: &str,
+        left: &ast::Expr,
+        right: &ast::Expr,
+    ) -> Result<Expr> {
+        let json_col = self.sql_expr_to_expr(left)?;
+        let path = Self::build_json_arrow_path(left)?;
+        let key = match right {
+            ast::Expr::Value(ast::ValueWithSpan {
+                value: ast::Value::SingleQuotedString(s),
+                ..
+            }) => s.clone(),
+            ast::Expr::Value(ast::ValueWithSpan {
+                value: ast::Value::Number(n, _),
+                ..
+            }) => n.to_string(),
+            _ => {
+                return Err(Error::invalid_query(
+                    "JSON arrow operator right side must be string or number".to_string(),
+                ));
+            }
+        };
+        let full_path = if path.is_empty() {
+            Self::format_json_path_key(&key)
+        } else {
+            format!("{}.{}", path, Self::format_json_path_key(&key))
+        };
+        Ok(Expr::Function {
+            name: yachtsql_ir::FunctionName::from_str(func_name),
+            args: vec![json_col, Expr::Literal(LiteralValue::String(full_path))],
+        })
+    }
+
+    pub(super) fn make_json_path_array_function(
+        &self,
+        func_name: &str,
+        left: &ast::Expr,
+        right: &ast::Expr,
+    ) -> Result<Expr> {
+        let json_col = self.sql_expr_to_expr(left)?;
+        let path_array = self.sql_expr_to_expr(right)?;
+        Ok(Expr::Function {
+            name: yachtsql_ir::FunctionName::from_str(func_name),
+            args: vec![json_col, path_array],
+        })
+    }
+
+    pub(super) fn convert_trim(
+        &self,
+        expr: &ast::Expr,
+        trim_where: &Option<ast::TrimWhereField>,
+        trim_what: &Option<Box<ast::Expr>>,
+        trim_characters: &Option<Vec<ast::Expr>>,
+    ) -> Result<Expr> {
+        let arg_expr = self.sql_expr_to_expr(expr)?;
+
+        let func_name = match trim_where {
+            Some(ast::TrimWhereField::Leading) => yachtsql_ir::FunctionName::Ltrim,
+            Some(ast::TrimWhereField::Trailing) => yachtsql_ir::FunctionName::Rtrim,
+            Some(ast::TrimWhereField::Both) | None => yachtsql_ir::FunctionName::Trim,
+        };
+
+        if let Some(chars) = trim_characters {
+            if chars.len() == 1 {
+                let char_expr = self.sql_expr_to_expr(&chars[0])?;
+
+                Ok(Expr::Function {
+                    name: yachtsql_ir::FunctionName::Custom(format!(
+                        "{}_CHARS",
+                        func_name.as_str()
+                    )),
+                    args: vec![arg_expr, char_expr],
+                })
+            } else if chars.is_empty() {
+                Ok(Expr::Function {
+                    name: func_name,
+                    args: vec![arg_expr],
+                })
+            } else {
+                Err(Error::unsupported_feature(
+                    "TRIM with multiple character sets not supported".to_string(),
+                ))
+            }
+        } else if trim_what.is_some() {
+            Err(Error::unsupported_feature(
+                "TRIM with explicit FROM clause requires different syntax".to_string(),
+            ))
+        } else {
+            Ok(Expr::Function {
+                name: func_name,
+                args: vec![arg_expr],
+            })
+        }
+    }
+
+    pub(super) fn convert_interval(&self, interval: &ast::Interval) -> Result<Expr> {
+        let value_expr = match interval.value.as_ref() {
+            ast::Expr::Value(ast::ValueWithSpan {
+                value: ast::Value::Number(s, _),
+                ..
+            }) => s
+                .parse::<i64>()
+                .map_err(|_| Error::invalid_query(format!("Invalid interval value: {}", s)))?,
+            ast::Expr::Value(ast::ValueWithSpan {
+                value: ast::Value::SingleQuotedString(s) | ast::Value::DoubleQuotedString(s),
+                ..
+            }) => s
+                .parse::<i64>()
+                .map_err(|_| Error::invalid_query(format!("Invalid interval value: {}", s)))?,
+            ast::Expr::UnaryOp {
+                op: ast::UnaryOperator::Minus,
+                expr,
+            } => match expr.as_ref() {
+                ast::Expr::Value(ast::ValueWithSpan {
+                    value:
+                        ast::Value::Number(s, _)
+                        | ast::Value::SingleQuotedString(s)
+                        | ast::Value::DoubleQuotedString(s),
+                    ..
+                }) => {
+                    let num = s.parse::<i64>().map_err(|_| {
+                        Error::invalid_query(format!("Invalid interval value: {}", s))
+                    })?;
+                    -num
+                }
+                _ => {
+                    return Err(Error::unsupported_feature(
+                        "Complex interval value expressions not supported".to_string(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(Error::unsupported_feature(
+                    "INTERVAL value must be a number or string literal".to_string(),
+                ));
+            }
+        };
+
+        let unit = match &interval.leading_field {
+            Some(field) => field.to_string().to_uppercase(),
+            None => {
+                return Err(Error::invalid_query(
+                    "INTERVAL requires a unit (DAY, MONTH, YEAR, etc.)".to_string(),
+                ));
+            }
+        };
+
+        Ok(Expr::Function {
+            name: yachtsql_ir::FunctionName::Custom("INTERVAL_LITERAL".to_string()),
+            args: vec![
+                Expr::Literal(LiteralValue::Int64(value_expr)),
+                Expr::Literal(LiteralValue::String(unit)),
+            ],
+        })
+    }
+
+    pub(super) fn convert_extract(
+        &self,
+        field: &ast::DateTimeField,
+        expr: &ast::Expr,
+    ) -> Result<Expr> {
+        let field_name = format!("{:?}", field).to_uppercase();
+        let date_arg = self.sql_expr_to_expr(expr)?;
+
+        Ok(Expr::Function {
+            name: yachtsql_ir::FunctionName::Extract,
+            args: vec![Expr::Literal(LiteralValue::String(field_name)), date_arg],
+        })
+    }
+
+    pub(super) fn convert_position(&self, expr: &ast::Expr, in_expr: &ast::Expr) -> Result<Expr> {
+        let substring_expr = self.sql_expr_to_expr(expr)?;
+        let string_expr = self.sql_expr_to_expr(in_expr)?;
+        Ok(Expr::Function {
+            name: yachtsql_ir::FunctionName::Position,
+            args: vec![substring_expr, string_expr],
+        })
+    }
+}
