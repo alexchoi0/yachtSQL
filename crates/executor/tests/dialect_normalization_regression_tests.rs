@@ -1,3 +1,4 @@
+use debug_print::debug_eprintln;
 use yachtsql_executor::QueryExecutor;
 use yachtsql_parser::DialectType;
 
@@ -307,9 +308,7 @@ fn postgresql_array_literal_normalization_regression() {
             debug_eprintln!(
                 "[test::dialect_normalization] WARNING: :: with array literals not fully normalized (known limitation)"
             );
-        } else {
         }
-    } else {
     }
 }
 

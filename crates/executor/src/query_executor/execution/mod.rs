@@ -45,15 +45,26 @@ use yachtsql_optimizer::rules::{
     IndexSelectionRule, SubqueryFlattening, UnionOptimization, WindowOptimization,
 };
 use yachtsql_parser::DialectType;
-use yachtsql_storage::{Schema, SharedTransactionState, StorageLayout};
+use yachtsql_storage::{Schema, SharedTransactionState};
 
 use self::session::SessionState;
 use self::transaction::SessionTransactionController;
 use crate::RecordBatch;
+use crate::catalog_adapter::SnapshotCatalog;
 
 fn create_default_optimizer() -> yachtsql_optimizer::Optimizer {
     yachtsql_optimizer::Optimizer::new()
-        .with_rule(Box::new(IndexSelectionRule::new()))
+        .with_rule(Box::new(IndexSelectionRule::disabled()))
+        .with_rule(Box::new(SubqueryFlattening::new()))
+        .with_rule(Box::new(WindowOptimization::new()))
+        .with_rule(Box::new(UnionOptimization::new()))
+}
+
+fn create_optimizer_with_catalog(
+    catalog: std::sync::Arc<SnapshotCatalog>,
+) -> yachtsql_optimizer::Optimizer {
+    yachtsql_optimizer::Optimizer::new()
+        .with_rule(Box::new(IndexSelectionRule::with_catalog(catalog)))
         .with_rule(Box::new(SubqueryFlattening::new()))
         .with_rule(Box::new(WindowOptimization::new()))
         .with_rule(Box::new(UnionOptimization::new()))
@@ -61,21 +72,14 @@ fn create_default_optimizer() -> yachtsql_optimizer::Optimizer {
 
 pub struct QueryExecutor {
     pub storage: Rc<RefCell<yachtsql_storage::Storage>>,
-
     pub transaction_manager: Rc<RefCell<yachtsql_storage::TransactionManager>>,
-
     pub temporary_storage: Rc<RefCell<yachtsql_storage::TempStorage>>,
     session: SessionState,
     session_tx: SessionTransactionController,
-
     resource_limits: crate::resource_limits::ResourceLimitsConfig,
-
     optimizer: yachtsql_optimizer::Optimizer,
-
     plan_cache: Rc<RefCell<crate::plan_cache::PlanCache>>,
-
     memory_pool: Option<Rc<crate::resource_limits::MemoryPool>>,
-
     query_registry: Option<Rc<crate::resource_limits::QueryRegistry>>,
 }
 
@@ -140,6 +144,18 @@ impl QueryExecutor {
         self.session.dialect()
     }
 
+    pub fn enable_index_selection(&mut self, dataset_name: &str) {
+        let storage = self.storage.borrow();
+        if let Some(dataset) = storage.get_dataset(dataset_name) {
+            let catalog = SnapshotCatalog::from_dataset(dataset).into_arc();
+            self.optimizer = create_optimizer_with_catalog(catalog);
+        }
+    }
+
+    pub fn disable_index_selection(&mut self) {
+        self.optimizer = create_default_optimizer();
+    }
+
     pub fn with_shared_session(existing: &mut QueryExecutor) -> Self {
         let shared_state = existing.ensure_shared_transaction_state();
 
@@ -194,6 +210,24 @@ impl QueryExecutor {
             session_tx: SessionTransactionController::new(),
             resource_limits: crate::resource_limits::ResourceLimitsConfig::default(),
             optimizer: create_default_optimizer(),
+            plan_cache: Rc::new(RefCell::new(crate::plan_cache::PlanCache::new())),
+            memory_pool: None,
+            query_registry: None,
+        }
+    }
+
+    pub fn new_without_optimizer() -> Self {
+        let storage = Rc::new(RefCell::new(yachtsql_storage::Storage::new()));
+        let session = SessionState::new(DialectType::PostgreSQL);
+
+        Self {
+            storage,
+            transaction_manager: Rc::new(RefCell::new(yachtsql_storage::TransactionManager::new())),
+            temporary_storage: Rc::new(RefCell::new(yachtsql_storage::TempStorage::new())),
+            session,
+            session_tx: SessionTransactionController::new(),
+            resource_limits: crate::resource_limits::ResourceLimitsConfig::default(),
+            optimizer: yachtsql_optimizer::Optimizer::disabled(),
             plan_cache: Rc::new(RefCell::new(crate::plan_cache::PlanCache::new())),
             memory_pool: None,
             query_registry: None,
@@ -997,7 +1031,7 @@ impl QueryExecutor {
     }
 
     fn execute_copy(&mut self, stmt: &sqlparser::ast::Statement) -> Result<RecordBatch> {
-        use sqlparser::ast::{CopyOption, CopySource, CopyTarget, Statement as SqlStatement};
+        use sqlparser::ast::{CopyOption, Statement as SqlStatement};
 
         let (source, to, target, options) = match stmt {
             SqlStatement::Copy {

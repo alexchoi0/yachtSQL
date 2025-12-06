@@ -38,7 +38,16 @@ impl LogicalPlanBuilder {
 
             ast::Expr::BinaryOp { left, op, right } => match op {
                 ast::BinaryOperator::Arrow => {
-                    self.make_json_arrow_function("JSON_EXTRACT_JSON", left, right)
+                    if matches!(right.as_ref(), ast::Expr::Array(_)) {
+                        let left_expr = self.sql_expr_to_expr(left)?;
+                        let right_expr = self.sql_expr_to_expr(right)?;
+                        Ok(Expr::Function {
+                            name: yachtsql_ir::FunctionName::parse("HSTORE_GET_VALUES"),
+                            args: vec![left_expr, right_expr],
+                        })
+                    } else {
+                        self.make_json_arrow_function("JSON_EXTRACT_JSON", left, right)
+                    }
                 }
                 ast::BinaryOperator::LongArrow => {
                     self.make_json_arrow_function("JSON_VALUE_TEXT", left, right)
@@ -57,6 +66,30 @@ impl LogicalPlanBuilder {
                 }
                 ast::BinaryOperator::HashLongArrow => {
                     self.make_json_path_array_function("JSON_EXTRACT_PATH_ARRAY_TEXT", left, right)
+                }
+                ast::BinaryOperator::Question => {
+                    let left_expr = self.sql_expr_to_expr(left)?;
+                    let right_expr = self.sql_expr_to_expr(right)?;
+                    Ok(Expr::Function {
+                        name: yachtsql_ir::FunctionName::parse("HSTORE_EXISTS"),
+                        args: vec![left_expr, right_expr],
+                    })
+                }
+                ast::BinaryOperator::QuestionAnd => {
+                    let left_expr = self.sql_expr_to_expr(left)?;
+                    let right_expr = self.sql_expr_to_expr(right)?;
+                    Ok(Expr::Function {
+                        name: yachtsql_ir::FunctionName::parse("HSTORE_EXISTS_ALL"),
+                        args: vec![left_expr, right_expr],
+                    })
+                }
+                ast::BinaryOperator::QuestionPipe => {
+                    let left_expr = self.sql_expr_to_expr(left)?;
+                    let right_expr = self.sql_expr_to_expr(right)?;
+                    Ok(Expr::Function {
+                        name: yachtsql_ir::FunctionName::parse("HSTORE_EXISTS_ANY"),
+                        args: vec![left_expr, right_expr],
+                    })
                 }
                 ast::BinaryOperator::Custom(op_str) => match op_str.as_str() {
                     "#>" => {
@@ -83,6 +116,17 @@ impl LogicalPlanBuilder {
             },
 
             ast::Expr::UnaryOp { op, expr } => {
+                if *op == ast::UnaryOperator::Minus
+                    && let ast::Expr::Value(value) = expr.as_ref()
+                    && let ast::Value::Number(s, _) = &value.value
+                    && !s.contains('.')
+                    && !s.to_lowercase().contains('e')
+                {
+                    let neg_str = format!("-{}", s);
+                    if let Ok(i) = neg_str.parse::<i64>() {
+                        return Ok(Expr::Literal(LiteralValue::Int64(i)));
+                    }
+                }
                 let inner_expr = self.sql_expr_to_expr(expr)?;
                 let unary_op = self.sql_unary_op_to_op(op)?;
                 Ok(Expr::unary_op(unary_op, inner_expr))
@@ -90,7 +134,7 @@ impl LogicalPlanBuilder {
 
             ast::Expr::Function(function) => {
                 let name_str = function.name.to_string();
-                let name = yachtsql_ir::FunctionName::from_str(&name_str);
+                let name = yachtsql_ir::FunctionName::parse(&name_str);
                 let (args, has_distinct, order_by_clauses) = match &function.args {
                     ast::FunctionArguments::None => (Vec::new(), false, None),
                     ast::FunctionArguments::Subquery(_) => {
@@ -412,6 +456,13 @@ impl LogicalPlanBuilder {
 
             ast::Expr::Position { expr, r#in } => self.convert_position(expr, r#in),
 
+            ast::Expr::Substring {
+                expr,
+                substring_from,
+                substring_for,
+                ..
+            } => self.convert_substring(expr, substring_from, substring_for),
+
             ast::Expr::Ceil { expr, .. } => {
                 let arg_expr = self.sql_expr_to_expr(expr)?;
                 Ok(Expr::Function {
@@ -477,6 +528,38 @@ impl LogicalPlanBuilder {
                 Ok(Expr::Tuple(tuple_exprs))
             }
 
+            ast::Expr::IsDistinctFrom(left, right) => {
+                let left_expr = self.sql_expr_to_expr(left)?;
+                let right_expr = self.sql_expr_to_expr(right)?;
+                Ok(Expr::IsDistinctFrom {
+                    left: Box::new(left_expr),
+                    right: Box::new(right_expr),
+                    negated: false,
+                })
+            }
+
+            ast::Expr::IsNotDistinctFrom(left, right) => {
+                let left_expr = self.sql_expr_to_expr(left)?;
+                let right_expr = self.sql_expr_to_expr(right)?;
+                Ok(Expr::IsDistinctFrom {
+                    left: Box::new(left_expr),
+                    right: Box::new(right_expr),
+                    negated: true,
+                })
+            }
+
+            ast::Expr::AtTimeZone {
+                timestamp,
+                time_zone,
+            } => {
+                let ts_expr = self.sql_expr_to_expr(timestamp)?;
+                let tz_expr = self.sql_expr_to_expr(time_zone)?;
+                Ok(Expr::Function {
+                    name: yachtsql_ir::FunctionName::parse("AT_TIME_ZONE"),
+                    args: vec![ts_expr, tz_expr],
+                })
+            }
+
             _ => Err(Error::unsupported_feature(format!(
                 "Expression type not supported: {:?}",
                 expr
@@ -495,13 +578,13 @@ impl LogicalPlanBuilder {
 
         if let Some(expected_type) = first_type {
             for elem in elements {
-                if let Some(elem_type) = Self::get_literal_type_category(elem) {
-                    if elem_type != expected_type {
-                        return Err(Error::invalid_query(format!(
-                            "Array elements must have compatible types, found both {:?} and {:?}",
-                            expected_type, elem_type
-                        )));
-                    }
+                if let Some(elem_type) = Self::get_literal_type_category(elem)
+                    && elem_type != expected_type
+                {
+                    return Err(Error::invalid_query(format!(
+                        "Array elements must have compatible types, found both {:?} and {:?}",
+                        expected_type, elem_type
+                    )));
                 }
             }
         }
@@ -542,21 +625,18 @@ impl LogicalPlanBuilder {
 
         use crate::DialectType;
 
-        match name_str.to_uppercase().as_str() {
-            "ROW" => {
-                let fields: Vec<StructLiteralField> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, expr)| StructLiteralField {
-                        name: format!("f{}", idx + 1),
-                        expr: expr.clone(),
-                        declared_type: None,
-                    })
-                    .collect();
+        if name_str.to_uppercase().as_str() == "ROW" {
+            let fields: Vec<StructLiteralField> = args
+                .iter()
+                .enumerate()
+                .map(|(idx, expr)| StructLiteralField {
+                    name: format!("f{}", idx + 1),
+                    expr: expr.clone(),
+                    declared_type: None,
+                })
+                .collect();
 
-                return Ok(Some(Expr::StructLiteral { fields }));
-            }
-            _ => {}
+            return Ok(Some(Expr::StructLiteral { fields }));
         }
 
         let normalized = match self.dialect {

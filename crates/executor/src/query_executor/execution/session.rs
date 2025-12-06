@@ -18,11 +18,8 @@ pub struct SessionState {
     diagnostics: SessionDiagnostics,
     feature_registry: Rc<FeatureRegistry>,
     function_registry: Rc<crate::functions::FunctionRegistry>,
-
     feature_registry_snapshot: Option<Rc<FeatureRegistry>>,
-
     extension_registry: ExtensionRegistry,
-
     search_path: Vec<String>,
 }
 

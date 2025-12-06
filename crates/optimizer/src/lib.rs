@@ -1,8 +1,11 @@
+//! Query optimizer and plan transformation rules.
+
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 #![warn(rustdoc::broken_intra_doc_links)]
 #![allow(missing_docs)]
 
+pub mod catalog;
 pub mod classifier;
 pub mod cost_model;
 pub mod grouping_sets;
@@ -19,6 +22,7 @@ pub mod visitor;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+pub use catalog::{CatalogRef, EmptyCatalog, IndexCatalog, IndexInfo, IndexType};
 pub use classifier::{ComplexityLevel, QueryComplexity};
 pub use cost_model::{AggregateStrategy, Cost, CostModel, JoinStrategy, TableStats};
 pub use ordering::{OrderingProperty, OrderingRequirement, SortColumn};
@@ -134,6 +138,19 @@ impl Optimizer {
         optimizer
     }
 
+    pub fn disabled() -> Self {
+        let mut optimizer = Self {
+            inner: MultiPhaseOptimizer::new(),
+            phase_configs: BTreeMap::new(),
+        };
+        for phase in Phase::all() {
+            let config = PhaseConfig::default().with_max_iterations(0);
+            optimizer.phase_configs.insert(phase, config);
+            optimizer.inner = optimizer.inner.configure_phase(phase, config);
+        }
+        optimizer
+    }
+
     pub fn with_rule(mut self, rule: Box<dyn OptimizationRule>) -> Self {
         let inferred = infer_phase(rule.as_ref());
         self.inner = self.inner.add_rule(rule, inferred);
@@ -204,11 +221,8 @@ impl Default for Optimizer {
 pub struct MultiPhaseOptimizer {
     builder: PhaseBuilder,
     telemetry: OptimizerTelemetry,
-
     global_time_budget: Duration,
-
     enable_fast_path: bool,
-
     storage_type: StorageType,
 }
 

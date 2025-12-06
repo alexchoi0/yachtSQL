@@ -3,13 +3,9 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 pub struct ExtensionMetadata {
     pub name: String,
-
     pub description: String,
-
     pub version: String,
-
     pub functions: Vec<String>,
-
     pub types: Vec<String>,
 }
 
@@ -43,7 +39,6 @@ impl ExtensionMetadata {
 #[derive(Debug, Clone)]
 pub struct ExtensionRegistry {
     installed: HashSet<String>,
-
     available: HashMap<String, ExtensionMetadata>,
 }
 
@@ -212,10 +207,10 @@ impl ExtensionRegistry {
     pub fn function_available(&self, func_name: &str) -> bool {
         let func_upper = func_name.to_uppercase();
         for name in &self.installed {
-            if let Some(ext) = self.available.get(name) {
-                if ext.functions.iter().any(|f| f.to_uppercase() == func_upper) {
-                    return true;
-                }
+            if let Some(ext) = self.available.get(name)
+                && ext.functions.iter().any(|f| f.to_uppercase() == func_upper)
+            {
+                return true;
             }
         }
         false
@@ -224,10 +219,10 @@ impl ExtensionRegistry {
     pub fn function_provider(&self, func_name: &str) -> Option<&str> {
         let func_upper = func_name.to_uppercase();
         for name in &self.installed {
-            if let Some(ext) = self.available.get(name) {
-                if ext.functions.iter().any(|f| f.to_uppercase() == func_upper) {
-                    return Some(&ext.name);
-                }
+            if let Some(ext) = self.available.get(name)
+                && ext.functions.iter().any(|f| f.to_uppercase() == func_upper)
+            {
+                return Some(&ext.name);
             }
         }
         None

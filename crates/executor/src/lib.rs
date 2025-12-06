@@ -1,3 +1,5 @@
+//! Query execution engine for YachtSQL.
+
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::needless_return)]
 #![allow(clippy::single_match)]
@@ -24,6 +26,9 @@
 #![allow(clippy::needless_borrow)]
 #![allow(clippy::let_and_return)]
 #![allow(clippy::redundant_guards)]
+#![allow(clippy::approx_constant)]
+#![allow(clippy::redundant_pattern_matching)]
+#![allow(clippy::bool_assert_comparison)]
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
@@ -39,6 +44,7 @@ pub mod correlation;
 pub mod record_batch;
 
 pub mod ast_cache;
+pub mod catalog_adapter;
 pub mod plan_cache;
 pub mod sql_normalizer;
 

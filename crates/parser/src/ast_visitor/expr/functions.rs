@@ -80,7 +80,7 @@ impl LogicalPlanBuilder {
             format!("{}.{}", path, Self::format_json_path_key(&key))
         };
         Ok(Expr::Function {
-            name: yachtsql_ir::FunctionName::from_str(func_name),
+            name: yachtsql_ir::FunctionName::parse(func_name),
             args: vec![json_col, Expr::Literal(LiteralValue::String(full_path))],
         })
     }
@@ -94,7 +94,7 @@ impl LogicalPlanBuilder {
         let json_col = self.sql_expr_to_expr(left)?;
         let path_array = self.sql_expr_to_expr(right)?;
         Ok(Expr::Function {
-            name: yachtsql_ir::FunctionName::from_str(func_name),
+            name: yachtsql_ir::FunctionName::parse(func_name),
             args: vec![json_col, path_array],
         })
     }
@@ -135,10 +135,12 @@ impl LogicalPlanBuilder {
                     "TRIM with multiple character sets not supported".to_string(),
                 ))
             }
-        } else if trim_what.is_some() {
-            Err(Error::unsupported_feature(
-                "TRIM with explicit FROM clause requires different syntax".to_string(),
-            ))
+        } else if let Some(what) = trim_what {
+            let what_expr = self.sql_expr_to_expr(what)?;
+            Ok(Expr::Function {
+                name: yachtsql_ir::FunctionName::Custom(format!("{}_CHARS", func_name.as_str())),
+                args: vec![arg_expr, what_expr],
+            })
         } else {
             Ok(Expr::Function {
                 name: func_name,
@@ -148,19 +150,15 @@ impl LogicalPlanBuilder {
     }
 
     pub(super) fn convert_interval(&self, interval: &ast::Interval) -> Result<Expr> {
-        let value_expr = match interval.value.as_ref() {
+        let value_str = match interval.value.as_ref() {
             ast::Expr::Value(ast::ValueWithSpan {
                 value: ast::Value::Number(s, _),
                 ..
-            }) => s
-                .parse::<i64>()
-                .map_err(|_| Error::invalid_query(format!("Invalid interval value: {}", s)))?,
+            }) => s.clone(),
             ast::Expr::Value(ast::ValueWithSpan {
                 value: ast::Value::SingleQuotedString(s) | ast::Value::DoubleQuotedString(s),
                 ..
-            }) => s
-                .parse::<i64>()
-                .map_err(|_| Error::invalid_query(format!("Invalid interval value: {}", s)))?,
+            }) => s.clone(),
             ast::Expr::UnaryOp {
                 op: ast::UnaryOperator::Minus,
                 expr,
@@ -171,12 +169,7 @@ impl LogicalPlanBuilder {
                         | ast::Value::SingleQuotedString(s)
                         | ast::Value::DoubleQuotedString(s),
                     ..
-                }) => {
-                    let num = s.parse::<i64>().map_err(|_| {
-                        Error::invalid_query(format!("Invalid interval value: {}", s))
-                    })?;
-                    -num
-                }
+                }) => format!("-{}", s),
                 _ => {
                     return Err(Error::unsupported_feature(
                         "Complex interval value expressions not supported".to_string(),
@@ -190,20 +183,16 @@ impl LogicalPlanBuilder {
             }
         };
 
-        let unit = match &interval.leading_field {
-            Some(field) => field.to_string().to_uppercase(),
-            None => {
-                return Err(Error::invalid_query(
-                    "INTERVAL requires a unit (DAY, MONTH, YEAR, etc.)".to_string(),
-                ));
-            }
-        };
+        let unit = interval
+            .leading_field
+            .as_ref()
+            .map(|f| f.to_string().to_uppercase());
 
         Ok(Expr::Function {
-            name: yachtsql_ir::FunctionName::Custom("INTERVAL_LITERAL".to_string()),
+            name: yachtsql_ir::FunctionName::Custom("INTERVAL_PARSE".to_string()),
             args: vec![
-                Expr::Literal(LiteralValue::Int64(value_expr)),
-                Expr::Literal(LiteralValue::String(unit)),
+                Expr::Literal(LiteralValue::String(value_str)),
+                Expr::Literal(LiteralValue::String(unit.unwrap_or_default())),
             ],
         })
     }
@@ -228,6 +217,33 @@ impl LogicalPlanBuilder {
         Ok(Expr::Function {
             name: yachtsql_ir::FunctionName::Position,
             args: vec![substring_expr, string_expr],
+        })
+    }
+
+    pub(super) fn convert_substring(
+        &self,
+        expr: &ast::Expr,
+        substring_from: &Option<Box<ast::Expr>>,
+        substring_for: &Option<Box<ast::Expr>>,
+    ) -> Result<Expr> {
+        let string_expr = self.sql_expr_to_expr(expr)?;
+
+        let mut args = vec![string_expr];
+
+        if let Some(from_expr) = substring_from {
+            args.push(self.sql_expr_to_expr(from_expr)?);
+        }
+
+        if let Some(for_expr) = substring_for {
+            if substring_from.is_none() {
+                args.push(Expr::Literal(LiteralValue::Int64(1)));
+            }
+            args.push(self.sql_expr_to_expr(for_expr)?);
+        }
+
+        Ok(Expr::Function {
+            name: yachtsql_ir::FunctionName::Substring,
+            args,
         })
     }
 }

@@ -226,7 +226,11 @@ impl InterestingOrderRule {
                     right: Box::new(opt_right),
                     all: *all,
                 };
-                Ok((new_node, OrderingProperty::empty(), left_changed || right_changed))
+                Ok((
+                    new_node,
+                    OrderingProperty::empty(),
+                    left_changed || right_changed,
+                ))
             }
 
             PlanNode::Intersect { left, right, all } => {
@@ -240,7 +244,11 @@ impl InterestingOrderRule {
                     right: Box::new(opt_right),
                     all: *all,
                 };
-                Ok((new_node, OrderingProperty::empty(), left_changed || right_changed))
+                Ok((
+                    new_node,
+                    OrderingProperty::empty(),
+                    left_changed || right_changed,
+                ))
             }
 
             PlanNode::Except { left, right, all } => {
@@ -254,7 +262,11 @@ impl InterestingOrderRule {
                     right: Box::new(opt_right),
                     all: *all,
                 };
-                Ok((new_node, OrderingProperty::empty(), left_changed || right_changed))
+                Ok((
+                    new_node,
+                    OrderingProperty::empty(),
+                    left_changed || right_changed,
+                ))
             }
 
             PlanNode::SubqueryScan { subquery, alias } => {
@@ -292,7 +304,10 @@ impl InterestingOrderRule {
                 Ok((new_node, input_order, cte_changed || input_changed))
             }
 
-            PlanNode::Window { window_exprs, input } => {
+            PlanNode::Window {
+                window_exprs,
+                input,
+            } => {
                 let window_order = self.extract_window_ordering(window_exprs);
                 let combined = self.merge_requirements(required_order, &window_order);
 
@@ -471,11 +486,11 @@ impl InterestingOrderRule {
     }
 
     fn extract_join_key_ordering(&self, on: &Expr) -> OrderingProperty {
-        let keys = self.extract_equi_join_left_keys(on);
+        let keys = Self::extract_equi_join_left_keys(on);
         OrderingProperty::from_column_names(&keys)
     }
 
-    fn extract_equi_join_left_keys(&self, on: &Expr) -> Vec<String> {
+    fn extract_equi_join_left_keys(on: &Expr) -> Vec<String> {
         match on {
             Expr::BinaryOp {
                 left,
@@ -493,8 +508,8 @@ impl InterestingOrderRule {
                 op: yachtsql_ir::expr::BinaryOp::And,
                 right,
             } => {
-                let mut keys = self.extract_equi_join_left_keys(left);
-                keys.extend(self.extract_equi_join_left_keys(right));
+                let mut keys = Self::extract_equi_join_left_keys(left);
+                keys.extend(Self::extract_equi_join_left_keys(right));
                 keys
             }
             _ => vec![],
@@ -531,10 +546,7 @@ impl InterestingOrderRule {
         OrderingProperty::new(preserved_cols)
     }
 
-    fn extract_window_ordering(
-        &self,
-        window_exprs: &[(Expr, Option<String>)],
-    ) -> OrderingProperty {
+    fn extract_window_ordering(&self, window_exprs: &[(Expr, Option<String>)]) -> OrderingProperty {
         for (expr, _) in window_exprs {
             if let Expr::WindowFunction {
                 partition_by,
@@ -600,8 +612,9 @@ impl OptimizationRule for InterestingOrderRule {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use yachtsql_ir::expr::OrderByExpr;
+
+    use super::*;
 
     fn col(name: &str) -> Expr {
         Expr::Column {

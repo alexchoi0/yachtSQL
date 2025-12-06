@@ -55,21 +55,13 @@ pub struct Field {
     pub description: Option<String>,
     pub default_value: Option<DefaultValue>,
     pub is_unique: bool,
-
     pub identity_generation: Option<IdentityGeneration>,
-
     pub identity_sequence_name: Option<String>,
-
     pub identity_sequence_config: Option<crate::SequenceConfig>,
-
     pub is_auto_increment: bool,
-
     pub generated_expression: Option<GeneratedExpression>,
-
     pub collation: Option<String>,
-
     pub source_table: Option<String>,
-
     pub domain_name: Option<String>,
 }
 
@@ -336,6 +328,18 @@ impl Schema {
 
     pub fn field_index(&self, name: &str) -> Option<usize> {
         self.fields.iter().position(|f| f.name == name)
+    }
+
+    pub fn field_index_qualified(&self, name: &str, table: Option<&str>) -> Option<usize> {
+        match table {
+            Some(tbl) => self.fields.iter().position(|f| {
+                f.name == name
+                    && f.source_table
+                        .as_ref()
+                        .is_some_and(|src| src == tbl || src.ends_with(&format!(".{}", tbl)))
+            }),
+            None => self.field_index(name),
+        }
     }
 
     pub fn field_count(&self) -> usize {

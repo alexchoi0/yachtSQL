@@ -113,10 +113,16 @@ impl LogicalPlanBuilder {
             if let Some(orig_exprs) = original_projection {
                 let final_exprs: Vec<(Expr, Option<String>)> = orig_exprs
                     .iter()
-                    .map(|(expr, alias)| {
-                        let col_name = alias
-                            .clone()
-                            .unwrap_or_else(|| Self::expr_to_column_name(expr));
+                    .enumerate()
+                    .map(|(idx, (expr, alias))| {
+                        let col_name = if let Some(alias_name) = alias {
+                            alias_name.clone()
+                        } else {
+                            match expr {
+                                Expr::Column { name, .. } => name.clone(),
+                                _ => format!("expr_{}", idx),
+                            }
+                        };
                         (
                             Expr::Column {
                                 name: col_name,
@@ -293,7 +299,7 @@ impl LogicalPlanBuilder {
 
         let has_aggregates = projection_exprs
             .iter()
-            .any(|(expr, _)| self.is_aggregate(expr));
+            .any(|(expr, _)| self.has_aggregate(expr));
 
         if has_aggregates || !group_by_exprs.is_empty() {
             let mut all_aggregates: Vec<Expr> = Vec::new();
@@ -578,6 +584,7 @@ impl LogicalPlanBuilder {
         Ok(None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_rollup_cube_plan(
         &self,
         plan: LogicalPlan,
@@ -739,13 +746,6 @@ impl LogicalPlanBuilder {
         Ok(LogicalPlan::new((*result_plan).clone()))
     }
 
-    fn extract_column_name(expr: &Expr) -> Option<String> {
-        match expr {
-            Expr::Column { name, .. } => Some(name.clone()),
-            _ => None,
-        }
-    }
-
     fn generate_grouping_sets(
         &self,
         columns: &[Expr],
@@ -787,26 +787,6 @@ impl LogicalPlanBuilder {
             .collect()
     }
 
-    fn aggregate_to_column_reference(&self, agg: &Expr) -> Expr {
-        let col_name = match agg {
-            Expr::Function { name, args } if self.is_aggregate(agg) => {
-                Self::format_aggregate_column_name(name, args, false)
-            }
-            Expr::Aggregate {
-                name,
-                args,
-                distinct,
-                ..
-            } => Self::format_aggregate_column_name(name, args, *distinct),
-            _ => return agg.clone(),
-        };
-
-        Expr::Column {
-            name: col_name,
-            table: None,
-        }
-    }
-
     fn format_aggregate_column_name(
         func_name: &yachtsql_ir::FunctionName,
         args: &[Expr],
@@ -845,6 +825,39 @@ impl LogicalPlanBuilder {
     }
 
     #[allow(clippy::only_used_in_recursion)]
+    fn has_aggregate(&self, expr: &Expr) -> bool {
+        if self.is_aggregate(expr) {
+            return true;
+        }
+        match expr {
+            Expr::BinaryOp { left, right, .. } => {
+                self.has_aggregate(left) || self.has_aggregate(right)
+            }
+            Expr::UnaryOp { expr, .. } => self.has_aggregate(expr),
+            Expr::Function { args, .. } => args.iter().any(|arg| self.has_aggregate(arg)),
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                operand.as_ref().is_some_and(|o| self.has_aggregate(o))
+                    || when_then
+                        .iter()
+                        .any(|(w, t)| self.has_aggregate(w) || self.has_aggregate(t))
+                    || else_expr.as_ref().is_some_and(|e| self.has_aggregate(e))
+            }
+            Expr::Cast { expr, .. } | Expr::TryCast { expr, .. } => self.has_aggregate(expr),
+            Expr::InList { expr, list, .. } => {
+                self.has_aggregate(expr) || list.iter().any(|item| self.has_aggregate(item))
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => self.has_aggregate(expr) || self.has_aggregate(low) || self.has_aggregate(high),
+            _ => false,
+        }
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
     fn has_window_function(&self, expr: &Expr) -> bool {
         match expr {
             Expr::WindowFunction { .. } => true,
@@ -875,7 +888,7 @@ impl LogicalPlanBuilder {
     }
 
     fn group_by_expr_column_name(index: usize) -> String {
-        format!("expr_{}", index)
+        format!("group_{}", index)
     }
 
     fn rewrite_group_by_expr_to_column(
@@ -1089,6 +1102,7 @@ impl LogicalPlanBuilder {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn inject_order_by_columns_into_projection(
         &self,
         plan: &LogicalPlan,
@@ -1103,18 +1117,18 @@ impl LogicalPlanBuilder {
             Self::collect_column_names(&sort_expr.expr, &mut order_by_columns);
         }
 
-        let mut projection_columns = std::collections::HashSet::new();
+        let mut projection_output_columns = std::collections::HashSet::new();
         for (expr, alias) in expressions {
             if let Some(alias_name) = alias {
-                projection_columns.insert(alias_name.clone());
+                projection_output_columns.insert(alias_name.clone());
+            } else if let Expr::Column { name, .. } = expr {
+                projection_output_columns.insert(name.clone());
             }
-
-            Self::collect_column_names(expr, &mut projection_columns);
         }
 
         let missing_columns: Vec<String> = order_by_columns
             .iter()
-            .filter(|col| !projection_columns.contains(*col))
+            .filter(|col| !projection_output_columns.contains(*col))
             .cloned()
             .collect();
 
@@ -1141,63 +1155,6 @@ impl LogicalPlanBuilder {
         });
 
         (modified_plan, Some(original_exprs))
-    }
-
-    fn expr_to_column_name(expr: &Expr) -> String {
-        match expr {
-            Expr::Column { name, .. } => name.clone(),
-            Expr::Function { name, args, .. } => {
-                if args.is_empty() {
-                    format!("{}()", name.as_str())
-                } else if args.len() == 1 {
-                    if let Expr::Column { name: col_name, .. } = &args[0] {
-                        format!("{}({})", name.as_str(), col_name)
-                    } else if let Expr::Wildcard = &args[0] {
-                        format!("{}(*)", name.as_str())
-                    } else {
-                        format!("{}(...)", name.as_str())
-                    }
-                } else {
-                    format!("{}(...)", name.as_str())
-                }
-            }
-            Expr::Aggregate {
-                name,
-                args,
-                distinct,
-                ..
-            } => {
-                if args.is_empty() || args.first().map_or(false, |a| matches!(a, Expr::Wildcard)) {
-                    if *distinct {
-                        format!("{}(DISTINCT *)", name.as_str())
-                    } else {
-                        format!("{}(*)", name.as_str())
-                    }
-                } else if args.len() == 1 {
-                    if let Expr::Column { name: col_name, .. } = &args[0] {
-                        if *distinct {
-                            format!("{}(DISTINCT {})", name.as_str(), col_name)
-                        } else {
-                            format!("{}({})", name.as_str(), col_name)
-                        }
-                    } else {
-                        format!("{}(...)", name.as_str())
-                    }
-                } else {
-                    format!("{}(...)", name.as_str())
-                }
-            }
-            Expr::BinaryOp { left, op, right } => {
-                format!(
-                    "{} {:?} {}",
-                    Self::expr_to_column_name(left),
-                    op,
-                    Self::expr_to_column_name(right)
-                )
-            }
-            Expr::Literal(lit) => format!("{:?}", lit),
-            _ => "expr".to_string(),
-        }
     }
 
     fn collect_column_names(expr: &Expr, columns: &mut std::collections::HashSet<String>) {
@@ -1365,12 +1322,6 @@ impl LogicalPlanBuilder {
             return Ok(LogicalPlan::new(PlanNode::EmptyRelation));
         }
 
-        if from.len() > 1 {
-            return Err(Error::unsupported_feature(
-                "Multiple tables in FROM not yet supported".to_string(),
-            ));
-        }
-
         let table_with_joins = &from[0];
         let mut plan = self.table_factor_to_plan(&table_with_joins.relation)?;
 
@@ -1461,6 +1412,102 @@ impl LogicalPlanBuilder {
                     join_type,
                 })
             };
+        }
+
+        for table_with_joins in from.iter().skip(1) {
+            let right_plan = self.table_factor_to_plan(&table_with_joins.relation)?;
+            plan = LogicalPlan::new(PlanNode::Join {
+                left: plan.root,
+                right: right_plan.root,
+                on: Expr::Literal(LiteralValue::Boolean(true)),
+                join_type: JoinType::Cross,
+            });
+
+            for join in &table_with_joins.joins {
+                let is_lateral = Self::is_lateral_derived_table(&join.relation);
+
+                let right_plan = self.plan_join_relation(&join.relation, &plan)?;
+
+                let join_type = match join.join_operator {
+                    ast::JoinOperator::Join(_) => JoinType::Inner,
+                    ast::JoinOperator::Inner(_) => JoinType::Inner,
+                    ast::JoinOperator::Left(_) => JoinType::Left,
+                    ast::JoinOperator::LeftOuter(_) => JoinType::Left,
+                    ast::JoinOperator::Right(_) => JoinType::Right,
+                    ast::JoinOperator::RightOuter(_) => JoinType::Right,
+                    ast::JoinOperator::FullOuter(_) => JoinType::Full,
+                    ast::JoinOperator::CrossJoin(_) => JoinType::Cross,
+                    ast::JoinOperator::CrossApply => JoinType::Cross,
+                    ast::JoinOperator::OuterApply => JoinType::Left,
+                    _ => {
+                        return Err(Error::unsupported_feature(
+                            "Join type not supported".to_string(),
+                        ));
+                    }
+                };
+
+                let is_apply = matches!(
+                    join.join_operator,
+                    ast::JoinOperator::CrossApply | ast::JoinOperator::OuterApply
+                );
+                let is_lateral = is_lateral || is_apply;
+
+                let on_expr = match &join.join_operator {
+                    ast::JoinOperator::Join(ast::JoinConstraint::On(expr))
+                    | ast::JoinOperator::Inner(ast::JoinConstraint::On(expr))
+                    | ast::JoinOperator::Left(ast::JoinConstraint::On(expr))
+                    | ast::JoinOperator::LeftOuter(ast::JoinConstraint::On(expr))
+                    | ast::JoinOperator::Right(ast::JoinConstraint::On(expr))
+                    | ast::JoinOperator::RightOuter(ast::JoinConstraint::On(expr))
+                    | ast::JoinOperator::FullOuter(ast::JoinConstraint::On(expr)) => {
+                        self.sql_expr_to_expr(expr)?
+                    }
+                    ast::JoinOperator::Join(ast::JoinConstraint::Using(cols))
+                    | ast::JoinOperator::Inner(ast::JoinConstraint::Using(cols))
+                    | ast::JoinOperator::Left(ast::JoinConstraint::Using(cols))
+                    | ast::JoinOperator::LeftOuter(ast::JoinConstraint::Using(cols))
+                    | ast::JoinOperator::Right(ast::JoinConstraint::Using(cols))
+                    | ast::JoinOperator::RightOuter(ast::JoinConstraint::Using(cols))
+                    | ast::JoinOperator::FullOuter(ast::JoinConstraint::Using(cols)) => {
+                        let ident_cols = Self::object_names_to_idents(cols)?;
+                        self.build_using_condition(&ident_cols)?
+                    }
+                    ast::JoinOperator::Join(ast::JoinConstraint::Natural)
+                    | ast::JoinOperator::Inner(ast::JoinConstraint::Natural)
+                    | ast::JoinOperator::Left(ast::JoinConstraint::Natural)
+                    | ast::JoinOperator::LeftOuter(ast::JoinConstraint::Natural)
+                    | ast::JoinOperator::Right(ast::JoinConstraint::Natural)
+                    | ast::JoinOperator::RightOuter(ast::JoinConstraint::Natural)
+                    | ast::JoinOperator::FullOuter(ast::JoinConstraint::Natural) => {
+                        self.build_natural_join_condition(&plan, &right_plan)?
+                    }
+                    ast::JoinOperator::CrossJoin(_) => Expr::Literal(LiteralValue::Boolean(true)),
+                    ast::JoinOperator::CrossApply | ast::JoinOperator::OuterApply => {
+                        Expr::Literal(LiteralValue::Boolean(true))
+                    }
+                    _ => {
+                        return Err(Error::unsupported_feature(
+                            "Join constraint not supported".to_string(),
+                        ));
+                    }
+                };
+
+                plan = if is_lateral {
+                    LogicalPlan::new(PlanNode::LateralJoin {
+                        left: plan.root,
+                        right: right_plan.root,
+                        on: on_expr,
+                        join_type,
+                    })
+                } else {
+                    LogicalPlan::new(PlanNode::Join {
+                        left: plan.root,
+                        right: right_plan.root,
+                        on: on_expr,
+                        join_type,
+                    })
+                };
+            }
         }
 
         Ok(plan)

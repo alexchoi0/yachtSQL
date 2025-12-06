@@ -39,8 +39,22 @@ impl LogicalPlanBuilder {
         value: &str,
     ) -> Result<Expr> {
         match data_type {
-            ast::DataType::Date => Ok(Expr::Literal(LiteralValue::Date(value.to_string()))),
+            ast::DataType::Date => {
+                if chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err() {
+                    return Err(Error::invalid_query(format!(
+                        "Invalid date format: '{}'. Expected format: YYYY-MM-DD",
+                        value
+                    )));
+                }
+                Ok(Expr::Literal(LiteralValue::Date(value.to_string())))
+            }
             ast::DataType::Timestamp(_, _) => {
+                if yachtsql_core::types::parse_timestamp_to_utc(value).is_none() {
+                    return Err(Error::invalid_query(format!(
+                        "Invalid timestamp format: '{}'",
+                        value
+                    )));
+                }
                 Ok(Expr::Literal(LiteralValue::Timestamp(value.to_string())))
             }
             ast::DataType::Uuid => Ok(Expr::Literal(LiteralValue::Uuid(value.to_string()))),
@@ -77,6 +91,32 @@ impl LogicalPlanBuilder {
             }
             ast::DataType::Custom(name, _) if Self::object_name_matches(name, "MACADDR8") => {
                 Ok(Expr::Literal(LiteralValue::MacAddr8(value.to_string())))
+            }
+            ast::DataType::GeometricType(kind) => {
+                use sqlparser::ast::GeometricTypeKind;
+                match kind {
+                    GeometricTypeKind::Point => {
+                        Ok(Expr::Literal(LiteralValue::Point(value.to_string())))
+                    }
+                    GeometricTypeKind::GeometricBox => {
+                        Ok(Expr::Literal(LiteralValue::PgBox(value.to_string())))
+                    }
+                    GeometricTypeKind::Circle => {
+                        Ok(Expr::Literal(LiteralValue::Circle(value.to_string())))
+                    }
+                    GeometricTypeKind::Line => Err(Error::unsupported_feature(
+                        "LINE geometric type not yet supported",
+                    )),
+                    GeometricTypeKind::LineSegment => Err(Error::unsupported_feature(
+                        "LSEG geometric type not yet supported",
+                    )),
+                    GeometricTypeKind::GeometricPath => Err(Error::unsupported_feature(
+                        "PATH geometric type not yet supported",
+                    )),
+                    GeometricTypeKind::Polygon => Err(Error::unsupported_feature(
+                        "POLYGON geometric type not yet supported",
+                    )),
+                }
             }
             _ => Err(Error::unsupported_feature(format!(
                 "Typed string with data type {:?} not supported",

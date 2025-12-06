@@ -5,23 +5,14 @@ use crate::phase::Phase;
 #[derive(Debug, Clone)]
 pub struct QueryComplexity {
     pub num_tables: usize,
-
     pub num_joins: usize,
-
     pub num_subqueries: usize,
-
     pub num_aggregates: usize,
-
     pub num_windows: usize,
-
     pub has_complex_predicates: bool,
-
     pub has_filters: bool,
-
     pub has_unnecessary_projections: bool,
-
     pub plan_depth: usize,
-
     pub estimated_cost_micros: u64,
 }
 
@@ -91,13 +82,9 @@ impl QueryComplexity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLevel {
     Trivial,
-
     Low,
-
     Medium,
-
     High,
-
     VeryHigh,
 }
 
@@ -153,8 +140,13 @@ impl ComplexityAnalyzer {
                 self.visit_node(input);
             }
 
-            PlanNode::Projection { input, .. } => {
+            PlanNode::Projection { expressions, input } => {
                 self.has_projections = true;
+                for (expr, _) in expressions {
+                    if Self::contains_scalar_subquery(expr) {
+                        self.num_subqueries += 1;
+                    }
+                }
                 self.visit_node(input);
             }
 
@@ -252,6 +244,35 @@ impl ComplexityAnalyzer {
         }
 
         self.current_depth -= 1;
+    }
+
+    fn contains_scalar_subquery(expr: &yachtsql_ir::expr::Expr) -> bool {
+        use yachtsql_ir::expr::Expr;
+        match expr {
+            Expr::ScalarSubquery { .. } => true,
+            Expr::BinaryOp { left, right, .. } => {
+                Self::contains_scalar_subquery(left) || Self::contains_scalar_subquery(right)
+            }
+            Expr::UnaryOp { expr, .. } => Self::contains_scalar_subquery(expr),
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                operand
+                    .as_ref()
+                    .is_some_and(|e| Self::contains_scalar_subquery(e))
+                    || when_then.iter().any(|(cond, result)| {
+                        Self::contains_scalar_subquery(cond)
+                            || Self::contains_scalar_subquery(result)
+                    })
+                    || else_expr
+                        .as_ref()
+                        .is_some_and(|e| Self::contains_scalar_subquery(e))
+            }
+            Expr::Function { args, .. } => args.iter().any(Self::contains_scalar_subquery),
+            _ => false,
+        }
     }
 
     fn is_complex_predicate(&mut self, expr: &yachtsql_ir::expr::Expr) -> bool {

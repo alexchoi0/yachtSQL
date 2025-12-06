@@ -1,4 +1,5 @@
 mod age;
+mod at_time_zone;
 mod current_date;
 mod current_time;
 mod current_timestamp;
@@ -68,6 +69,7 @@ impl ProjectionWithExprExec {
             "DATE" => Self::eval_date_constructor(args, batch, row_idx),
             "TIMESTAMP_DIFF" => Self::eval_timestamp_diff(args, batch, row_idx),
             "INTERVAL_LITERAL" => Self::eval_interval_literal(args, batch, row_idx),
+            "INTERVAL_PARSE" => Self::eval_interval_parse(args, batch, row_idx),
             "YEAR" => Self::eval_year(args, batch, row_idx),
             "MONTH" => Self::eval_month(args, batch, row_idx),
             "DAY" | "DAYOFMONTH" => Self::eval_day(args, batch, row_idx),
@@ -79,6 +81,7 @@ impl ProjectionWithExprExec {
             "DAYOFWEEK" | "WEEKDAY" => Self::eval_dayofweek(args, batch, row_idx),
             "DAYOFYEAR" => Self::eval_dayofyear(args, batch, row_idx),
             "LAST_DAY" => Self::eval_last_day(args, batch, row_idx),
+            "AT_TIME_ZONE" => Self::eval_at_time_zone(args, batch, row_idx),
             _ => Err(Error::unsupported_feature(format!(
                 "Unknown datetime function: {}",
                 name

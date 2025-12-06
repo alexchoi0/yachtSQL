@@ -124,10 +124,7 @@ impl QueryExecutorTrait for QueryExecutor {
 
                     for field in schema.fields() {
                         let should_include = if has_source_tables {
-                            field
-                                .source_table
-                                .as_ref()
-                                .map_or(false, |st| st == &table_qualifier)
+                            field.source_table.as_ref() == Some(&table_qualifier)
                         } else {
                             true
                         };
@@ -404,10 +401,17 @@ impl QueryExecutor {
         let resource_tracker =
             crate::resource_limits::ResourceTracker::new(self.resource_limits.clone());
 
-        let cte_cleanup = if let Some(ref with_clause) = query.with {
-            Some(self.process_ctes(with_clause)?)
+        let (cte_cleanup, query_for_plan) = if let Some(ref with_clause) = query.with {
+            let cte_names = self.process_ctes(with_clause)?;
+            let mut modified_query = query.as_ref().clone();
+            modified_query.with = None;
+            for cte_name in &cte_names {
+                let cte_table = format!("__cte_{}", cte_name);
+                Self::rename_table_references(&mut modified_query.body, cte_name, &cte_table);
+            }
+            (Some(cte_names), Box::new(modified_query))
         } else {
-            None
+            (None, query.clone())
         };
 
         let sql_hash = crate::sql_normalizer::hash_sql(original_sql, self.dialect());
@@ -425,7 +429,7 @@ impl QueryExecutor {
                 let plan_builder = yachtsql_parser::LogicalPlanBuilder::new()
                     .with_storage(Rc::clone(&self.storage))
                     .with_dialect(self.dialect());
-                let logical_plan = plan_builder.query_to_plan(query)?;
+                let logical_plan = plan_builder.query_to_plan(&query_for_plan)?;
 
                 resource_tracker.check_timeout()?;
 
@@ -496,8 +500,8 @@ impl QueryExecutor {
             for row in &all_rows {
                 let value = row
                     .get_by_name(&schema, &field.name)
-                    .map(|v| v.clone())
-                    .unwrap_or_else(|| Value::null());
+                    .cloned()
+                    .unwrap_or_else(Value::null);
                 column.push(value)?;
             }
             columns.push(column);
@@ -517,7 +521,7 @@ impl QueryExecutor {
                 format!("{}()", func.name)
             }
             Expr::BinaryOp { .. } => "expr".to_string(),
-            _ => "column".to_string(),
+            _ => panic!("expr_to_column_name: unhandled expression type: {:?}", expr),
         }
     }
 
@@ -700,7 +704,22 @@ impl QueryExecutor {
                     _ => Ok(DataType::Custom(type_name)),
                 }
             }
-            _ => Ok(DataType::String),
+            SqlDataType::GeometricType(kind) => {
+                use sqlparser::ast::GeometricTypeKind;
+                match kind {
+                    GeometricTypeKind::Point => Ok(DataType::Point),
+                    GeometricTypeKind::GeometricBox => Ok(DataType::PgBox),
+                    GeometricTypeKind::Circle => Ok(DataType::Circle),
+                    _ => panic!(
+                        "sql_data_type_to_data_type: unhandled GeometricTypeKind: {:?}",
+                        kind
+                    ),
+                }
+            }
+            _ => panic!(
+                "sql_data_type_to_data_type: unhandled SqlDataType: {:?}",
+                sql_type
+            ),
         }
     }
 
@@ -901,9 +920,24 @@ impl QueryExecutor {
                 let func_name = func.name.to_string().to_uppercase();
                 match func_name.as_str() {
                     "UPPER" | "LOWER" | "CONCAT" | "SUBSTRING" | "SUBSTR" | "TRIM" | "LTRIM"
-                    | "RTRIM" | "REPLACE" | "REVERSE" | "LEFT" | "RIGHT" | "LPAD" | "RPAD"
-                    | "REPEAT" | "FORMAT" | "CHR" | "INITCAP" | "TO_CHAR" | "TO_HEX" | "MD5"
-                    | "SHA256" | "SHA512" | "BASE64_ENCODE" | "BASE64_DECODE" => {
+                    | "RTRIM" | "REPLACE" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REPEAT"
+                    | "FORMAT" | "CHR" | "INITCAP" | "TO_CHAR" | "TO_HEX" | "MD5" | "SHA256"
+                    | "SHA512" | "BASE64_ENCODE" | "BASE64_DECODE" => Ok(DataType::String),
+
+                    "REVERSE" => {
+                        if let sqlparser::ast::FunctionArguments::List(args) = &func.args {
+                            if let Some(first_arg) = args.args.first() {
+                                if let sqlparser::ast::FunctionArg::Unnamed(
+                                    sqlparser::ast::FunctionArgExpr::Expr(arg_expr),
+                                ) = first_arg
+                                {
+                                    let arg_type = Self::infer_expression_type(arg_expr, schema)?;
+                                    if matches!(arg_type, DataType::Bytes) {
+                                        return Ok(DataType::Bytes);
+                                    }
+                                }
+                            }
+                        }
                         Ok(DataType::String)
                     }
 
@@ -946,6 +980,28 @@ impl QueryExecutor {
                             }
                         }
                         Ok(DataType::String)
+                    }
+
+                    "TO_NUMBER" => {
+                        if let sqlparser::ast::FunctionArguments::List(args) = &func.args {
+                            if args.args.len() == 2 {
+                                if let Some(second_arg) = args.args.get(1) {
+                                    if let sqlparser::ast::FunctionArg::Unnamed(
+                                        sqlparser::ast::FunctionArgExpr::Expr(Expr::Value(val)),
+                                    ) = second_arg
+                                    {
+                                        if let sqlparser::ast::Value::SingleQuotedString(s) =
+                                            &val.value
+                                        {
+                                            if s.eq_ignore_ascii_case("RN") {
+                                                return Ok(DataType::Int64);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(DataType::Float64)
                     }
 
                     "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" | "TRUNC" | "TRUNCATE"
@@ -1078,7 +1134,10 @@ impl QueryExecutor {
             }
 
             Expr::Interval(_) => Ok(DataType::Interval),
-            _ => Ok(DataType::String),
+            _ => panic!(
+                "infer_expression_type: unhandled expression type: {:?}",
+                expr
+            ),
         }
     }
 
@@ -3312,7 +3371,10 @@ impl QueryExecutor {
                     return Err(Error::ColumnNotFound(col_name.clone()));
                 }
             } else {
-                (SortSpec::Expression(order_expr.expr.clone()), None)
+                (
+                    SortSpec::Expression(Box::new(order_expr.expr.clone())),
+                    None,
+                )
             };
 
             let is_ascending = order_expr.options.asc.unwrap_or(true);
@@ -4014,11 +4076,13 @@ impl QueryExecutor {
             {
                 let agg_key = self.aggregate_function_to_column_name(func)?;
 
-                if !having_agg_indices.contains_key(&agg_key) {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    having_agg_indices.entry(agg_key)
+                {
                     if let Some(agg_spec) = AggregateSpec::from_expr(expr, func_registry)? {
                         let idx = aggregate_specs.len();
                         aggregate_specs.push(agg_spec);
-                        having_agg_indices.insert(agg_key, idx);
+                        e.insert(idx);
                     }
                 }
                 Ok(())
@@ -5523,8 +5587,18 @@ impl QueryExecutor {
             let (schema, all_rows) = if is_recursive {
                 self.execute_recursive_cte(&cte_name, &cte.query)?
             } else {
-                let cte_query = Statement::Query(cte.query.clone());
-                let cte_result = self.execute_select(&cte_query, "")?;
+                let mut modified_cte_query = (*cte.query).clone();
+                for prev_cte_name in &cte_names[..cte_names.len() - 1] {
+                    let cte_table = format!("__cte_{}", prev_cte_name);
+                    Self::rename_table_references(
+                        &mut modified_cte_query.body,
+                        prev_cte_name,
+                        &cte_table,
+                    );
+                }
+                let cte_query = Statement::Query(Box::new(modified_cte_query.clone()));
+                let cte_query_sql = cte_query.to_string();
+                let cte_result = self.execute_select(&cte_query, &cte_query_sql)?;
                 let schema = cte_result.schema().clone();
                 let rows = cte_result.rows().unwrap_or_default();
                 (schema, rows)
@@ -5754,7 +5828,13 @@ impl QueryExecutor {
                 pipe_operators: Vec::new(),
             }));
 
-            let recursive_result = self.execute_select(&recursive_query, "")?;
+            let recursive_query_sql = format!("{}_{}", recursive_query, iteration);
+            debug_eprintln!(
+                "[executor::query] Executing recursive query: {}",
+                recursive_query_sql
+            );
+
+            let recursive_result = self.execute_select(&recursive_query, &recursive_query_sql)?;
             let new_rows = recursive_result.rows().unwrap_or_default();
 
             debug_eprintln!(
@@ -6222,7 +6302,7 @@ fn collect_column_refs_from_expr(expr: &Expr, columns: &mut Vec<String>) {
 
 enum SortSpec {
     Column(usize),
-    Expression(Expr),
+    Expression(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

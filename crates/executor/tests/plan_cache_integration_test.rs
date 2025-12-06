@@ -5,7 +5,7 @@ use yachtsql_parser::DialectType;
 
 #[test]
 fn test_cache_basic_access() {
-    let mut cache = PlanCache::new();
+    let cache = PlanCache::new();
 
     let stats = cache.stats();
     assert_eq!(stats.entry_count, 0);
@@ -29,7 +29,7 @@ fn test_cache_statistics() {
 
     let cached = CachedPlan::new(plan, sql.to_string());
 
-    cache.insert(key.clone(), cached);
+    cache.insert(key, cached);
 
     let result = cache.get(&key);
     assert!(result.is_some(), "Should find cached entry");

@@ -148,7 +148,13 @@ impl ProjectionWithExprExec {
             CastDataType::Hstore => DataType::Hstore,
             CastDataType::MacAddr => DataType::MacAddr,
             CastDataType::MacAddr8 => DataType::MacAddr8,
-            CastDataType::Custom(name) => DataType::Custom(name.clone()),
+            CastDataType::Custom(name, struct_fields) => {
+                if struct_fields.is_empty() {
+                    DataType::Custom(name.clone())
+                } else {
+                    DataType::Struct(struct_fields.clone())
+                }
+            }
         }
     }
 
@@ -181,6 +187,8 @@ impl ProjectionWithExprExec {
                 (Some(DataType::Date), Some(DataType::Interval))
                 | (Some(DataType::Interval), Some(DataType::Date)) => Some(DataType::Date),
 
+                (Some(DataType::Interval), Some(DataType::Interval)) => Some(DataType::Interval),
+
                 (Some(DataType::Numeric(_)), _) | (_, Some(DataType::Numeric(_))) => {
                     Some(DataType::Numeric(None))
                 }
@@ -205,6 +213,8 @@ impl ProjectionWithExprExec {
 
                 (Some(DataType::Date), Some(DataType::Interval)) => Some(DataType::Date),
 
+                (Some(DataType::Interval), Some(DataType::Interval)) => Some(DataType::Interval),
+
                 (Some(DataType::Numeric(_)), _) | (_, Some(DataType::Numeric(_))) => {
                     Some(DataType::Numeric(None))
                 }
@@ -214,18 +224,42 @@ impl ProjectionWithExprExec {
                 (Some(DataType::Int64), Some(DataType::Int64)) => Some(DataType::Int64),
                 _ => None,
             },
-            BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo => {
-                match (left_type, right_type) {
-                    (Some(DataType::Numeric(_)), _) | (_, Some(DataType::Numeric(_))) => {
-                        Some(DataType::Numeric(None))
-                    }
-                    (Some(DataType::Float64), _) | (_, Some(DataType::Float64)) => {
-                        Some(DataType::Float64)
-                    }
-                    (Some(DataType::Int64), Some(DataType::Int64)) => Some(DataType::Int64),
-                    _ => None,
+            BinaryOp::Multiply => match (&left_type, &right_type) {
+                (Some(DataType::Interval), Some(DataType::Int64))
+                | (Some(DataType::Interval), Some(DataType::Float64))
+                | (Some(DataType::Int64), Some(DataType::Interval))
+                | (Some(DataType::Float64), Some(DataType::Interval)) => Some(DataType::Interval),
+                (Some(DataType::Numeric(_)), _) | (_, Some(DataType::Numeric(_))) => {
+                    Some(DataType::Numeric(None))
                 }
-            }
+                (Some(DataType::Float64), _) | (_, Some(DataType::Float64)) => {
+                    Some(DataType::Float64)
+                }
+                (Some(DataType::Int64), Some(DataType::Int64)) => Some(DataType::Int64),
+                _ => None,
+            },
+            BinaryOp::Divide => match (&left_type, &right_type) {
+                (Some(DataType::Interval), Some(DataType::Int64))
+                | (Some(DataType::Interval), Some(DataType::Float64)) => Some(DataType::Interval),
+                (Some(DataType::Numeric(_)), _) | (_, Some(DataType::Numeric(_))) => {
+                    Some(DataType::Numeric(None))
+                }
+                (Some(DataType::Float64), _) | (_, Some(DataType::Float64)) => {
+                    Some(DataType::Float64)
+                }
+                (Some(DataType::Int64), Some(DataType::Int64)) => Some(DataType::Int64),
+                _ => None,
+            },
+            BinaryOp::Modulo => match (left_type, right_type) {
+                (Some(DataType::Numeric(_)), _) | (_, Some(DataType::Numeric(_))) => {
+                    Some(DataType::Numeric(None))
+                }
+                (Some(DataType::Float64), _) | (_, Some(DataType::Float64)) => {
+                    Some(DataType::Float64)
+                }
+                (Some(DataType::Int64), Some(DataType::Int64)) => Some(DataType::Int64),
+                _ => None,
+            },
 
             BinaryOp::VectorL2Distance
             | BinaryOp::VectorInnerProduct
@@ -234,6 +268,24 @@ impl ProjectionWithExprExec {
             BinaryOp::ArrayContains | BinaryOp::ArrayContainedBy | BinaryOp::ArrayOverlap => {
                 Some(DataType::Bool)
             }
+
+            BinaryOp::Like
+            | BinaryOp::NotLike
+            | BinaryOp::ILike
+            | BinaryOp::NotILike
+            | BinaryOp::SimilarTo
+            | BinaryOp::NotSimilarTo
+            | BinaryOp::RegexMatch
+            | BinaryOp::RegexNotMatch
+            | BinaryOp::RegexMatchI
+            | BinaryOp::RegexNotMatchI => Some(DataType::Bool),
+
+            BinaryOp::Concat => match (&left_type, &right_type) {
+                (Some(DataType::Hstore), Some(DataType::Hstore)) => Some(DataType::Hstore),
+                (Some(DataType::String), _) | (_, Some(DataType::String)) => Some(DataType::String),
+                (Some(DataType::Bytes), Some(DataType::Bytes)) => Some(DataType::Bytes),
+                _ => left_type.or(right_type),
+            },
 
             _ => None,
         }
@@ -317,24 +369,99 @@ impl ProjectionWithExprExec {
     }
 
     fn infer_function_type(
-        name: &str,
+        name: &yachtsql_ir::FunctionName,
         args: &[crate::optimizer::expr::Expr],
         schema: &Schema,
     ) -> Option<crate::types::DataType> {
         use yachtsql_core::types::DataType;
+        use yachtsql_ir::FunctionName;
 
-        let func_name = name.to_uppercase();
-        match func_name.as_str() {
-            "YACHTSQL.IS_FEATURE_ENABLED" => Some(DataType::Bool),
+        match name {
+            FunctionName::Custom(s) if s == "YACHTSQL.IS_FEATURE_ENABLED" => Some(DataType::Bool),
 
-            "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" | "TRUNC" | "TRUNCATE" | "SQRT"
-            | "EXP" | "LN" | "LOG" | "LOG10" | "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN"
-            | "ATAN2" | "DEGREES" | "RADIANS" | "PI" | "POWER" | "POW" | "MOD" | "RANDOM"
-            | "RAND" | "TO_NUMBER" => Some(DataType::Float64),
+            FunctionName::Abs
+            | FunctionName::Absolute
+            | FunctionName::Ceil
+            | FunctionName::Ceiling
+            | FunctionName::Floor
+            | FunctionName::Round
+            | FunctionName::Rnd
+            | FunctionName::Trunc
+            | FunctionName::Truncate
+            | FunctionName::Mod
+            | FunctionName::Modulo => {
+                if !args.is_empty() {
+                    let arg_type = Self::infer_expr_type_with_schema(&args[0], schema);
+                    match arg_type {
+                        Some(DataType::Int64) => Some(DataType::Int64),
+                        Some(DataType::Numeric(p)) => Some(DataType::Numeric(p)),
+                        Some(DataType::MacAddr) => Some(DataType::MacAddr),
+                        Some(DataType::MacAddr8) => Some(DataType::MacAddr8),
+                        _ => Some(DataType::Float64),
+                    }
+                } else {
+                    Some(DataType::Float64)
+                }
+            }
 
-            "SIGN" => Some(DataType::Int64),
+            FunctionName::Sign | FunctionName::Signum => Some(DataType::Int64),
 
-            "SAFE_ADD" | "SAFE_SUBTRACT" | "SAFE_MULTIPLY" | "SAFE_DIVIDE" => {
+            FunctionName::Sqrt
+            | FunctionName::Sqr
+            | FunctionName::Exp
+            | FunctionName::Exponent
+            | FunctionName::Ln
+            | FunctionName::Loge
+            | FunctionName::Log
+            | FunctionName::Logarithm
+            | FunctionName::Log10
+            | FunctionName::Log2
+            | FunctionName::Sin
+            | FunctionName::Sine
+            | FunctionName::Cos
+            | FunctionName::Cosine
+            | FunctionName::Tan
+            | FunctionName::Tangent
+            | FunctionName::Asin
+            | FunctionName::Arcsine
+            | FunctionName::Acos
+            | FunctionName::Arccosine
+            | FunctionName::Atan
+            | FunctionName::Arctangent
+            | FunctionName::Atan2
+            | FunctionName::Arctangent2
+            | FunctionName::Pi
+            | FunctionName::Pow
+            | FunctionName::Power
+            | FunctionName::Random
+            | FunctionName::Rand => Some(DataType::Float64),
+
+            FunctionName::Custom(s)
+                if s == "DEGREES"
+                    || s == "RADIANS"
+                    || s == "GAMMA"
+                    || s == "LGAMMA"
+                    || s == "TO_NUMBER" =>
+            {
+                if s == "TO_NUMBER" && args.len() == 2 {
+                    if let yachtsql_optimizer::Expr::Literal(
+                        yachtsql_optimizer::expr::LiteralValue::String(fmt),
+                    ) = &args[1]
+                    {
+                        if fmt.eq_ignore_ascii_case("RN") {
+                            return Some(DataType::Int64);
+                        }
+                    }
+                }
+                Some(DataType::Float64)
+            }
+
+            FunctionName::Custom(s)
+                if s == "SAFE_ADD"
+                    || s == "SAFE_SUBTRACT"
+                    || s == "SAFE_MULTIPLY"
+                    || s == "SAFE_DIVIDE" =>
+            {
                 if args.len() >= 2 {
                     let left_type = Self::infer_expr_type_with_schema(&args[0], schema);
                     let right_type = Self::infer_expr_type_with_schema(&args[1], schema);
@@ -346,9 +473,7 @@ impl ProjectionWithExprExec {
                         (Some(DataType::Numeric(_)), _) | (_, Some(DataType::Numeric(_))) => {
                             Some(DataType::Numeric(None))
                         }
-
                         (Some(DataType::Int64), Some(DataType::Int64)) => Some(DataType::Int64),
-
                         _ => Some(DataType::Int64),
                     }
                 } else {
@@ -356,7 +481,7 @@ impl ProjectionWithExprExec {
                 }
             }
 
-            "SAFE_NEGATE" => {
+            FunctionName::Custom(s) if s == "SAFE_NEGATE" => {
                 if !args.is_empty() {
                     let arg_type = Self::infer_expr_type_with_schema(&args[0], schema);
                     match arg_type {
@@ -369,69 +494,275 @@ impl ProjectionWithExprExec {
                 }
             }
 
-            "CONCAT" | "TRIM" | "LTRIM" | "RTRIM" | "REPLACE" | "UPPER" | "LOWER" | "SUBSTR"
-            | "SUBSTRING" | "LEFT" | "RIGHT" | "REVERSE" | "REPEAT" | "LPAD" | "RPAD" | "CHR"
-            | "INITCAP" | "TO_CHAR" | "TRANSLATE" | "FORMAT" | "QUOTE_IDENT" | "QUOTE_LITERAL"
-            | "REGEXP_EXTRACT" | "REGEXP_REPLACE" => Some(DataType::String),
+            FunctionName::Concat
+            | FunctionName::Concatenate
+            | FunctionName::Trim
+            | FunctionName::Btrim
+            | FunctionName::Ltrim
+            | FunctionName::TrimLeft
+            | FunctionName::Rtrim
+            | FunctionName::TrimRight
+            | FunctionName::Replace
+            | FunctionName::StrReplace
+            | FunctionName::Upper
+            | FunctionName::Ucase
+            | FunctionName::Lower
+            | FunctionName::Lcase
+            | FunctionName::Substr
+            | FunctionName::Substring
+            | FunctionName::Mid
+            | FunctionName::Left
+            | FunctionName::Right
+            | FunctionName::Repeat
+            | FunctionName::Replicate
+            | FunctionName::Lpad
+            | FunctionName::LeftPad
+            | FunctionName::Rpad
+            | FunctionName::RightPad
+            | FunctionName::Chr
+            | FunctionName::Char
+            | FunctionName::Initcap
+            | FunctionName::Proper
+            | FunctionName::ToChar
+            | FunctionName::Translate => Some(DataType::String),
 
-            "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "POSITION" | "STRPOS" | "ASCII" => {
+            FunctionName::Custom(s)
+                if s == "FORMAT"
+                    || s == "QUOTE_IDENT"
+                    || s == "QUOTE_LITERAL"
+                    || s == "REGEXP_EXTRACT"
+                    || s == "REGEXP_REPLACE" =>
+            {
+                Some(DataType::String)
+            }
+
+            FunctionName::Reverse | FunctionName::Strrev => {
+                if !args.is_empty() {
+                    match Self::infer_expr_type_with_schema(&args[0], schema) {
+                        Some(DataType::Bytes) => Some(DataType::Bytes),
+                        _ => Some(DataType::String),
+                    }
+                } else {
+                    Some(DataType::String)
+                }
+            }
+
+            FunctionName::Length
+            | FunctionName::Len
+            | FunctionName::CharLength
+            | FunctionName::CharacterLength
+            | FunctionName::OctetLength
+            | FunctionName::Lengthb
+            | FunctionName::Position
+            | FunctionName::Strpos
+            | FunctionName::Instr
+            | FunctionName::Locate
+            | FunctionName::Ascii
+            | FunctionName::Ord => Some(DataType::Int64),
+
+            FunctionName::Custom(s)
+                if s == "STARTS_WITH" || s == "ENDS_WITH" || s == "REGEXP_CONTAINS" =>
+            {
+                Some(DataType::Bool)
+            }
+
+            FunctionName::Md5
+            | FunctionName::Md5Hash
+            | FunctionName::Sha256
+            | FunctionName::Sha2 => Some(DataType::String),
+
+            FunctionName::Custom(s) if s == "SHA1" || s == "SHA512" => Some(DataType::String),
+
+            FunctionName::Custom(s) if s == "FARM_FINGERPRINT" || s == "CRC32" || s == "CRC32C" => {
                 Some(DataType::Int64)
             }
 
-            "STARTS_WITH" | "ENDS_WITH" | "REGEXP_CONTAINS" => Some(DataType::Bool),
+            FunctionName::Custom(s) if s == "TO_HEX" => Some(DataType::String),
+            FunctionName::Custom(s) if s == "FROM_HEX" => Some(DataType::Bytes),
 
-            "MD5" | "SHA1" | "SHA256" | "SHA512" => Some(DataType::String),
+            FunctionName::CurrentDate | FunctionName::Curdate | FunctionName::Today => {
+                Some(DataType::Date)
+            }
+            FunctionName::CurrentTimestamp
+            | FunctionName::Getdate
+            | FunctionName::Sysdate
+            | FunctionName::Systimestamp
+            | FunctionName::Now => Some(DataType::Timestamp),
 
-            "FARM_FINGERPRINT" => Some(DataType::Int64),
+            FunctionName::Date
+            | FunctionName::CastDate
+            | FunctionName::ToDate
+            | FunctionName::DateAdd
+            | FunctionName::Dateadd
+            | FunctionName::Adddate
+            | FunctionName::DateSub
+            | FunctionName::Datesub
+            | FunctionName::Subdate
+            | FunctionName::DateTrunc
+            | FunctionName::TruncDate => Some(DataType::Date),
 
-            "TO_HEX" => Some(DataType::String),
-            "FROM_HEX" => Some(DataType::Bytes),
+            FunctionName::Custom(s) if s == "TIMESTAMP_DIFF" => Some(DataType::Int64),
+            FunctionName::Custom(s) if s == "TIMESTAMP_TRUNC" => Some(DataType::Timestamp),
 
-            "CURRENT_DATE" => Some(DataType::Date),
-            "CURRENT_TIMESTAMP" | "NOW" => Some(DataType::Timestamp),
-            "DATE" | "DATE_ADD" | "DATE_SUB" | "DATE_TRUNC" => Some(DataType::Date),
-            "TIMESTAMP_DIFF" => Some(DataType::Int64),
-            "TIMESTAMP_TRUNC" => Some(DataType::Timestamp),
+            FunctionName::Custom(s) if s == "PARSE_DATE" => Some(DataType::Date),
+            FunctionName::StrToDate | FunctionName::ParseDatetime => Some(DataType::Date),
+            FunctionName::Custom(s) if s == "PARSE_TIMESTAMP" || s == "AT_TIME_ZONE" => {
+                Some(DataType::Timestamp)
+            }
 
-            "PARSE_DATE" | "STR_TO_DATE" => Some(DataType::Date),
-            "PARSE_TIMESTAMP" => Some(DataType::Timestamp),
+            FunctionName::Custom(s) if s == "MAKE_DATE" => Some(DataType::Date),
+            FunctionName::Custom(s) if s == "MAKE_TIMESTAMP" => Some(DataType::Timestamp),
+            FunctionName::CurrentTime
+            | FunctionName::Curtime
+            | FunctionName::Localtime
+            | FunctionName::Localtimestamp => Some(DataType::Time),
 
-            "MAKE_DATE" => Some(DataType::Date),
-            "MAKE_TIMESTAMP" | "CURRENT_TIME" => Some(DataType::Timestamp),
+            FunctionName::Extract
+            | FunctionName::DatePart
+            | FunctionName::Datepart
+            | FunctionName::DateDiff
+            | FunctionName::Datediff
+            | FunctionName::Timestampdiff
+            | FunctionName::Age => Some(DataType::Int64),
 
-            "EXTRACT" | "DATE_PART" | "YEAR" | "MONTH" | "DAY" | "HOUR" | "MINUTE" | "SECOND"
-            | "QUARTER" | "WEEK" | "DOW" | "DOY" | "DAYOFWEEK" | "DAYOFYEAR" | "DATE_DIFF"
-            | "DATEDIFF" | "AGE" => Some(DataType::Int64),
+            FunctionName::Custom(s)
+                if s == "YEAR"
+                    || s == "MONTH"
+                    || s == "DAY"
+                    || s == "HOUR"
+                    || s == "MINUTE"
+                    || s == "SECOND"
+                    || s == "QUARTER"
+                    || s == "WEEK"
+                    || s == "DOW"
+                    || s == "DOY"
+                    || s == "DAYOFWEEK"
+                    || s == "DAYOFYEAR" =>
+            {
+                Some(DataType::Int64)
+            }
 
-            "FORMAT_DATE" | "FORMAT_TIMESTAMP" => Some(DataType::String),
+            FunctionName::FormatTimestamp | FunctionName::DateFormat => Some(DataType::String),
+            FunctionName::Custom(s) if s == "FORMAT_DATE" || s == "FORMAT_TIMESTAMP" => {
+                Some(DataType::String)
+            }
 
-            "NEXTVAL" | "CURRVAL" | "SETVAL" | "LASTVAL" => Some(DataType::Int64),
+            FunctionName::Custom(s)
+                if s == "NEXTVAL" || s == "CURRVAL" || s == "SETVAL" || s == "LASTVAL" =>
+            {
+                Some(DataType::Int64)
+            }
 
-            "ARRAY_LENGTH" | "ARRAY_POSITION" => Some(DataType::Int64),
-            "ARRAY_CONTAINS" => Some(DataType::Bool),
-            "SPLIT" => Some(DataType::Array(Box::new(DataType::String))),
+            FunctionName::ArrayLength | FunctionName::Cardinality => Some(DataType::Int64),
+            FunctionName::Custom(s) if s == "ARRAY_POSITION" => Some(DataType::Int64),
+            FunctionName::ArrayContains | FunctionName::ArrayContainsAll => Some(DataType::Bool),
+            FunctionName::Split | FunctionName::StringSplit => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
+            FunctionName::SplitPart => Some(DataType::String),
+            FunctionName::Custom(s) if s == "STRING_TO_ARRAY" => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
 
-            "GENERATE_ARRAY" => Some(DataType::Array(Box::new(DataType::Int64))),
-            "GENERATE_DATE_ARRAY" => Some(DataType::Array(Box::new(DataType::Date))),
-            "GENERATE_TIMESTAMP_ARRAY" => Some(DataType::Array(Box::new(DataType::Timestamp))),
-            "GENERATE_UUID" => Some(DataType::String),
-            "GENERATE_UUID_ARRAY" => Some(DataType::Array(Box::new(DataType::String))),
+            FunctionName::Custom(s) if s == "GENERATE_ARRAY" => {
+                Some(DataType::Array(Box::new(DataType::Int64)))
+            }
+            FunctionName::Custom(s) if s == "GENERATE_DATE_ARRAY" => {
+                Some(DataType::Array(Box::new(DataType::Date)))
+            }
+            FunctionName::Custom(s) if s == "GENERATE_TIMESTAMP_ARRAY" => {
+                Some(DataType::Array(Box::new(DataType::Timestamp)))
+            }
+            FunctionName::GenerateUuid
+            | FunctionName::Uuid
+            | FunctionName::GenRandomUuid
+            | FunctionName::Newid
+            | FunctionName::UuidGenerateV4 => Some(DataType::String),
+            FunctionName::Custom(s)
+                if s == "UUID_GENERATE_V1" || s == "UUIDV4" || s == "UUIDV7" =>
+            {
+                Some(DataType::String)
+            }
+            FunctionName::Custom(s) if s == "GENERATE_UUID_ARRAY" => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
 
-            "ARRAY_REVERSE" | "ARRAY_SORT" | "ARRAY_DISTINCT" | "ARRAY_REPLACE" => {
+            FunctionName::Custom(s) if s == "GEN_RANDOM_BYTES" || s == "DIGEST" => {
+                Some(DataType::Bytes)
+            }
+            FunctionName::Encode => Some(DataType::String),
+
+            FunctionName::Custom(s)
+                if s == "HSTORE_EXISTS"
+                    || s == "HSTORE_EXISTS_ALL"
+                    || s == "HSTORE_EXISTS_ANY"
+                    || s == "HSTORE_CONTAINS"
+                    || s == "HSTORE_CONTAINED_BY"
+                    || s == "HSTORE_DEFINED"
+                    || s == "DEFINED"
+                    || s == "EXIST" =>
+            {
+                Some(DataType::Bool)
+            }
+            FunctionName::Custom(s)
+                if s == "HSTORE_CONCAT"
+                    || s == "HSTORE_DELETE"
+                    || s == "HSTORE_DELETE_KEY"
+                    || s == "HSTORE_DELETE_KEYS"
+                    || s == "HSTORE_DELETE_HSTORE"
+                    || s == "HSTORE_SLICE"
+                    || s == "SLICE"
+                    || s == "DELETE"
+                    || s == "HSTORE" =>
+            {
+                Some(DataType::Hstore)
+            }
+            FunctionName::Custom(s) if s == "HSTORE_AKEYS" || s == "AKEYS" => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
+            FunctionName::Custom(s) if s == "SKEYS" || s == "SVALS" => Some(DataType::String),
+            FunctionName::Custom(s) if s == "HSTORE_AVALS" || s == "AVALS" => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
+            FunctionName::Custom(s) if s == "HSTORE_TO_JSON" || s == "HSTORE_TO_JSONB" => {
+                Some(DataType::Json)
+            }
+            FunctionName::Custom(s) if s == "HSTORE_TO_ARRAY" => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
+            FunctionName::Custom(s) if s == "HSTORE_TO_MATRIX" => Some(DataType::Array(Box::new(
+                DataType::Array(Box::new(DataType::String)),
+            ))),
+            FunctionName::Custom(s) if s == "HSTORE_GET" => Some(DataType::String),
+            FunctionName::Custom(s) if s == "HSTORE_GET_VALUES" => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
+
+            FunctionName::Custom(s)
+                if s == "ARRAY_REVERSE"
+                    || s == "ARRAY_SORT"
+                    || s == "ARRAY_DISTINCT"
+                    || s == "ARRAY_REPLACE" =>
+            {
                 Self::infer_array_type_from_first_arg(args, schema)
             }
 
-            "ARRAY_APPEND" | "ARRAY_REMOVE" => {
+            FunctionName::Custom(s) if s == "ARRAY_APPEND" || s == "ARRAY_REMOVE" => {
                 Self::infer_array_type_with_element_fallback(0, 1, args, schema)
             }
 
-            "ARRAY_PREPEND" => Self::infer_array_type_with_element_fallback(1, 0, args, schema),
+            FunctionName::Custom(s) if s == "ARRAY_PREPEND" => {
+                Self::infer_array_type_with_element_fallback(1, 0, args, schema)
+            }
 
-            "ARRAY_CONCAT" | "ARRAY_CAT" => {
+            FunctionName::ArrayConcat | FunctionName::ArrayCat => {
                 Self::infer_array_type_from_non_empty_array(args, schema)
             }
 
-            "GREATEST" | "LEAST" => {
+            FunctionName::Greatest
+            | FunctionName::MaxValue
+            | FunctionName::Least
+            | FunctionName::MinValue => {
                 let mut has_float = false;
                 let mut has_int = false;
                 let mut has_string = false;
@@ -460,45 +791,118 @@ impl ProjectionWithExprExec {
                 }
             }
 
-            "COALESCE" => Self::infer_coalesce_type(args, schema),
-            "IFNULL" | "NULLIF" => Self::infer_first_arg_type(args, schema),
+            FunctionName::Coalesce => Self::infer_coalesce_type(args, schema),
+            FunctionName::Ifnull | FunctionName::Nvl | FunctionName::Isnull => {
+                Self::infer_first_arg_type(args, schema)
+            }
+            FunctionName::Nullif => Self::infer_first_arg_type(args, schema),
 
-            "IF" => args
+            FunctionName::If | FunctionName::Iif => args
                 .get(1)
                 .and_then(|arg| Self::infer_expr_type_with_schema(arg, schema)),
 
-            "COUNT" => Some(DataType::Int64),
-            "SUM" | "AVG" | "MIN" | "MAX" | "MODE" => None,
-            "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"
-            | "MEDIAN" | "PERCENTILE_CONT" | "PERCENTILE_DISC" | "CORR" | "COVAR_POP"
-            | "COVAR_SAMP" => Some(DataType::Float64),
+            FunctionName::Count => Some(DataType::Int64),
+            FunctionName::Sum
+            | FunctionName::Avg
+            | FunctionName::Average
+            | FunctionName::Min
+            | FunctionName::Minimum
+            | FunctionName::Max
+            | FunctionName::Maximum
+            | FunctionName::Mode => None,
 
-            "JSON_AGG" | "JSON_OBJECT_AGG" => Some(DataType::Json),
+            FunctionName::Stddev
+            | FunctionName::Stdev
+            | FunctionName::StandardDeviation
+            | FunctionName::StddevPop
+            | FunctionName::Stddevp
+            | FunctionName::StddevSamp
+            | FunctionName::Stddevs
+            | FunctionName::Variance
+            | FunctionName::Var
+            | FunctionName::VarPop
+            | FunctionName::Varp
+            | FunctionName::VarSamp
+            | FunctionName::Vars
+            | FunctionName::Median
+            | FunctionName::PercentileCont
+            | FunctionName::PercentileDisc
+            | FunctionName::Corr
+            | FunctionName::CovarPop
+            | FunctionName::CovarSamp => Some(DataType::Float64),
 
-            "JSON_EXTRACT" | "JSON_EXTRACT_JSON" | "JSON_ARRAY" | "JSON_OBJECT" | "PARSE_JSON"
-            | "TO_JSON" => Some(DataType::Json),
-
-            "TO_JSON_STRING" => Some(DataType::String),
-
-            "JSON_QUERY" => Some(DataType::Json),
-            "JSON_TYPE" => Some(DataType::String),
-            "JSON_EXISTS" => Some(DataType::Bool),
-            "JSONB_PATH_EXISTS" | "JSONB_PATH_MATCH" => Some(DataType::Bool),
-            "JSONB_PATH_QUERY_FIRST" => Some(DataType::Json),
-            "JSONB_CONTAINS" => Some(DataType::Bool),
-            "JSONB_CONCAT" | "JSONB_DELETE" | "JSONB_DELETE_PATH" | "JSONB_SET" => {
+            FunctionName::Custom(s) if s == "JSON_AGG" || s == "JSON_OBJECT_AGG" => {
                 Some(DataType::Json)
             }
-            "JSON_LENGTH" => Some(DataType::Int64),
-            "JSON_KEYS" => Some(DataType::Json),
 
-            "IS_JSON_VALUE" | "IS_JSON_ARRAY" | "IS_JSON_OBJECT" | "IS_JSON_SCALAR" => {
+            FunctionName::JsonExtract => {
+                if let Some(first_arg) = args.first() {
+                    if let Some(arg_type) = Self::infer_expr_type_with_schema(first_arg, schema) {
+                        if matches!(arg_type, DataType::Hstore) {
+                            return Some(DataType::String);
+                        }
+                    }
+                }
+                Some(DataType::Json)
+            }
+            FunctionName::Custom(s) if s == "JSON_EXTRACT_JSON" => {
+                if let Some(first_arg) = args.first() {
+                    if let Some(arg_type) = Self::infer_expr_type_with_schema(first_arg, schema) {
+                        if matches!(arg_type, DataType::Hstore) {
+                            return Some(DataType::String);
+                        }
+                    }
+                }
+                Some(DataType::Json)
+            }
+            FunctionName::Custom(s)
+                if s == "JSON_ARRAY"
+                    || s == "JSON_OBJECT"
+                    || s == "PARSE_JSON"
+                    || s == "TO_JSON" =>
+            {
+                Some(DataType::Json)
+            }
+
+            FunctionName::Custom(s) if s == "TO_JSON_STRING" => Some(DataType::String),
+
+            FunctionName::JsonQuery => Some(DataType::Json),
+            FunctionName::JsonType | FunctionName::JsonTypeof => Some(DataType::String),
+            FunctionName::Custom(s) if s == "JSON_EXISTS" => Some(DataType::Bool),
+            FunctionName::Custom(s) if s == "JSONB_PATH_EXISTS" || s == "JSONB_PATH_MATCH" => {
                 Some(DataType::Bool)
             }
-            "IS_NOT_JSON_VALUE" | "IS_NOT_JSON_ARRAY" | "IS_NOT_JSON_OBJECT"
-            | "IS_NOT_JSON_SCALAR" => Some(DataType::Bool),
+            FunctionName::Custom(s) if s == "JSONB_PATH_QUERY_FIRST" => Some(DataType::Json),
+            FunctionName::Custom(s) if s == "JSONB_CONTAINS" => Some(DataType::Bool),
+            FunctionName::Custom(s)
+                if s == "JSONB_CONCAT"
+                    || s == "JSONB_DELETE"
+                    || s == "JSONB_DELETE_PATH"
+                    || s == "JSONB_SET" =>
+            {
+                Some(DataType::Json)
+            }
+            FunctionName::JsonLength | FunctionName::JsonArrayLength => Some(DataType::Int64),
+            FunctionName::Custom(s) if s == "JSON_KEYS" => Some(DataType::Json),
 
-            "JSON_VALUE" => args
+            FunctionName::Custom(s)
+                if s == "IS_JSON_VALUE"
+                    || s == "IS_JSON_ARRAY"
+                    || s == "IS_JSON_OBJECT"
+                    || s == "IS_JSON_SCALAR" =>
+            {
+                Some(DataType::Bool)
+            }
+            FunctionName::Custom(s)
+                if s == "IS_NOT_JSON_VALUE"
+                    || s == "IS_NOT_JSON_ARRAY"
+                    || s == "IS_NOT_JSON_OBJECT"
+                    || s == "IS_NOT_JSON_SCALAR" =>
+            {
+                Some(DataType::Bool)
+            }
+
+            FunctionName::JsonValue | FunctionName::JsonExtractScalar => args
                 .get(2)
                 .and_then(|arg| {
                     if let crate::optimizer::expr::Expr::Literal(
@@ -513,51 +917,110 @@ impl ProjectionWithExprExec {
                     }
                 })
                 .or(Some(DataType::String)),
-            "JSON_VALUE_TEXT" => Some(DataType::String),
-            "JSON_EXTRACT_PATH_ARRAY" => Some(DataType::Json),
-            "JSON_EXTRACT_PATH_ARRAY_TEXT" => Some(DataType::String),
-
-            "BIT_AND" | "BIT_OR" | "BIT_XOR" => Some(DataType::Int64),
-
-            "BOOL_AND" | "BOOL_OR" | "EVERY" => Some(DataType::Bool),
-
-            "APPROX_COUNT_DISTINCT" => Some(DataType::Int64),
-            "APPROX_QUANTILES" => Some(DataType::Array(Box::new(DataType::Float64))),
-            "APPROX_TOP_COUNT" | "APPROX_TOP_SUM" => {
-                Some(DataType::Array(Box::new(DataType::String)))
-            }
-
-            "INTERVAL_LITERAL" => None,
-
-            "NET.IP_FROM_STRING"
-            | "NET.SAFE_IP_FROM_STRING"
-            | "NET.IPV4_FROM_INT64"
-            | "NET.IP_NET_MASK"
-            | "NET.IP_TRUNC" => Some(DataType::Bytes),
-            "NET.IPV4_TO_INT64" => Some(DataType::Int64),
-            "NET.IP_TO_STRING" | "NET.HOST" | "NET.PUBLIC_SUFFIX" | "NET.REG_DOMAIN" => {
+            FunctionName::JsonExtractString => Some(DataType::String),
+            FunctionName::Custom(s) if s == "JSON_VALUE_TEXT" => Some(DataType::String),
+            FunctionName::Custom(s) if s == "JSON_EXTRACT_PATH_ARRAY" => Some(DataType::Json),
+            FunctionName::Custom(s) if s == "JSON_EXTRACT_PATH_ARRAY_TEXT" => {
                 Some(DataType::String)
             }
 
-            "KEYS.KEYSET_CHAIN" | "AEAD.ENCRYPT" | "DETERMINISTIC_ENCRYPT" => Some(DataType::Bytes),
-            "AEAD.DECRYPT_BYTES" | "DETERMINISTIC_DECRYPT_BYTES" => Some(DataType::Bytes),
-            "AEAD.DECRYPT_STRING" | "DETERMINISTIC_DECRYPT_STRING" => Some(DataType::String),
+            FunctionName::Custom(s) if s == "BIT_AND" || s == "BIT_OR" || s == "BIT_XOR" => {
+                Some(DataType::Int64)
+            }
 
-            "TO_TSVECTOR"
-            | "TO_TSQUERY"
-            | "PLAINTO_TSQUERY"
-            | "PHRASETO_TSQUERY"
-            | "WEBSEARCH_TO_TSQUERY"
-            | "TS_HEADLINE"
-            | "STRIP"
-            | "SETWEIGHT"
-            | "TSVECTOR_CONCAT"
-            | "TSQUERY_AND"
-            | "TSQUERY_OR"
-            | "TSQUERY_NOT" => Some(DataType::String),
-            "TS_RANK" | "TS_RANK_CD" => Some(DataType::Float64),
-            "TS_MATCH" => Some(DataType::Bool),
-            "TSVECTOR_LENGTH" => Some(DataType::Int64),
+            FunctionName::Custom(s) if s == "BOOL_AND" || s == "BOOL_OR" || s == "EVERY" => {
+                Some(DataType::Bool)
+            }
+
+            FunctionName::ApproxCountDistinct
+            | FunctionName::ApproxDistinct
+            | FunctionName::Ndv => Some(DataType::Int64),
+            FunctionName::ApproxQuantiles => Some(DataType::Array(Box::new(DataType::Float64))),
+            FunctionName::ApproxTopCount | FunctionName::ApproxTopSum => {
+                Some(DataType::Array(Box::new(DataType::String)))
+            }
+
+            FunctionName::Custom(s) if s == "INTERVAL_LITERAL" || s == "INTERVAL_PARSE" => {
+                Some(DataType::Interval)
+            }
+
+            FunctionName::Custom(s)
+                if s == "NET.IP_FROM_STRING"
+                    || s == "NET.SAFE_IP_FROM_STRING"
+                    || s == "NET.IPV4_FROM_INT64"
+                    || s == "NET.IP_NET_MASK"
+                    || s == "NET.IP_TRUNC" =>
+            {
+                Some(DataType::Bytes)
+            }
+            FunctionName::Custom(s) if s == "NET.IPV4_TO_INT64" => Some(DataType::Int64),
+            FunctionName::Custom(s)
+                if s == "NET.IP_TO_STRING"
+                    || s == "NET.HOST"
+                    || s == "NET.PUBLIC_SUFFIX"
+                    || s == "NET.REG_DOMAIN" =>
+            {
+                Some(DataType::String)
+            }
+
+            FunctionName::Custom(s)
+                if s == "KEYS.KEYSET_CHAIN"
+                    || s == "AEAD.ENCRYPT"
+                    || s == "DETERMINISTIC_ENCRYPT" =>
+            {
+                Some(DataType::Bytes)
+            }
+            FunctionName::Custom(s)
+                if s == "AEAD.DECRYPT_BYTES" || s == "DETERMINISTIC_DECRYPT_BYTES" =>
+            {
+                Some(DataType::Bytes)
+            }
+            FunctionName::Custom(s)
+                if s == "AEAD.DECRYPT_STRING" || s == "DETERMINISTIC_DECRYPT_STRING" =>
+            {
+                Some(DataType::String)
+            }
+
+            FunctionName::Custom(s)
+                if s == "TO_TSVECTOR"
+                    || s == "TO_TSQUERY"
+                    || s == "PLAINTO_TSQUERY"
+                    || s == "PHRASETO_TSQUERY"
+                    || s == "WEBSEARCH_TO_TSQUERY"
+                    || s == "TS_HEADLINE"
+                    || s == "STRIP"
+                    || s == "SETWEIGHT"
+                    || s == "TSVECTOR_CONCAT"
+                    || s == "TSQUERY_AND"
+                    || s == "TSQUERY_OR"
+                    || s == "TSQUERY_NOT" =>
+            {
+                Some(DataType::String)
+            }
+            FunctionName::Custom(s) if s == "TS_RANK" || s == "TS_RANK_CD" => {
+                Some(DataType::Float64)
+            }
+            FunctionName::Custom(s) if s == "TS_MATCH" => Some(DataType::Bool),
+            FunctionName::Custom(s) if s == "TSVECTOR_LENGTH" => Some(DataType::Int64),
+
+            FunctionName::Custom(s) if s == "POINT" => Some(DataType::Point),
+            FunctionName::Custom(s) if s == "BOX" => Some(DataType::PgBox),
+            FunctionName::Custom(s) if s == "CIRCLE" => Some(DataType::Circle),
+
+            FunctionName::Custom(s)
+                if s == "AREA"
+                    || s == "WIDTH"
+                    || s == "HEIGHT"
+                    || s == "DIAGONAL"
+                    || s == "RADIUS"
+                    || s == "DIAMETER"
+                    || s == "CENTER"
+                    || s == "DISTANCE" =>
+            {
+                Some(DataType::Float64)
+            }
+
+            FunctionName::Custom(s) if s == "POINT_X" || s == "POINT_Y" => Some(DataType::Float64),
 
             _ => None,
         }
@@ -571,7 +1034,26 @@ impl ProjectionWithExprExec {
         use yachtsql_optimizer::expr::Expr;
 
         match expr {
-            Expr::Column { name, .. } => schema.field(name).map(|f| f.data_type.clone()),
+            Expr::Column { name, table } => {
+                if schema.field(name).is_some() {
+                    schema.field(name).map(|f| f.data_type.clone())
+                } else if let Some(table_name) = table {
+                    if let Some(field) = schema.field(table_name) {
+                        match &field.data_type {
+                            DataType::Struct(fields) => fields
+                                .iter()
+                                .find(|f| f.name.eq_ignore_ascii_case(name))
+                                .map(|f| f.data_type.clone()),
+                            DataType::Custom(_) => None,
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
             Expr::Literal(lit) => Self::infer_literal_type(lit),
             Expr::BinaryOp { left, op, right } => {
                 let left_type = Self::infer_expr_type_with_schema(left, schema);
@@ -582,14 +1064,15 @@ impl ProjectionWithExprExec {
                 let operand_type = Self::infer_expr_type_with_schema(expr, schema);
                 Self::infer_unary_op_type(op, operand_type)
             }
-            Expr::Function { name, args } => Self::infer_function_type(name.as_str(), args, schema),
+            Expr::Function { name, args } => Self::infer_function_type(name, args, schema),
             Expr::Cast { data_type, .. } => Some(Self::cast_type_to_data_type(data_type)),
             Expr::TryCast { data_type, .. } => Some(Self::cast_type_to_data_type(data_type)),
 
             Expr::Between { .. }
             | Expr::InList { .. }
             | Expr::TupleInList { .. }
-            | Expr::TupleInSubquery { .. } => Self::infer_comparison_operator_type(),
+            | Expr::TupleInSubquery { .. }
+            | Expr::IsDistinctFrom { .. } => Self::infer_comparison_operator_type(),
             Expr::StructLiteral { fields } => {
                 let mut struct_fields = Vec::with_capacity(fields.len());
                 for field in fields {
@@ -605,11 +1088,31 @@ impl ProjectionWithExprExec {
                 Some(DataType::Struct(struct_fields))
             }
             Expr::StructFieldAccess { expr, field } => {
-                match Self::infer_expr_type_with_schema(expr, schema)? {
-                    DataType::Struct(fields) => fields
-                        .into_iter()
-                        .find(|f| f.name == *field)
-                        .map(|f| f.data_type),
+                let inner_type = Self::infer_expr_type_with_schema(expr, schema);
+                debug_print::debug_eprintln!(
+                    "[type_inference] StructFieldAccess for field '{}', inner type: {:?}",
+                    field,
+                    inner_type
+                );
+                match inner_type? {
+                    DataType::Struct(fields) => {
+                        let field_names: Vec<_> = fields.iter().map(|f| &f.name).collect();
+                        debug_print::debug_eprintln!(
+                            "[type_inference] struct has fields: {:?}",
+                            field_names
+                        );
+                        fields
+                            .into_iter()
+                            .find(|f| f.name.eq_ignore_ascii_case(field))
+                            .map(|f| f.data_type)
+                    }
+                    DataType::Custom(type_name) => {
+                        debug_print::debug_eprintln!(
+                            "[type_inference] Custom type '{}', need to look up fields",
+                            type_name
+                        );
+                        None
+                    }
                     _ => None,
                 }
             }
@@ -626,25 +1129,30 @@ impl ProjectionWithExprExec {
                 }
             }
             Expr::ArraySlice { array, .. } => Self::infer_expr_type_with_schema(array, schema),
-            Expr::Aggregate { name, args, .. } => {
-                Self::infer_function_type(name.as_str(), args, schema)
-            }
+            Expr::Aggregate { name, args, .. } => Self::infer_function_type(name, args, schema),
             Expr::Case {
                 when_then,
                 else_expr,
                 ..
             } => {
-                if let Some(else_e) = else_expr {
-                    if let Some(t) = Self::infer_expr_type_with_schema(else_e, schema) {
-                        return Some(t);
-                    }
-                }
+                let mut types = Vec::new();
                 for (_, then_expr) in when_then {
                     if let Some(t) = Self::infer_expr_type_with_schema(then_expr, schema) {
-                        return Some(t);
+                        types.push(t);
                     }
                 }
-                None
+                if let Some(else_e) = else_expr {
+                    if let Some(t) = Self::infer_expr_type_with_schema(else_e, schema) {
+                        types.push(t);
+                    }
+                }
+                if types.is_empty() {
+                    None
+                } else if types.len() == 1 {
+                    Some(types[0].clone())
+                } else {
+                    yachtsql_core::types::coercion::CoercionRules::find_common_type(&types).ok()
+                }
             }
             _ => None,
         }
@@ -669,7 +1177,7 @@ impl ProjectionWithExprExec {
             }
             Expr::Function { name, args } => {
                 let empty_schema = Schema::new();
-                Self::infer_function_type(name.as_str(), args, &empty_schema)
+                Self::infer_function_type(name, args, &empty_schema)
             }
             Expr::Cast { data_type, .. } => Some(Self::cast_type_to_data_type(data_type)),
             Expr::TryCast { data_type, .. } => Some(Self::cast_type_to_data_type(data_type)),
@@ -677,7 +1185,8 @@ impl ProjectionWithExprExec {
             Expr::Between { .. }
             | Expr::InList { .. }
             | Expr::TupleInList { .. }
-            | Expr::TupleInSubquery { .. } => Self::infer_comparison_operator_type(),
+            | Expr::TupleInSubquery { .. }
+            | Expr::IsDistinctFrom { .. } => Self::infer_comparison_operator_type(),
             Expr::StructLiteral { fields } => {
                 let mut struct_fields = Vec::with_capacity(fields.len());
                 for field in fields {
@@ -706,24 +1215,31 @@ impl ProjectionWithExprExec {
             Expr::ArraySlice { array, .. } => Self::infer_expr_type(array),
             Expr::Aggregate { name, args, .. } => {
                 let empty_schema = Schema::new();
-                Self::infer_function_type(name.as_str(), args, &empty_schema)
+                Self::infer_function_type(name, args, &empty_schema)
             }
             Expr::Case {
                 when_then,
                 else_expr,
                 ..
             } => {
-                if let Some(else_e) = else_expr {
-                    if let Some(t) = Self::infer_expr_type(else_e) {
-                        return Some(t);
-                    }
-                }
+                let mut types = Vec::new();
                 for (_, then_expr) in when_then {
                     if let Some(t) = Self::infer_expr_type(then_expr) {
-                        return Some(t);
+                        types.push(t);
                     }
                 }
-                None
+                if let Some(else_e) = else_expr {
+                    if let Some(t) = Self::infer_expr_type(else_e) {
+                        types.push(t);
+                    }
+                }
+                if types.is_empty() {
+                    None
+                } else if types.len() == 1 {
+                    Some(types[0].clone())
+                } else {
+                    yachtsql_core::types::coercion::CoercionRules::find_common_type(&types).ok()
+                }
             }
             _ => None,
         }

@@ -1449,6 +1449,46 @@ fn test_correlated_scalar_subquery_with_null_groups() {
     assert_eq!(sum2.to_string(), "40");
 }
 
+#[test]
+fn test_correlated_scalar_subquery_without_alias() {
+    let mut executor = setup_executor();
+
+    executor.execute_sql("DROP TABLE IF EXISTS orders").unwrap();
+    executor
+        .execute_sql("CREATE TABLE orders (order_id INT64, customer STRING, amount INT64)")
+        .unwrap();
+    executor
+        .execute_sql(
+            "INSERT INTO orders VALUES (1, 'Alice', 100), (2, 'Alice', 150), (3, 'Bob', 200)",
+        )
+        .unwrap();
+
+    let result = executor
+        .execute_sql(
+            "SELECT o1.order_id, \
+             (SELECT SUM(o2.amount) FROM orders o2 WHERE o2.customer = o1.customer) \
+             FROM orders o1 ORDER BY o1.order_id",
+        )
+        .unwrap();
+
+    assert_eq!(result.num_rows(), 3);
+
+    let order_id_col = result.column(0).unwrap();
+    let sum_col = result.column(1).unwrap();
+
+    assert_eq!(order_id_col.get(0).unwrap().as_i64(), Some(1));
+    let sum1 = sum_col.get(0).unwrap().as_numeric().unwrap();
+    assert_eq!(sum1.to_string(), "250");
+
+    assert_eq!(order_id_col.get(1).unwrap().as_i64(), Some(2));
+    let sum2 = sum_col.get(1).unwrap().as_numeric().unwrap();
+    assert_eq!(sum2.to_string(), "250");
+
+    assert_eq!(order_id_col.get(2).unwrap().as_i64(), Some(3));
+    let sum3 = sum_col.get(2).unwrap().as_numeric().unwrap();
+    assert_eq!(sum3.to_string(), "200");
+}
+
 // ============================================================================
 // Phase 3: Correlated EXISTS/IN Subquery Decorrelation Tests
 // These tests verify that correlated EXISTS/IN subqueries are correctly
@@ -1459,7 +1499,9 @@ fn test_correlated_scalar_subquery_with_null_groups() {
 fn test_correlated_exists_employees_with_orders() {
     let mut executor = setup_executor();
 
-    executor.execute_sql("DROP TABLE IF EXISTS employees").unwrap();
+    executor
+        .execute_sql("DROP TABLE IF EXISTS employees")
+        .unwrap();
     executor.execute_sql("DROP TABLE IF EXISTS orders").unwrap();
     executor
         .execute_sql("CREATE TABLE employees (id INT64, name STRING)")
@@ -1492,7 +1534,9 @@ fn test_correlated_exists_employees_with_orders() {
 fn test_correlated_not_exists_employees_without_orders() {
     let mut executor = setup_executor();
 
-    executor.execute_sql("DROP TABLE IF EXISTS employees").unwrap();
+    executor
+        .execute_sql("DROP TABLE IF EXISTS employees")
+        .unwrap();
     executor.execute_sql("DROP TABLE IF EXISTS orders").unwrap();
     executor
         .execute_sql("CREATE TABLE employees (id INT64, name STRING)")
@@ -1524,7 +1568,9 @@ fn test_correlated_not_exists_employees_without_orders() {
 fn test_correlated_exists_with_additional_filter() {
     let mut executor = setup_executor();
 
-    executor.execute_sql("DROP TABLE IF EXISTS customers").unwrap();
+    executor
+        .execute_sql("DROP TABLE IF EXISTS customers")
+        .unwrap();
     executor.execute_sql("DROP TABLE IF EXISTS orders").unwrap();
     executor
         .execute_sql("CREATE TABLE customers (id INT64, name STRING, tier STRING)")
@@ -1557,8 +1603,12 @@ fn test_correlated_exists_with_additional_filter() {
 fn test_correlated_in_subquery_departments() {
     let mut executor = setup_executor();
 
-    executor.execute_sql("DROP TABLE IF EXISTS employees").unwrap();
-    executor.execute_sql("DROP TABLE IF EXISTS departments").unwrap();
+    executor
+        .execute_sql("DROP TABLE IF EXISTS employees")
+        .unwrap();
+    executor
+        .execute_sql("DROP TABLE IF EXISTS departments")
+        .unwrap();
     executor
         .execute_sql("CREATE TABLE employees (id INT64, name STRING, dept_id INT64)")
         .unwrap();
@@ -1569,7 +1619,9 @@ fn test_correlated_in_subquery_departments() {
         .execute_sql("INSERT INTO employees VALUES (1, 'Alice', 1), (2, 'Bob', 2), (3, 'Carol', 3)")
         .unwrap();
     executor
-        .execute_sql("INSERT INTO departments VALUES (1, 'HR', 1), (2, 'Engineering', 1), (3, 'Sales', 0)")
+        .execute_sql(
+            "INSERT INTO departments VALUES (1, 'HR', 1), (2, 'Engineering', 1), (3, 'Sales', 0)",
+        )
         .unwrap();
 
     let result = executor
@@ -1590,8 +1642,12 @@ fn test_correlated_in_subquery_departments() {
 fn test_correlated_not_in_subquery_departments() {
     let mut executor = setup_executor();
 
-    executor.execute_sql("DROP TABLE IF EXISTS employees").unwrap();
-    executor.execute_sql("DROP TABLE IF EXISTS departments").unwrap();
+    executor
+        .execute_sql("DROP TABLE IF EXISTS employees")
+        .unwrap();
+    executor
+        .execute_sql("DROP TABLE IF EXISTS departments")
+        .unwrap();
     executor
         .execute_sql("CREATE TABLE employees (id INT64, name STRING, dept_id INT64)")
         .unwrap();
@@ -1602,7 +1658,9 @@ fn test_correlated_not_in_subquery_departments() {
         .execute_sql("INSERT INTO employees VALUES (1, 'Alice', 1), (2, 'Bob', 2), (3, 'Carol', 3)")
         .unwrap();
     executor
-        .execute_sql("INSERT INTO departments VALUES (1, 'HR', 1), (2, 'Engineering', 1), (3, 'Sales', 0)")
+        .execute_sql(
+            "INSERT INTO departments VALUES (1, 'HR', 1), (2, 'Engineering', 1), (3, 'Sales', 0)",
+        )
         .unwrap();
 
     let result = executor
