@@ -211,7 +211,9 @@ impl ProjectionWithExprExec {
                 operand,
                 when_then,
                 else_expr,
-            } => Self::evaluate_case_internal(operand, when_then, else_expr, batch, row_idx, _dialect),
+            } => Self::evaluate_case_internal(
+                operand, when_then, else_expr, batch, row_idx, _dialect,
+            ),
 
             Expr::Cast { expr, data_type } => {
                 let value = Self::evaluate_expr_internal(expr, batch, row_idx, _dialect)?;
@@ -668,7 +670,9 @@ impl ProjectionWithExprExec {
             )
         ) || name.as_str().starts_with("NET.")
         {
-            return Self::evaluate_crypto_hash_network_function(func_name, args, batch, row_idx, dialect);
+            return Self::evaluate_crypto_hash_network_function(
+                func_name, args, batch, row_idx, dialect,
+            );
         }
 
         {

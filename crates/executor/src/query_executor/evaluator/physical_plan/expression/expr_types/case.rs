@@ -32,7 +32,8 @@ impl ProjectionWithExprExec {
         dialect: crate::DialectType,
     ) -> Result<Value> {
         if let Some(case_operand) = operand {
-            let operand_value = Self::evaluate_expr_internal(case_operand, batch, row_idx, dialect)?;
+            let operand_value =
+                Self::evaluate_expr_internal(case_operand, batch, row_idx, dialect)?;
             for (when_expr, then_expr) in when_then {
                 let when_value = Self::evaluate_expr_internal(when_expr, batch, row_idx, dialect)?;
                 if Self::values_equal(&operand_value, &when_value) {
