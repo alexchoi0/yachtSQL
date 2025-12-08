@@ -458,6 +458,11 @@ impl QueryExecutor {
 
         resource_tracker.check_timeout()?;
 
+        let _sequence_guard =
+            crate::query_executor::evaluator::physical_plan::SequenceRegistryContextGuard::set(
+                Rc::clone(&self.storage),
+            );
+
         let batches = physical_plan.execute()?;
 
         for batch in &batches {

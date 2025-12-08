@@ -66,6 +66,11 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+thread_local! {
+    pub(crate) static SEQUENCE_REGISTRY_CONTEXT: std::cell::RefCell<Option<Rc<RefCell<yachtsql_storage::Storage>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Debug)]
 pub enum CachedSubqueryResult {
     Scalar(yachtsql_core::types::Value),
@@ -137,6 +142,31 @@ impl Drop for SubqueryExecutorContextGuard {
     fn drop(&mut self) {
         let previous = self.previous.clone();
         SUBQUERY_EXECUTOR_CONTEXT.with(|ctx| {
+            *ctx.borrow_mut() = previous;
+        });
+    }
+}
+
+pub(crate) struct SequenceRegistryContextGuard {
+    previous: Option<Rc<RefCell<yachtsql_storage::Storage>>>,
+}
+
+impl SequenceRegistryContextGuard {
+    pub(crate) fn set(storage: Rc<RefCell<yachtsql_storage::Storage>>) -> Self {
+        let previous = SEQUENCE_REGISTRY_CONTEXT.with(|ctx| {
+            let mut slot = ctx.borrow_mut();
+            let prior = slot.clone();
+            *slot = Some(storage);
+            prior
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for SequenceRegistryContextGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.clone();
+        SEQUENCE_REGISTRY_CONTEXT.with(|ctx| {
             *ctx.borrow_mut() = previous;
         });
     }
