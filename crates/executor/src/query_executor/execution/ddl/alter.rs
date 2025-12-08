@@ -1,7 +1,7 @@
 use sqlparser::ast::{AlterTableOperation, Statement as SqlStatement};
 use yachtsql_core::error::{Error, Result};
 use yachtsql_core::types::Value;
-use yachtsql_storage::{CheckConstraint, Field, ForeignKey, TableSchemaOps};
+use yachtsql_storage::{CheckConstraint, Field, ForeignKey, TableConstraintOps, TableSchemaOps};
 
 use super::super::QueryExecutor;
 use super::create::DdlExecutor;
@@ -241,15 +241,18 @@ impl AlterTableExecutor for QueryExecutor {
 
                 AlterTableOperation::AddConstraint {
                     constraint,
-                    not_valid: _,
+                    not_valid,
                 } => {
                     use sqlparser::ast::TableConstraint;
+                    let skip_validation = *not_valid;
                     match constraint {
                         TableConstraint::Unique { columns, .. } => {
                             let col_names: Vec<String> =
                                 columns.iter().map(|c| c.column.expr.to_string()).collect();
 
-                            self.validate_unique_constraint(table, &col_names)?;
+                            if !skip_validation {
+                                self.validate_unique_constraint(table, &col_names)?;
+                            }
 
                             table.schema_mut().add_unique_constraint(col_names);
                         }
@@ -257,7 +260,9 @@ impl AlterTableExecutor for QueryExecutor {
                             let col_names: Vec<String> =
                                 columns.iter().map(|c| c.column.expr.to_string()).collect();
 
-                            self.validate_primary_key_constraint(table, &col_names)?;
+                            if !skip_validation {
+                                self.validate_primary_key_constraint(table, &col_names)?;
+                            }
 
                             table.schema_mut().set_primary_key(col_names);
                         }
@@ -270,7 +275,7 @@ impl AlterTableExecutor for QueryExecutor {
                             let expr_str = expr.to_string();
                             let is_enforced = enforced.unwrap_or(true);
 
-                            if is_enforced {
+                            if is_enforced && !skip_validation {
                                 self.validate_check_constraint(table, &expr_str)?;
                             }
 
@@ -321,7 +326,8 @@ impl AlterTableExecutor for QueryExecutor {
                                 }
                             }
 
-                            table.schema_mut().add_foreign_key(foreign_key);
+                            table.schema_mut().add_foreign_key(foreign_key.clone());
+                            table.add_foreign_key(foreign_key)?;
                         }
                         _ => {
                             return Err(Error::unsupported_feature(format!(
@@ -335,19 +341,54 @@ impl AlterTableExecutor for QueryExecutor {
                 AlterTableOperation::DropConstraint { name, .. } => {
                     let constraint_name = name.to_string();
 
-                    table
+                    let removed_check = table
                         .schema_mut()
-                        .remove_constraint_metadata(&constraint_name)
-                        .ok_or_else(|| {
-                            Error::invalid_query(format!(
-                                "Constraint '{}' does not exist",
-                                constraint_name
-                            ))
-                        })?;
+                        .remove_check_constraint_by_name(&constraint_name);
+
+                    let removed_fk = table.remove_foreign_key(&constraint_name).is_ok();
+
+                    if removed_fk {
+                        table
+                            .schema_mut()
+                            .remove_foreign_key_by_name(&constraint_name);
+                    }
+
+                    if !removed_check && !removed_fk {
+                        return Err(Error::invalid_query(format!(
+                            "Constraint '{}' does not exist",
+                            constraint_name
+                        )));
+                    }
                 }
 
                 AlterTableOperation::DropPrimaryKey { .. } => {
                     table.schema_mut().drop_primary_key()?;
+                }
+
+                AlterTableOperation::RenameConstraint { old_name, new_name } => {
+                    let old_constraint_name = old_name.to_string();
+                    let new_constraint_name = new_name.to_string();
+
+                    if !table
+                        .schema_mut()
+                        .rename_constraint(&old_constraint_name, &new_constraint_name)
+                    {
+                        return Err(Error::invalid_query(format!(
+                            "Constraint '{}' does not exist",
+                            old_constraint_name
+                        )));
+                    }
+                }
+
+                AlterTableOperation::ValidateConstraint { name } => {
+                    let constraint_name = name.to_string();
+
+                    if !table.schema().has_constraint(&constraint_name) {
+                        return Err(Error::invalid_query(format!(
+                            "Constraint '{}' does not exist",
+                            constraint_name
+                        )));
+                    }
                 }
 
                 AlterTableOperation::ModifyColumn {

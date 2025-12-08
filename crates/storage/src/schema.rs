@@ -394,6 +394,16 @@ impl Schema {
     }
 
     pub fn add_check_constraint(&mut self, constraint: CheckConstraint) {
+        if let Some(ref name) = constraint.name {
+            self.constraint_metadata.insert(
+                name.clone(),
+                ConstraintMetadata {
+                    constraint_type: ConstraintTypeTag::Check,
+                    columns: vec![],
+                    definition: constraint.expression.clone(),
+                },
+            );
+        }
         self.check_constraints.push(constraint);
     }
 
@@ -401,12 +411,84 @@ impl Schema {
         &self.check_constraints
     }
 
+    pub fn remove_check_constraint_by_name(&mut self, name: &str) -> bool {
+        if let Some(pos) = self
+            .check_constraints
+            .iter()
+            .position(|c| c.name.as_deref() == Some(name))
+        {
+            self.check_constraints.remove(pos);
+            self.constraint_metadata.remove(name);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn add_foreign_key(&mut self, foreign_key: crate::ForeignKey) {
+        if let Some(ref name) = foreign_key.name {
+            self.constraint_metadata.insert(
+                name.clone(),
+                ConstraintMetadata {
+                    constraint_type: ConstraintTypeTag::ForeignKey,
+                    columns: foreign_key.child_columns.clone(),
+                    definition: format!(
+                        "FOREIGN KEY ({}) REFERENCES {}({})",
+                        foreign_key.child_columns.join(", "),
+                        foreign_key.parent_table,
+                        foreign_key.parent_columns.join(", ")
+                    ),
+                },
+            );
+        }
         self.foreign_keys.push(foreign_key);
     }
 
     pub fn foreign_keys(&self) -> &[crate::ForeignKey] {
         &self.foreign_keys
+    }
+
+    pub fn remove_foreign_key_by_name(&mut self, name: &str) -> bool {
+        if let Some(pos) = self
+            .foreign_keys
+            .iter()
+            .position(|fk| fk.name.as_deref() == Some(name))
+        {
+            self.foreign_keys.remove(pos);
+            self.constraint_metadata.remove(name);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn rename_constraint(&mut self, old_name: &str, new_name: &str) -> bool {
+        if let Some(metadata) = self.constraint_metadata.remove(old_name) {
+            match metadata.constraint_type {
+                ConstraintTypeTag::Check => {
+                    for constraint in &mut self.check_constraints {
+                        if constraint.name.as_deref() == Some(old_name) {
+                            constraint.name = Some(new_name.to_string());
+                            break;
+                        }
+                    }
+                }
+                ConstraintTypeTag::ForeignKey => {
+                    for fk in &mut self.foreign_keys {
+                        if fk.name.as_deref() == Some(old_name) {
+                            fk.name = Some(new_name.to_string());
+                            break;
+                        }
+                    }
+                }
+                ConstraintTypeTag::Unique | ConstraintTypeTag::PrimaryKey => {}
+            }
+            self.constraint_metadata
+                .insert(new_name.to_string(), metadata);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_check_evaluator(&mut self, evaluator: CheckEvaluator) {
