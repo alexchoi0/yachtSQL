@@ -2,7 +2,6 @@ use crate::assert_table_eq;
 use crate::common::create_executor;
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_basic() {
     let mut executor = create_executor();
     executor.execute_sql("CREATE SEQUENCE seq_test").unwrap();
@@ -11,7 +10,6 @@ fn test_create_sequence_basic() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_start_with() {
     let mut executor = create_executor();
     executor
@@ -22,7 +20,6 @@ fn test_create_sequence_start_with() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_increment_by() {
     let mut executor = create_executor();
     executor
@@ -34,7 +31,6 @@ fn test_create_sequence_increment_by() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_minvalue() {
     let mut executor = create_executor();
     executor
@@ -45,7 +41,6 @@ fn test_create_sequence_minvalue() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_maxvalue() {
     let mut executor = create_executor();
     executor
@@ -56,7 +51,6 @@ fn test_create_sequence_maxvalue() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_cycle() {
     let mut executor = create_executor();
     executor
@@ -70,7 +64,6 @@ fn test_create_sequence_cycle() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_no_cycle() {
     let mut executor = create_executor();
     executor
@@ -83,7 +76,6 @@ fn test_create_sequence_no_cycle() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_cache() {
     let mut executor = create_executor();
     executor
@@ -94,7 +86,6 @@ fn test_create_sequence_cache() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_create_sequence_if_not_exists() {
     let mut executor = create_executor();
     executor.execute_sql("CREATE SEQUENCE seq_exists").unwrap();
@@ -181,7 +172,6 @@ fn test_lastval() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_alter_sequence_restart() {
     let mut executor = create_executor();
     executor.execute_sql("CREATE SEQUENCE seq_alter").unwrap();
@@ -194,7 +184,6 @@ fn test_alter_sequence_restart() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_alter_sequence_increment() {
     let mut executor = create_executor();
     executor
@@ -213,7 +202,6 @@ fn test_alter_sequence_increment() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_sequence_owned_by() {
     let mut executor = create_executor();
     executor
@@ -227,7 +215,6 @@ fn test_sequence_owned_by() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_serial_column() {
     let mut executor = create_executor();
     executor
@@ -246,7 +233,6 @@ fn test_serial_column() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_bigserial_column() {
     let mut executor = create_executor();
     executor
@@ -262,7 +248,6 @@ fn test_bigserial_column() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_smallserial_column() {
     let mut executor = create_executor();
     executor
@@ -278,7 +263,6 @@ fn test_smallserial_column() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_sequence_descending() {
     let mut executor = create_executor();
     executor
@@ -291,7 +275,6 @@ fn test_sequence_descending() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_generated_always_as_identity() {
     let mut executor = create_executor();
     executor
