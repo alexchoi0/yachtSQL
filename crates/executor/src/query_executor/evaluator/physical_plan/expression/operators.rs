@@ -579,6 +579,27 @@ impl ProjectionWithExprExec {
             };
         }
 
+        if let (Some(date), Some(interval)) = (left.as_date(), right.as_interval()) {
+            return match op {
+                BinaryOp::Add => Self::add_interval_to_date(date, interval),
+                BinaryOp::Subtract => Self::subtract_interval_from_date(date, interval),
+                _ => Err(crate::error::Error::unsupported_feature(format!(
+                    "Operator {:?} not supported for DATE +/- INTERVAL",
+                    op
+                ))),
+            };
+        }
+
+        if let (Some(interval), Some(date)) = (left.as_interval(), right.as_date()) {
+            return match op {
+                BinaryOp::Add => Self::add_interval_to_date(date, interval),
+                _ => Err(crate::error::Error::unsupported_feature(format!(
+                    "Operator {:?} not supported for INTERVAL + DATE",
+                    op
+                ))),
+            };
+        }
+
         if let (Some(l), Some(r)) = (left.as_time(), right.as_time()) {
             return match op {
                 BinaryOp::Equal => Ok(Value::bool_val(l == r)),
@@ -983,6 +1004,71 @@ impl ProjectionWithExprExec {
             micros: -interval.micros,
         };
         Self::add_interval_to_timestamp(ts, &negated)
+    }
+
+    fn add_interval_to_date(
+        date: chrono::NaiveDate,
+        interval: &yachtsql_core::types::Interval,
+    ) -> Result<Value> {
+        use chrono::{Datelike, Duration, Months, TimeZone, Utc};
+
+        let mut result_date = date;
+
+        if interval.months != 0 {
+            if interval.months > 0 {
+                result_date = result_date
+                    .checked_add_months(Months::new(interval.months as u32))
+                    .ok_or_else(|| {
+                        crate::error::Error::ExecutionError(
+                            "Date overflow when adding months".to_string(),
+                        )
+                    })?;
+            } else {
+                result_date = result_date
+                    .checked_sub_months(Months::new((-interval.months) as u32))
+                    .ok_or_else(|| {
+                        crate::error::Error::ExecutionError(
+                            "Date underflow when subtracting months".to_string(),
+                        )
+                    })?;
+            }
+        }
+
+        if interval.days != 0 {
+            result_date = result_date
+                .checked_add_signed(Duration::days(interval.days as i64))
+                .ok_or_else(|| {
+                    crate::error::Error::ExecutionError(
+                        "Date overflow when adding days".to_string(),
+                    )
+                })?;
+        }
+
+        if interval.micros != 0 {
+            let ts = Utc
+                .from_utc_datetime(&result_date.and_hms_opt(0, 0, 0).unwrap())
+                .checked_add_signed(Duration::microseconds(interval.micros))
+                .ok_or_else(|| {
+                    crate::error::Error::ExecutionError(
+                        "Timestamp overflow when adding microseconds".to_string(),
+                    )
+                })?;
+            return Ok(Value::timestamp(ts));
+        }
+
+        Ok(Value::date(result_date))
+    }
+
+    fn subtract_interval_from_date(
+        date: chrono::NaiveDate,
+        interval: &yachtsql_core::types::Interval,
+    ) -> Result<Value> {
+        let negated = yachtsql_core::types::Interval {
+            months: -interval.months,
+            days: -interval.days,
+            micros: -interval.micros,
+        };
+        Self::add_interval_to_date(date, &negated)
     }
 
     pub(crate) fn evaluate_binary_op_with_enum(

@@ -743,8 +743,15 @@ impl ProjectionWithExprExec {
             | FunctionName::Datepart
             | FunctionName::DateDiff
             | FunctionName::Datediff
-            | FunctionName::Timestampdiff
-            | FunctionName::Age => Some(DataType::Int64),
+            | FunctionName::Timestampdiff => Some(DataType::Int64),
+
+            FunctionName::Age => Some(DataType::Interval),
+
+            FunctionName::Custom(s)
+                if s == "JUSTIFY_DAYS" || s == "JUSTIFY_HOURS" || s == "JUSTIFY_INTERVAL" =>
+            {
+                Some(DataType::Interval)
+            }
 
             FunctionName::Custom(s)
                 if s == "YEAR"
