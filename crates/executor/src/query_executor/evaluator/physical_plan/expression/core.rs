@@ -746,6 +746,63 @@ impl ProjectionWithExprExec {
         if matches!(
             name,
             FunctionName::Custom(s) if matches!(s.as_str(),
+                "ST_GEOGPOINT"
+                | "ST_GEOGFROMTEXT"
+                | "ST_GEOGFROMGEOJSON"
+                | "ST_ASTEXT"
+                | "ST_ASGEOJSON"
+                | "ST_ASBINARY"
+                | "ST_X"
+                | "ST_Y"
+                | "ST_GEOMETRYTYPE"
+                | "ST_ISEMPTY"
+                | "ST_ISCLOSED"
+                | "ST_ISCOLLECTION"
+                | "ST_DIMENSION"
+                | "ST_NUMPOINTS"
+                | "ST_NPOINTS"
+                | "ST_POINTN"
+                | "ST_STARTPOINT"
+                | "ST_ENDPOINT"
+                | "ST_MAKELINE"
+                | "ST_MAKEPOLYGON"
+                | "ST_DISTANCE"
+                | "ST_LENGTH"
+                | "ST_AREA"
+                | "ST_PERIMETER"
+                | "ST_MAXDISTANCE"
+                | "ST_AZIMUTH"
+                | "ST_CENTROID"
+                | "ST_CONTAINS"
+                | "ST_COVERS"
+                | "ST_COVEREDBY"
+                | "ST_DISJOINT"
+                | "ST_DWITHIN"
+                | "ST_EQUALS"
+                | "ST_INTERSECTS"
+                | "ST_TOUCHES"
+                | "ST_WITHIN"
+                | "ST_BOUNDARY"
+                | "ST_BUFFER"
+                | "ST_BUFFERWITHTOLERANCE"
+                | "ST_CLOSESTPOINT"
+                | "ST_CONVEXHULL"
+                | "ST_DIFFERENCE"
+                | "ST_INTERSECTION"
+                | "ST_SIMPLIFY"
+                | "ST_SNAPTOGRID"
+                | "ST_UNION"
+                | "ST_BOUNDINGBOX"
+                | "ST_GEOHASH"
+                | "ST_GEOGPOINTFROMGEOHASH"
+            )
+        ) {
+            return Self::evaluate_geography_function(func_name, args, batch, row_idx);
+        }
+
+        if matches!(
+            name,
+            FunctionName::Custom(s) if matches!(s.as_str(),
                 "TO_TSVECTOR"
                 | "TO_TSQUERY"
                 | "PLAINTO_TSQUERY"

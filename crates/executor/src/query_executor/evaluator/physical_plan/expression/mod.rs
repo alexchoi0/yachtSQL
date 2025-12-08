@@ -1,6 +1,7 @@
 mod conversions;
 mod core;
 mod expr_types;
+mod geography;
 mod helpers;
 mod hstore;
 mod operators;
