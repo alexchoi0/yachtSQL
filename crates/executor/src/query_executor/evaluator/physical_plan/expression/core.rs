@@ -652,6 +652,9 @@ impl ProjectionWithExprExec {
                 | "WEEKDAY"
                 | "LAST_DAY"
                 | "AT_TIME_ZONE"
+                | "JUSTIFY_DAYS"
+                | "JUSTIFY_HOURS"
+                | "JUSTIFY_INTERVAL"
             )
         ) {
             return Self::evaluate_datetime_function(func_name, args, batch, row_idx);

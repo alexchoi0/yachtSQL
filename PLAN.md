@@ -1,132 +1,75 @@
-# Work Stream 7: Constraint Enforcement on UPDATE
+# Worker 4: Interval Functions
 
-## Overview
-Implement constraint checking during UPDATE and enhance DELETE constraint enforcement.
+## Objective
+Implement interval-related functions to remove `#[ignore]` tags from `tests/postgresql/data_types/interval.rs`.
 
-## Tests to Enable
-**File:** `tests/postgresql/ddl/constraints.rs`
-- `test_check_constraint_enforcement_on_update`
-- `test_unique_enforcement_on_update`
-- `test_foreign_key_violation_update`
-- `test_foreign_key_on_delete_restrict`
-- `test_foreign_key_on_delete_no_action`
-- `test_foreign_key_on_update_restrict`
+## Test File
+- `tests/postgresql/data_types/interval.rs` (8 ignored tests)
 
-## Constraints to Enforce
+## Features to Implement
 
-### CHECK Constraint on UPDATE
-```sql
-CREATE TABLE t (id INT, age INT CHECK (age >= 0));
-INSERT INTO t VALUES (1, 25);
-UPDATE t SET age = -5 WHERE id = 1;  -- ERROR: violates check constraint
-```
-- Evaluate CHECK expression against new row values
-- Error if constraint violated
+### 1. Date + Interval Arithmetic
+- `DATE '2024-01-01' + INTERVAL '5 days'` - Add interval to date
+- Returns DATE or TIMESTAMP depending on interval components
 
-### UNIQUE Constraint on UPDATE
-```sql
-CREATE TABLE t (id INT, email TEXT UNIQUE);
-INSERT INTO t VALUES (1, 'a@b.com'), (2, 'c@d.com');
-UPDATE t SET email = 'a@b.com' WHERE id = 2;  -- ERROR: duplicate key
-```
-- Check if new value conflicts with existing rows
-- Exclude the row being updated from check
+### 2. EXTRACT from Interval
+- `EXTRACT(DAY FROM INTERVAL '5 days 3 hours')` → 5
+- `EXTRACT(HOUR FROM INTERVAL '5 days 3 hours')` → 3
+- Support: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND
 
-### Foreign Key on UPDATE (child table)
-```sql
-CREATE TABLE parent (id INT PRIMARY KEY);
-CREATE TABLE child (id INT, pid INT REFERENCES parent(id));
-INSERT INTO parent VALUES (1);
-INSERT INTO child VALUES (1, 1);
-UPDATE child SET pid = 999 WHERE id = 1;  -- ERROR: FK violation
-```
-- Verify new foreign key value exists in parent table
+### 3. ISO 8601 Interval Format
+- `INTERVAL 'P1Y2M3D'` - ISO 8601 duration format
+- P = Period, Y = Years, M = Months, D = Days
+- T prefix for time: `PT1H30M` = 1 hour 30 minutes
 
-### ON DELETE RESTRICT
-```sql
-CREATE TABLE child (pid INT REFERENCES parent(id) ON DELETE RESTRICT);
-DELETE FROM parent WHERE id = 1;  -- ERROR if child rows exist
-```
-- Prevent delete if any child rows reference this row
-- Check immediately (not at statement end)
+### 4. AGE Function
+- `AGE(timestamp1, timestamp2)` - Difference as interval
+- `AGE(timestamp)` - Difference from current_date
+- Returns interval with years, months, days, etc.
 
-### ON DELETE NO ACTION
-```sql
-CREATE TABLE child (pid INT REFERENCES parent(id) ON DELETE NO ACTION);
-DELETE FROM parent WHERE id = 1;  -- ERROR if child rows exist
-```
-- Same as RESTRICT but checked at statement end
-- Allows other triggers/rules to fix the reference first
+### 5. JUSTIFY Functions
+- `JUSTIFY_DAYS(interval)` - Convert 30-day periods to months
+- `JUSTIFY_HOURS(interval)` - Convert 24-hour periods to days
+- `JUSTIFY_INTERVAL(interval)` - Apply both justifications
 
-### ON UPDATE RESTRICT
-```sql
-CREATE TABLE child (pid INT REFERENCES parent(id) ON UPDATE RESTRICT);
-UPDATE parent SET id = 2 WHERE id = 1;  -- ERROR if child rows exist
-```
-- Prevent update of referenced column if child rows exist
+## Implementation Steps
+
+1. **Date + Interval**
+   - Parse DATE literal if not already supported
+   - Add interval to date, handling day/month/year overflow
+   - Return appropriate result type
+
+2. **EXTRACT for Intervals**
+   - Extend EXTRACT function to handle interval input
+   - Extract specific component from interval struct
+   - Handle field extraction logic
+
+3. **ISO 8601 Parsing**
+   - Detect ISO format (starts with 'P')
+   - Parse designators: Y, M, W, D, T, H, M, S
+   - Convert to internal interval representation
+
+4. **AGE Function**
+   - Register AGE as scalar function
+   - Two-argument: compute interval between timestamps
+   - One-argument: use CURRENT_DATE as reference
+   - Calculate years, months, days difference
+
+5. **JUSTIFY Functions**
+   - `JUSTIFY_HOURS`: hours >= 24 → add days
+   - `JUSTIFY_DAYS`: days >= 30 → add months
+   - `JUSTIFY_INTERVAL`: apply both, handle signs
 
 ## Key Files to Modify
+- `crates/parser/src/` - ISO 8601 interval parsing
+- `crates/executor/src/query_executor/evaluator/` - Function implementations
+- Interval type arithmetic handlers
 
-### UPDATE Execution
-- `crates/executor/src/query_executor/execution/dml/update.rs`
-- Before updating each row:
-  1. Evaluate CHECK constraints on new values
-  2. Check UNIQUE constraints (excluding current row)
-  3. Verify FK references exist in parent tables
-
-### DELETE Execution
-- `crates/executor/src/query_executor/execution/dml/delete.rs`
-- Before deleting each row:
-  1. Check for RESTRICT foreign keys referencing this row
-  2. For NO ACTION, defer check to statement end
-
-### Constraint Checking Utilities
-- `crates/storage/src/constraints.rs` or new module
-- `check_constraint(table, row, constraint) -> Result<()>`
-- `check_unique(table, row, columns, exclude_row) -> Result<()>`
-- `check_foreign_key(child_table, row, fk) -> Result<()>`
-- `check_references(parent_table, row, pk_columns) -> Result<()>`
-
-## Implementation Notes
-
-1. **CHECK on UPDATE**
-   - Get constraint expression
-   - Bind new row values to expression variables
-   - Evaluate expression, error if false
-
-2. **UNIQUE on UPDATE**
-   - Query for existing rows with same values
-   - Exclude the row being updated (by primary key or row ID)
-   - Error if any matches found
-
-3. **FK on UPDATE (child)**
-   - Get parent table and referenced columns
-   - Query parent table for matching row
-   - Error if not found
-
-4. **RESTRICT vs NO ACTION**
-   - RESTRICT: check immediately per-row
-   - NO ACTION: collect checks, verify at statement end
-   - In practice, often behave the same
-
-5. **Performance considerations**
-   - May want to batch constraint checks
-   - Index lookups for FK and UNIQUE checks
-
-## Test Commands
+## Testing
 ```bash
-cargo test --test postgresql test_check_constraint_enforcement_on_update
-cargo test --test postgresql test_unique_enforcement_on_update
-cargo test --test postgresql test_foreign_key_violation_update
-cargo test --test postgresql test_foreign_key_on_delete_restrict
-cargo test --test postgresql test_foreign_key_on_delete_no_action
-cargo test --test postgresql test_foreign_key_on_update_restrict
+cargo test --test postgresql data_types::interval
 ```
 
-## Dependencies
-None - extends existing constraint checking (INSERT already has some)
-
-## Coordination
-- Work Stream 6 (DROP CONSTRAINT) adds `is_valid` flag - check it before enforcing
-- Work Stream 8 (Deferred Constraints) needs these checks to defer
-- Share constraint checking utilities
+## Notes
+- Basic interval operations (arithmetic, comparison) already work
+- Focus on the specific functions and date+interval arithmetic
