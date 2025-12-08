@@ -1,65 +1,94 @@
-# Worker 7: ClickHouse Geo, URL & Encoding Functions
-
-## Status: COMPLETE
+# Worker 6: Bytea Functions
 
 ## Objective
-Implement ignored tests in ClickHouse geo, URL, and encoding modules.
+Implement bytea (binary) functions to remove `#[ignore]` tags from `tests/postgresql/data_types/bytes.rs`.
 
-## Results
-| Test File | Passed | Ignored |
-|-----------|--------|---------|
-| geo.rs | 29 | 0 |
-| url.rs | 27 | 0 |
-| other.rs | 23 | 4 |
-| encoding.rs | 20 | 1 |
-| ip.rs | 18 | 1 |
-| **Total** | **117** | **6** |
+## Test File
+- `tests/postgresql/data_types/bytes.rs` (9 ignored tests)
 
-## Files Worked On
-1. `tests/clickhouse/functions/geo.rs` - 29 passed, 0 ignored
-2. `tests/clickhouse/functions/url.rs` - 27 passed, 0 ignored
-3. `tests/clickhouse/functions/other.rs` - 23 passed, 4 ignored
-4. `tests/clickhouse/functions/encoding.rs` - 20 passed, 1 ignored
-5. `tests/clickhouse/functions/ip.rs` - 18 passed, 1 ignored
+## Features to Implement
 
-## Instructions
-1. For each ignored test, remove the `#[ignore = "Implement me!"]` attribute
-2. Run the test to see what's missing
-3. Implement the missing functionality in the executor
-4. Ensure the test passes before moving to the next one
+### 1. Escape String Literal
+- `E'\\x48656c6c6f'::BYTEA` - Escape string format
+- Handle backslash escaping in E'' strings
 
-## Key Areas
-- **Geo functions**: geoDistance, greatCircleDistance, H3 functions, geohash
-- **URL functions**: domain, topLevelDomain, path, protocol, extractURLParameter
-- **Other functions**: miscellaneous ClickHouse-specific functions
-- **Encoding functions**: hex, unhex, base64Encode, base64Decode, URLEncode
-- **IP functions**: IPv4NumToString, IPv4StringToNum, IPv6 operations
+### 2. LENGTH for Bytea
+- `LENGTH(bytea)` - Return length in bytes
+- Distinct from character length for text
 
-## Running Tests
-```bash
-cargo test --test clickhouse functions::geo
-cargo test --test clickhouse functions::url
-cargo test --test clickhouse functions::other
-cargo test --test clickhouse functions::encoding
-cargo test --test clickhouse functions::ip
+### 3. SUBSTRING for Bytea
+- `SUBSTRING(bytea, start, length)` - Extract bytes
+- 1-indexed positioning
+- Handle out-of-bounds gracefully
+
+### 4. POSITION for Bytea
+- `POSITION(pattern IN bytea)` - Find byte sequence
+- Return 1-indexed position or 0 if not found
+
+### 5. OCTET_LENGTH for Bytea
+- `OCTET_LENGTH(bytea)` - Same as LENGTH for bytea
+- Explicit byte count function
+
+### 6. ENCODE Function
+- `ENCODE(bytea, 'base64')` - Encode to base64 string
+- `ENCODE(bytea, 'hex')` - Encode to hex string
+- `ENCODE(bytea, 'escape')` - PostgreSQL escape format
+
+### 7. DECODE Function
+- `DECODE('SGVsbG8=', 'base64')` - Decode from base64
+- `DECODE('48656c6c6f', 'hex')` - Decode from hex
+- `DECODE(string, 'escape')` - Decode escape format
+
+## Implementation Steps
+
+1. **Escape String Parsing**
+   - Handle `E'...'` string literals
+   - Process `\\x` hex escape sequences
+   - Process `\\` and other escape sequences
+
+2. **LENGTH/OCTET_LENGTH**
+   - Register functions for bytea type
+   - Return byte count (not character count)
+   - Overload or type-check existing LENGTH
+
+3. **SUBSTRING for Bytea**
+   - Extend SUBSTRING to handle bytea input
+   - Byte-based indexing (not character)
+   - Return bytea result
+
+4. **POSITION for Bytea**
+   - Extend POSITION to handle bytea operands
+   - Byte sequence matching
+   - Return integer position
+
+5. **ENCODE Function**
+   - Register ENCODE(bytea, text) function
+   - Implement base64 encoding (use base64 crate)
+   - Implement hex encoding
+   - Implement escape encoding
+
+6. **DECODE Function**
+   - Register DECODE(text, text) function
+   - Implement base64 decoding
+   - Implement hex decoding
+   - Handle invalid input gracefully
+
+## Key Files to Modify
+- `crates/parser/src/` - E-string literal handling
+- `crates/executor/src/query_executor/evaluator/` - Function implementations
+
+## Dependencies
+Consider adding to Cargo.toml:
+```toml
+base64 = "0.21"  # For base64 encode/decode
 ```
 
-## Remaining Ignored Tests (6 total)
-These tests require features outside the scope of this worker:
-
-**other.rs (4 ignored):**
-- `test_transform` - Requires array literal parsing
-- `test_transform_not_found` - Requires array literal parsing
-- `test_array_join` - Requires ARRAYJOIN table function
-- `test_run_callback_in_final` - Requires aggregate state functions
-
-**encoding.rs (1 ignored):**
-- `test_char` - Standard SQL CHAR function takes precedence
-
-**ip.rs (1 ignored):**
-- `test_ipv6_num_to_string` - Requires toFixedString function
+## Testing
+```bash
+cargo test --test postgresql data_types::bytes
+```
 
 ## Notes
-- Do NOT simply add `#[ignore]` to failing tests
-- Implement the missing features rather than skipping tests
-- Check existing implementations in `crates/executor/src/` for patterns
+- Basic bytea literals and concatenation already work
+- Focus on the function implementations
+- Ensure type dispatch distinguishes bytea from text
