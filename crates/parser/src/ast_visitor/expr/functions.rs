@@ -7,9 +7,9 @@ use super::super::LogicalPlanBuilder;
 impl LogicalPlanBuilder {
     pub(super) fn format_json_path_key(key: &str) -> String {
         if key.parse::<usize>().is_ok() {
-            format!("[{}]", key)
+            format!("$[{}]", key)
         } else {
-            key.to_string()
+            format!("$.{}", key)
         }
     }
 

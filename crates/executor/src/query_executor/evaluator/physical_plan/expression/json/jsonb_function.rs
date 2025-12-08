@@ -165,14 +165,24 @@ mod tests {
     use crate::tests::support::assert_error_contains;
 
     #[test]
-    fn returns_unsupported_error() {
+    fn returns_unsupported_error_for_unknown_function() {
+        let schema = Schema::from_fields(vec![Field::nullable("val", DataType::String)]);
+        let batch = create_batch(schema, vec![vec![Value::string("data".into())]]);
+        let args = vec![Expr::column("val")];
+        let err =
+            ProjectionWithExprExec::evaluate_jsonb_function("JSONB_UNKNOWN_FUNC", &args, &batch, 0)
+                .expect_err("unsupported");
+        assert_error_contains(&err, "Unknown JSONB function");
+    }
+
+    #[test]
+    fn jsonb_build_object_requires_even_args() {
         let schema = Schema::from_fields(vec![Field::nullable("val", DataType::String)]);
         let batch = create_batch(schema, vec![vec![Value::string("data".into())]]);
         let args = vec![Expr::column("val")];
         let err =
             ProjectionWithExprExec::evaluate_jsonb_function("JSONB_BUILD_OBJECT", &args, &batch, 0)
-                .expect_err("unsupported");
-        assert_error_contains(&err, "JSONB");
-        assert_error_contains(&err, "migration");
+                .expect_err("should fail with odd args");
+        assert_error_contains(&err, "even number");
     }
 }

@@ -32,7 +32,7 @@ impl ProjectionWithExprExec {
             JsonValueEvalOptions::default()
         };
 
-        yachtsql_functions::json::json_value_text(&json_val, path_str)
+        json_value_with_options(&json_val, path_str, &options)
     }
 }
 
