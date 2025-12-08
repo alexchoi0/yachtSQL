@@ -232,7 +232,6 @@ fn test_sequence_owned_by() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_serial_column() {
     let mut executor = create_executor();
     executor
@@ -251,7 +250,6 @@ fn test_serial_column() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_bigserial_column() {
     let mut executor = create_executor();
     executor
@@ -267,7 +265,6 @@ fn test_bigserial_column() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_smallserial_column() {
     let mut executor = create_executor();
     executor
@@ -296,7 +293,6 @@ fn test_sequence_descending() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_generated_always_as_identity() {
     let mut executor = create_executor();
     executor

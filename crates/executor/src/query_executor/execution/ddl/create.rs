@@ -7,6 +7,12 @@ use yachtsql_storage::{DefaultValue, Field, Schema, TableIndexOps};
 
 use super::super::QueryExecutor;
 
+pub struct SerialColumnInfo {
+    pub column_name: String,
+    pub sequence_name: String,
+    pub data_type: DataType,
+}
+
 pub trait DdlExecutor {
     fn execute_create_table(
         &mut self,
@@ -31,10 +37,17 @@ pub trait DdlExecutor {
     fn parse_columns_to_schema(
         &self,
         dataset_id: &str,
+        table_name: &str,
         columns: &[ColumnDef],
-    ) -> Result<(Schema, Vec<sqlparser::ast::TableConstraint>)>;
+    ) -> Result<(
+        Schema,
+        Vec<sqlparser::ast::TableConstraint>,
+        Vec<SerialColumnInfo>,
+    )>;
 
     fn sql_type_to_data_type(&self, dataset_id: &str, sql_type: &SqlDataType) -> Result<DataType>;
+
+    fn is_serial_type(sql_type: &SqlDataType) -> Option<DataType>;
 }
 
 impl DdlExecutor for QueryExecutor {
@@ -44,6 +57,7 @@ impl DdlExecutor for QueryExecutor {
         _original_sql: &str,
     ) -> Result<()> {
         use sqlparser::ast::Statement;
+        use yachtsql_storage::sequence::SequenceConfig;
 
         let Statement::CreateTable(create_table) = stmt else {
             return Err(Error::InternalError(
@@ -54,8 +68,8 @@ impl DdlExecutor for QueryExecutor {
         let table_name = create_table.name.to_string();
         let (dataset_id, table_id) = self.parse_ddl_table_name(&table_name)?;
 
-        let (mut schema, column_level_fks) =
-            self.parse_columns_to_schema(&dataset_id, &create_table.columns)?;
+        let (mut schema, column_level_fks, serial_columns) =
+            self.parse_columns_to_schema(&dataset_id, &table_id, &create_table.columns)?;
 
         let mut all_constraints = create_table.constraints.clone();
         all_constraints.extend(column_level_fks);
@@ -111,6 +125,20 @@ impl DdlExecutor for QueryExecutor {
                         dataset_id, table_id
                     )));
                 }
+            }
+
+            for serial_col in &serial_columns {
+                let config = SequenceConfig::default();
+                dataset.sequences_mut().create_sequence(
+                    serial_col.sequence_name.clone(),
+                    config,
+                    false,
+                )?;
+                dataset.sequences_mut().set_owned_by(
+                    &serial_col.sequence_name,
+                    table_id.clone(),
+                    serial_col.column_name.clone(),
+                )?;
             }
 
             dataset.create_table(table_id.clone(), schema)?;
@@ -355,13 +383,19 @@ impl DdlExecutor for QueryExecutor {
     fn parse_columns_to_schema(
         &self,
         dataset_id: &str,
+        table_name: &str,
         columns: &[ColumnDef],
-    ) -> Result<(Schema, Vec<sqlparser::ast::TableConstraint>)> {
+    ) -> Result<(
+        Schema,
+        Vec<sqlparser::ast::TableConstraint>,
+        Vec<SerialColumnInfo>,
+    )> {
         let mut fields = Vec::new();
         let mut check_constraints = Vec::new();
         let mut column_level_fks = Vec::new();
         let mut column_names = std::collections::HashSet::new();
         let mut inline_pk_columns = Vec::new();
+        let mut serial_columns = Vec::new();
 
         for col in columns {
             let name = col.name.value.clone();
@@ -372,11 +406,16 @@ impl DdlExecutor for QueryExecutor {
                     name
                 )));
             }
-            let data_type = self.sql_type_to_data_type(dataset_id, &col.data_type)?;
+
+            let serial_type = Self::is_serial_type(&col.data_type);
+            let data_type = match &serial_type {
+                Some(dt) => dt.clone(),
+                None => self.sql_type_to_data_type(dataset_id, &col.data_type)?,
+            };
 
             let domain_name = self.extract_domain_name(&col.data_type)?;
 
-            let mut is_nullable = true;
+            let mut is_nullable = serial_type.is_none();
             let mut is_unique = false;
             let mut is_primary_key = false;
             let mut generated_expr: Option<(
@@ -385,6 +424,20 @@ impl DdlExecutor for QueryExecutor {
                 yachtsql_storage::schema::GenerationMode,
             )> = None;
             let mut default_value: Option<DefaultValue> = None;
+            let mut identity_generation: Option<yachtsql_storage::schema::IdentityGeneration> =
+                None;
+            let mut identity_sequence_name: Option<String> = None;
+
+            if serial_type.is_some() {
+                let seq_name = format!("{}_{}_seq", table_name, name);
+                identity_generation = Some(yachtsql_storage::schema::IdentityGeneration::ByDefault);
+                identity_sequence_name = Some(seq_name.clone());
+                serial_columns.push(SerialColumnInfo {
+                    column_name: name.clone(),
+                    sequence_name: seq_name,
+                    data_type: data_type.clone(),
+                });
+            }
 
             for opt in &col.options {
                 match &opt.option {
@@ -407,22 +460,64 @@ impl DdlExecutor for QueryExecutor {
                         });
                     }
                     ColumnOption::Generated {
-                        generation_expr: Some(expr),
+                        generated_as,
+                        generation_expr,
                         generation_expr_mode,
                         ..
                     } => {
-                        let expr_sql = expr.to_string();
-
-                        let mode = match generation_expr_mode {
-                            Some(sqlparser::ast::GeneratedExpressionMode::Stored) => {
-                                yachtsql_storage::schema::GenerationMode::Stored
+                        use sqlparser::ast::GeneratedAs;
+                        match generated_as {
+                            GeneratedAs::Always => {
+                                if generation_expr.is_none() {
+                                    let seq_name = format!("{}_{}_seq", table_name, name);
+                                    identity_generation =
+                                        Some(yachtsql_storage::schema::IdentityGeneration::Always);
+                                    identity_sequence_name = Some(seq_name.clone());
+                                    is_nullable = false;
+                                    if !serial_columns.iter().any(|s| s.column_name == name) {
+                                        serial_columns.push(SerialColumnInfo {
+                                            column_name: name.clone(),
+                                            sequence_name: seq_name,
+                                            data_type: data_type.clone(),
+                                        });
+                                    }
+                                } else if let Some(expr) = generation_expr {
+                                    let expr_sql = expr.to_string();
+                                    let mode = match generation_expr_mode {
+                                        Some(sqlparser::ast::GeneratedExpressionMode::Stored) => {
+                                            yachtsql_storage::schema::GenerationMode::Stored
+                                        }
+                                        Some(sqlparser::ast::GeneratedExpressionMode::Virtual)
+                                        | None => yachtsql_storage::schema::GenerationMode::Virtual,
+                                    };
+                                    generated_expr = Some((expr_sql, Vec::new(), mode));
+                                }
                             }
-                            Some(sqlparser::ast::GeneratedExpressionMode::Virtual) | None => {
-                                yachtsql_storage::schema::GenerationMode::Virtual
+                            GeneratedAs::ByDefault => {
+                                let seq_name = format!("{}_{}_seq", table_name, name);
+                                identity_generation =
+                                    Some(yachtsql_storage::schema::IdentityGeneration::ByDefault);
+                                identity_sequence_name = Some(seq_name.clone());
+                                is_nullable = false;
+                                if !serial_columns.iter().any(|s| s.column_name == name) {
+                                    serial_columns.push(SerialColumnInfo {
+                                        column_name: name.clone(),
+                                        sequence_name: seq_name,
+                                        data_type: data_type.clone(),
+                                    });
+                                }
                             }
-                        };
-
-                        generated_expr = Some((expr_sql, Vec::new(), mode));
+                            GeneratedAs::ExpStored => {
+                                if let Some(expr) = generation_expr {
+                                    let expr_sql = expr.to_string();
+                                    generated_expr = Some((
+                                        expr_sql,
+                                        Vec::new(),
+                                        yachtsql_storage::schema::GenerationMode::Stored,
+                                    ));
+                                }
+                            }
+                        }
                     }
                     ColumnOption::ForeignKey {
                         foreign_table,
@@ -473,9 +568,9 @@ impl DdlExecutor for QueryExecutor {
             }
 
             let mut field = if is_nullable {
-                Field::nullable(name, data_type)
+                Field::nullable(name.clone(), data_type)
             } else {
-                Field::required(name, data_type)
+                Field::required(name.clone(), data_type)
             };
 
             if is_unique {
@@ -492,6 +587,18 @@ impl DdlExecutor for QueryExecutor {
 
             if let Some(domain) = domain_name {
                 field = field.with_domain(domain);
+            }
+
+            if let (Some(ident_gen), Some(seq_name)) = (identity_generation, identity_sequence_name)
+            {
+                match ident_gen {
+                    yachtsql_storage::schema::IdentityGeneration::Always => {
+                        field = field.with_identity_always(seq_name, None);
+                    }
+                    yachtsql_storage::schema::IdentityGeneration::ByDefault => {
+                        field = field.with_identity_by_default(seq_name, None);
+                    }
+                }
             }
 
             fields.push(field);
@@ -513,7 +620,7 @@ impl DdlExecutor for QueryExecutor {
             schema.set_primary_key(inline_pk_columns);
         }
 
-        Ok((schema, column_level_fks))
+        Ok((schema, column_level_fks, serial_columns))
     }
 
     fn sql_type_to_data_type(&self, dataset_id: &str, sql_type: &SqlDataType) -> Result<DataType> {
@@ -657,6 +764,27 @@ impl DdlExecutor for QueryExecutor {
                 "Unsupported data type: {:?}",
                 sql_type
             ))),
+        }
+    }
+
+    fn is_serial_type(sql_type: &SqlDataType) -> Option<DataType> {
+        match sql_type {
+            SqlDataType::Custom(name, _) => {
+                let type_name = name
+                    .0
+                    .last()
+                    .and_then(|part| part.as_ident())
+                    .map(|ident| ident.value.to_uppercase())
+                    .unwrap_or_default();
+
+                match type_name.as_str() {
+                    "SERIAL" | "SERIAL4" => Some(DataType::Int64),
+                    "BIGSERIAL" | "SERIAL8" => Some(DataType::Int64),
+                    "SMALLSERIAL" | "SERIAL2" => Some(DataType::Int64),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 }
