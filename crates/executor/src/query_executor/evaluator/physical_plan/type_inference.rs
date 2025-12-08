@@ -1022,6 +1022,79 @@ impl ProjectionWithExprExec {
 
             FunctionName::Custom(s) if s == "POINT_X" || s == "POINT_Y" => Some(DataType::Float64),
 
+            FunctionName::Custom(s)
+                if s == "ST_GEOGPOINT"
+                    || s == "ST_GEOGFROMTEXT"
+                    || s == "ST_GEOGFROMGEOJSON"
+                    || s == "ST_MAKELINE"
+                    || s == "ST_MAKEPOLYGON"
+                    || s == "ST_CENTROID"
+                    || s == "ST_STARTPOINT"
+                    || s == "ST_ENDPOINT"
+                    || s == "ST_POINTN"
+                    || s == "ST_BOUNDARY"
+                    || s == "ST_BUFFER"
+                    || s == "ST_BUFFERWITHTOLERANCE"
+                    || s == "ST_CLOSESTPOINT"
+                    || s == "ST_CONVEXHULL"
+                    || s == "ST_DIFFERENCE"
+                    || s == "ST_INTERSECTION"
+                    || s == "ST_SIMPLIFY"
+                    || s == "ST_SNAPTOGRID"
+                    || s == "ST_UNION"
+                    || s == "ST_BOUNDINGBOX"
+                    || s == "ST_GEOGPOINTFROMGEOHASH" =>
+            {
+                Some(DataType::Geography)
+            }
+
+            FunctionName::Custom(s)
+                if s == "ST_X"
+                    || s == "ST_Y"
+                    || s == "ST_DISTANCE"
+                    || s == "ST_LENGTH"
+                    || s == "ST_AREA"
+                    || s == "ST_PERIMETER"
+                    || s == "ST_MAXDISTANCE"
+                    || s == "ST_AZIMUTH" =>
+            {
+                Some(DataType::Float64)
+            }
+
+            FunctionName::Custom(s)
+                if s == "ST_CONTAINS"
+                    || s == "ST_COVERS"
+                    || s == "ST_COVEREDBY"
+                    || s == "ST_DISJOINT"
+                    || s == "ST_DWITHIN"
+                    || s == "ST_EQUALS"
+                    || s == "ST_INTERSECTS"
+                    || s == "ST_TOUCHES"
+                    || s == "ST_WITHIN"
+                    || s == "ST_ISEMPTY"
+                    || s == "ST_ISCLOSED"
+                    || s == "ST_ISCOLLECTION" =>
+            {
+                Some(DataType::Bool)
+            }
+
+            FunctionName::Custom(s)
+                if s == "ST_NUMPOINTS" || s == "ST_NPOINTS" || s == "ST_DIMENSION" =>
+            {
+                Some(DataType::Int64)
+            }
+
+            FunctionName::Custom(s)
+                if s == "ST_ASTEXT"
+                    || s == "ST_ASGEOJSON"
+                    || s == "ST_GEOMETRYTYPE"
+                    || s == "ST_GEOHASH" =>
+            {
+                Some(DataType::String)
+            }
+
+            FunctionName::Custom(s) if s == "ST_ASBINARY" => Some(DataType::Bytes),
+
             _ => None,
         }
     }
