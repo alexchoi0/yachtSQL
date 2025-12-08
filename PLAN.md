@@ -1,132 +1,94 @@
-# Work Stream 7: Constraint Enforcement on UPDATE
+# Worker 6: Bytea Functions
 
-## Overview
-Implement constraint checking during UPDATE and enhance DELETE constraint enforcement.
+## Objective
+Implement bytea (binary) functions to remove `#[ignore]` tags from `tests/postgresql/data_types/bytes.rs`.
 
-## Tests to Enable
-**File:** `tests/postgresql/ddl/constraints.rs`
-- `test_check_constraint_enforcement_on_update`
-- `test_unique_enforcement_on_update`
-- `test_foreign_key_violation_update`
-- `test_foreign_key_on_delete_restrict`
-- `test_foreign_key_on_delete_no_action`
-- `test_foreign_key_on_update_restrict`
+## Test File
+- `tests/postgresql/data_types/bytes.rs` (9 ignored tests)
 
-## Constraints to Enforce
+## Features to Implement
 
-### CHECK Constraint on UPDATE
-```sql
-CREATE TABLE t (id INT, age INT CHECK (age >= 0));
-INSERT INTO t VALUES (1, 25);
-UPDATE t SET age = -5 WHERE id = 1;  -- ERROR: violates check constraint
-```
-- Evaluate CHECK expression against new row values
-- Error if constraint violated
+### 1. Escape String Literal
+- `E'\\x48656c6c6f'::BYTEA` - Escape string format
+- Handle backslash escaping in E'' strings
 
-### UNIQUE Constraint on UPDATE
-```sql
-CREATE TABLE t (id INT, email TEXT UNIQUE);
-INSERT INTO t VALUES (1, 'a@b.com'), (2, 'c@d.com');
-UPDATE t SET email = 'a@b.com' WHERE id = 2;  -- ERROR: duplicate key
-```
-- Check if new value conflicts with existing rows
-- Exclude the row being updated from check
+### 2. LENGTH for Bytea
+- `LENGTH(bytea)` - Return length in bytes
+- Distinct from character length for text
 
-### Foreign Key on UPDATE (child table)
-```sql
-CREATE TABLE parent (id INT PRIMARY KEY);
-CREATE TABLE child (id INT, pid INT REFERENCES parent(id));
-INSERT INTO parent VALUES (1);
-INSERT INTO child VALUES (1, 1);
-UPDATE child SET pid = 999 WHERE id = 1;  -- ERROR: FK violation
-```
-- Verify new foreign key value exists in parent table
+### 3. SUBSTRING for Bytea
+- `SUBSTRING(bytea, start, length)` - Extract bytes
+- 1-indexed positioning
+- Handle out-of-bounds gracefully
 
-### ON DELETE RESTRICT
-```sql
-CREATE TABLE child (pid INT REFERENCES parent(id) ON DELETE RESTRICT);
-DELETE FROM parent WHERE id = 1;  -- ERROR if child rows exist
-```
-- Prevent delete if any child rows reference this row
-- Check immediately (not at statement end)
+### 4. POSITION for Bytea
+- `POSITION(pattern IN bytea)` - Find byte sequence
+- Return 1-indexed position or 0 if not found
 
-### ON DELETE NO ACTION
-```sql
-CREATE TABLE child (pid INT REFERENCES parent(id) ON DELETE NO ACTION);
-DELETE FROM parent WHERE id = 1;  -- ERROR if child rows exist
-```
-- Same as RESTRICT but checked at statement end
-- Allows other triggers/rules to fix the reference first
+### 5. OCTET_LENGTH for Bytea
+- `OCTET_LENGTH(bytea)` - Same as LENGTH for bytea
+- Explicit byte count function
 
-### ON UPDATE RESTRICT
-```sql
-CREATE TABLE child (pid INT REFERENCES parent(id) ON UPDATE RESTRICT);
-UPDATE parent SET id = 2 WHERE id = 1;  -- ERROR if child rows exist
-```
-- Prevent update of referenced column if child rows exist
+### 6. ENCODE Function
+- `ENCODE(bytea, 'base64')` - Encode to base64 string
+- `ENCODE(bytea, 'hex')` - Encode to hex string
+- `ENCODE(bytea, 'escape')` - PostgreSQL escape format
+
+### 7. DECODE Function
+- `DECODE('SGVsbG8=', 'base64')` - Decode from base64
+- `DECODE('48656c6c6f', 'hex')` - Decode from hex
+- `DECODE(string, 'escape')` - Decode escape format
+
+## Implementation Steps
+
+1. **Escape String Parsing**
+   - Handle `E'...'` string literals
+   - Process `\\x` hex escape sequences
+   - Process `\\` and other escape sequences
+
+2. **LENGTH/OCTET_LENGTH**
+   - Register functions for bytea type
+   - Return byte count (not character count)
+   - Overload or type-check existing LENGTH
+
+3. **SUBSTRING for Bytea**
+   - Extend SUBSTRING to handle bytea input
+   - Byte-based indexing (not character)
+   - Return bytea result
+
+4. **POSITION for Bytea**
+   - Extend POSITION to handle bytea operands
+   - Byte sequence matching
+   - Return integer position
+
+5. **ENCODE Function**
+   - Register ENCODE(bytea, text) function
+   - Implement base64 encoding (use base64 crate)
+   - Implement hex encoding
+   - Implement escape encoding
+
+6. **DECODE Function**
+   - Register DECODE(text, text) function
+   - Implement base64 decoding
+   - Implement hex decoding
+   - Handle invalid input gracefully
 
 ## Key Files to Modify
-
-### UPDATE Execution
-- `crates/executor/src/query_executor/execution/dml/update.rs`
-- Before updating each row:
-  1. Evaluate CHECK constraints on new values
-  2. Check UNIQUE constraints (excluding current row)
-  3. Verify FK references exist in parent tables
-
-### DELETE Execution
-- `crates/executor/src/query_executor/execution/dml/delete.rs`
-- Before deleting each row:
-  1. Check for RESTRICT foreign keys referencing this row
-  2. For NO ACTION, defer check to statement end
-
-### Constraint Checking Utilities
-- `crates/storage/src/constraints.rs` or new module
-- `check_constraint(table, row, constraint) -> Result<()>`
-- `check_unique(table, row, columns, exclude_row) -> Result<()>`
-- `check_foreign_key(child_table, row, fk) -> Result<()>`
-- `check_references(parent_table, row, pk_columns) -> Result<()>`
-
-## Implementation Notes
-
-1. **CHECK on UPDATE**
-   - Get constraint expression
-   - Bind new row values to expression variables
-   - Evaluate expression, error if false
-
-2. **UNIQUE on UPDATE**
-   - Query for existing rows with same values
-   - Exclude the row being updated (by primary key or row ID)
-   - Error if any matches found
-
-3. **FK on UPDATE (child)**
-   - Get parent table and referenced columns
-   - Query parent table for matching row
-   - Error if not found
-
-4. **RESTRICT vs NO ACTION**
-   - RESTRICT: check immediately per-row
-   - NO ACTION: collect checks, verify at statement end
-   - In practice, often behave the same
-
-5. **Performance considerations**
-   - May want to batch constraint checks
-   - Index lookups for FK and UNIQUE checks
-
-## Test Commands
-```bash
-cargo test --test postgresql test_check_constraint_enforcement_on_update
-cargo test --test postgresql test_unique_enforcement_on_update
-cargo test --test postgresql test_foreign_key_violation_update
-cargo test --test postgresql test_foreign_key_on_delete_restrict
-cargo test --test postgresql test_foreign_key_on_delete_no_action
-cargo test --test postgresql test_foreign_key_on_update_restrict
-```
+- `crates/parser/src/` - E-string literal handling
+- `crates/executor/src/query_executor/evaluator/` - Function implementations
 
 ## Dependencies
-None - extends existing constraint checking (INSERT already has some)
+Consider adding to Cargo.toml:
+```toml
+base64 = "0.21"  # For base64 encode/decode
+```
 
-## Coordination
-- Work Stream 6 (DROP CONSTRAINT) adds `is_valid` flag - check it before enforcing
-- Work Stream 8 (Deferred Constraints) needs these checks to defer
-- Share constraint checking utilities
+## Testing
+```bash
+cargo test --test postgresql data_types::bytes
+```
+
+## Notes
+- Basic bytea literals and concatenation already work
+- Focus on the function implementations
+- Ensure type dispatch distinguishes bytea from text
