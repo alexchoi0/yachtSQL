@@ -4319,6 +4319,7 @@ dependencies = [
  "chrono",
  "debug_print",
  "indexmap",
+ "regex",
  "rust_decimal",
  "serde",
  "serde_json",
