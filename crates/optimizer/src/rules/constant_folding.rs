@@ -291,6 +291,7 @@ impl ConstantFolding {
                         asc: order_expr.asc,
                         nulls_first: order_expr.nulls_first,
                         collation: order_expr.collation.clone(),
+                        with_fill: order_expr.with_fill.clone(),
                     })
                     .collect();
                 let optimized_input = self.optimize_node(input);
@@ -703,6 +704,7 @@ mod tests {
             table_name: "test_table".to_string(),
             projection: None,
             only: false,
+            final_modifier: false,
         };
 
         let filter = PlanNode::Filter {
