@@ -636,6 +636,7 @@ impl DdlExecutor for QueryExecutor {
             | SqlDataType::UInt64
             | SqlDataType::UInt128
             | SqlDataType::UInt256 => Ok(DataType::Int64),
+            SqlDataType::Float32 => Ok(DataType::Float32),
             SqlDataType::Float64
             | SqlDataType::Float(_)
             | SqlDataType::Real
