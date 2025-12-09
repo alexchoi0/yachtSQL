@@ -2176,7 +2176,8 @@ impl QueryExecutor {
                 SqlType::Int64 | SqlType::BigInt(_) => Ok(DataType::Int64),
                 SqlType::Int32 | SqlType::Int(_) | SqlType::Integer(_) => Ok(DataType::Int64),
                 SqlType::Float64 | SqlType::Double(_) => Ok(DataType::Float64),
-                SqlType::Float32 | SqlType::Float(_) | SqlType::Real => Ok(DataType::Float64),
+                SqlType::Float32 => Ok(DataType::Float32),
+                SqlType::Float(_) | SqlType::Real => Ok(DataType::Float64),
                 SqlType::Bool | SqlType::Boolean => Ok(DataType::Bool),
                 SqlType::String(_) | SqlType::Text | SqlType::Varchar(_) | SqlType::Char(_) => {
                     Ok(DataType::String)

@@ -2052,6 +2052,45 @@ impl QueryExecutor {
 
                 Ok((schema, rows))
             }
+            "NUMBERS" => {
+                if evaluated_args.is_empty() || evaluated_args.len() > 2 {
+                    return Err(Error::InvalidQuery(
+                        "numbers() requires 1 or 2 arguments".to_string(),
+                    ));
+                }
+
+                let (start, count) = if evaluated_args.len() == 1 {
+                    let count = evaluated_args[0]
+                        .as_i64()
+                        .ok_or_else(|| Error::TypeMismatch {
+                            expected: "INT64".to_string(),
+                            actual: evaluated_args[0].data_type().to_string(),
+                        })?;
+                    (0i64, count)
+                } else {
+                    let offset = evaluated_args[0]
+                        .as_i64()
+                        .ok_or_else(|| Error::TypeMismatch {
+                            expected: "INT64".to_string(),
+                            actual: evaluated_args[0].data_type().to_string(),
+                        })?;
+                    let count = evaluated_args[1]
+                        .as_i64()
+                        .ok_or_else(|| Error::TypeMismatch {
+                            expected: "INT64".to_string(),
+                            actual: evaluated_args[1].data_type().to_string(),
+                        })?;
+                    (offset, count)
+                };
+
+                let schema = Schema::from_fields(vec![Field::nullable("number", DataType::Int64)]);
+
+                let rows: Vec<Row> = (start..start + count)
+                    .map(|n| Row::from_values(vec![Value::int64(n)]))
+                    .collect();
+
+                Ok((schema, rows))
+            }
             "POPULATE_RECORD" => {
                 if args.args.len() != 2 {
                     return Err(Error::InvalidQuery(
