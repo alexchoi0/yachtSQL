@@ -764,6 +764,16 @@ impl ProjectionWithExprExec {
                 Some(DataType::Int64)
             }
 
+            FunctionName::Custom(s) if s == "BITPOSITIONSTOARRAY" => {
+                Some(DataType::Array(Box::new(DataType::Int64)))
+            }
+
+            FunctionName::Custom(s)
+                if matches!(s.as_str(), "ISNULL" | "ISNOTNULL" | "ISZEROORNULL") =>
+            {
+                Some(DataType::Bool)
+            }
+
             FunctionName::Custom(s)
                 if matches!(
                     s.as_str(),
