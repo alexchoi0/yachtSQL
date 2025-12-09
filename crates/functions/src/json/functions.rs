@@ -721,6 +721,97 @@ pub fn lax_string(value: &Value) -> Result<Value> {
     }
 }
 
+pub fn strict_bool(value: &Value) -> Result<Value> {
+    if value.is_null() {
+        return Ok(Value::null());
+    }
+
+    let json = get_json_value(value)?;
+    match &json {
+        serde_json::Value::Bool(b) => Ok(Value::bool_val(*b)),
+        serde_json::Value::Null => Ok(Value::null()),
+        _ => Err(Error::InvalidOperation(format!(
+            "Cannot convert {} to BOOL",
+            json
+        ))),
+    }
+}
+
+pub fn strict_int64(value: &Value) -> Result<Value> {
+    if value.is_null() {
+        return Ok(Value::null());
+    }
+
+    let json = get_json_value(value)?;
+    match &json {
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::int64(i))
+            } else if let Some(f) = n.as_f64() {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Ok(Value::int64(f as i64))
+                } else {
+                    Err(Error::InvalidOperation(format!(
+                        "Cannot convert {} to INT64",
+                        n
+                    )))
+                }
+            } else {
+                Err(Error::InvalidOperation(format!(
+                    "Cannot convert {} to INT64",
+                    n
+                )))
+            }
+        }
+        serde_json::Value::Null => Ok(Value::null()),
+        _ => Err(Error::InvalidOperation(format!(
+            "Cannot convert {} to INT64",
+            json
+        ))),
+    }
+}
+
+pub fn strict_float64(value: &Value) -> Result<Value> {
+    if value.is_null() {
+        return Ok(Value::null());
+    }
+
+    let json = get_json_value(value)?;
+    match &json {
+        serde_json::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                Ok(Value::float64(f))
+            } else {
+                Err(Error::InvalidOperation(format!(
+                    "Cannot convert {} to FLOAT64",
+                    n
+                )))
+            }
+        }
+        serde_json::Value::Null => Ok(Value::null()),
+        _ => Err(Error::InvalidOperation(format!(
+            "Cannot convert {} to FLOAT64",
+            json
+        ))),
+    }
+}
+
+pub fn strict_string(value: &Value) -> Result<Value> {
+    if value.is_null() {
+        return Ok(Value::null());
+    }
+
+    let json = get_json_value(value)?;
+    match &json {
+        serde_json::Value::String(s) => Ok(Value::string(s.clone())),
+        serde_json::Value::Null => Ok(Value::null()),
+        _ => Err(Error::InvalidOperation(format!(
+            "Cannot convert {} to STRING",
+            json
+        ))),
+    }
+}
+
 fn get_json_value(value: &Value) -> Result<serde_json::Value> {
     if let Some(json) = value.as_json() {
         return Ok(json.clone());

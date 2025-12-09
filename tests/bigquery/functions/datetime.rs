@@ -165,7 +165,6 @@ fn test_date_in_group_by() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_date_add() {
     let mut executor = create_executor();
     let result = executor
@@ -175,7 +174,6 @@ fn test_date_add() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_date_sub() {
     let mut executor = create_executor();
     let result = executor
@@ -185,7 +183,6 @@ fn test_date_sub() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_date_diff() {
     let mut executor = create_executor();
     let result = executor
@@ -204,27 +201,25 @@ fn test_date_trunc() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_date_from_unix_date() {
     let mut executor = create_executor();
     let result = executor
         .execute_sql("SELECT DATE_FROM_UNIX_DATE(19723)")
         .unwrap();
-    assert_table_eq!(result, [[d(2023, 12, 31)]]);
+    assert_table_eq!(result, [[d(2024, 1, 1)]]);
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_unix_date() {
     let mut executor = create_executor();
     let result = executor
         .execute_sql("SELECT UNIX_DATE(DATE '2024-01-01')")
         .unwrap();
-    assert_table_eq!(result, [[19724]]);
+    assert_table_eq!(result, [[19723]]);
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "PARSE_DATE not yet fully implemented"]
 fn test_parse_date() {
     let mut executor = create_executor();
     let result = executor
@@ -234,7 +229,7 @@ fn test_parse_date() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "FORMAT_DATE not yet fully implemented"]
 fn test_format_date() {
     let mut executor = create_executor();
     let result = executor
@@ -244,7 +239,6 @@ fn test_format_date() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_last_day() {
     let mut executor = create_executor();
     let result = executor
@@ -254,7 +248,6 @@ fn test_last_day() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_timestamp_add() {
     let mut executor = create_executor();
     let result = executor
@@ -264,7 +257,6 @@ fn test_timestamp_add() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_timestamp_sub() {
     let mut executor = create_executor();
     let result = executor
@@ -274,7 +266,6 @@ fn test_timestamp_sub() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_timestamp_diff() {
     let mut executor = create_executor();
     let result = executor
@@ -284,7 +275,7 @@ fn test_timestamp_diff() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "TIMESTAMP_TRUNC argument order issue"]
 fn test_timestamp_trunc() {
     let mut executor = create_executor();
     let result = executor
@@ -294,7 +285,7 @@ fn test_timestamp_trunc() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "PARSE_TIMESTAMP not yet fully implemented"]
 fn test_parse_timestamp() {
     let mut executor = create_executor();
     let result = executor
@@ -304,7 +295,7 @@ fn test_parse_timestamp() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "FORMAT_TIMESTAMP not yet fully implemented"]
 fn test_format_timestamp() {
     let mut executor = create_executor();
     let result = executor
@@ -314,7 +305,6 @@ fn test_format_timestamp() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_unix_seconds() {
     let mut executor = create_executor();
     let result = executor
@@ -324,7 +314,6 @@ fn test_unix_seconds() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_timestamp_seconds() {
     let mut executor = create_executor();
     let result = executor
@@ -334,7 +323,6 @@ fn test_timestamp_seconds() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_unix_millis() {
     let mut executor = create_executor();
     let result = executor
@@ -344,7 +332,6 @@ fn test_unix_millis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_timestamp_millis() {
     let mut executor = create_executor();
     let result = executor
@@ -354,7 +341,6 @@ fn test_timestamp_millis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_unix_micros() {
     let mut executor = create_executor();
     let result = executor
@@ -364,7 +350,6 @@ fn test_unix_micros() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_timestamp_micros() {
     let mut executor = create_executor();
     let result = executor
@@ -374,7 +359,7 @@ fn test_timestamp_micros() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "TIME literal not yet supported"]
 fn test_time_literal() {
     let mut executor = create_executor();
     let result = executor.execute_sql("SELECT TIME '14:30:00'").unwrap();
@@ -382,7 +367,7 @@ fn test_time_literal() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "TIME literal not yet supported"]
 fn test_time_add() {
     let mut executor = create_executor();
     let result = executor
@@ -392,7 +377,7 @@ fn test_time_add() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "TIME literal not yet supported"]
 fn test_time_sub() {
     let mut executor = create_executor();
     let result = executor
@@ -402,7 +387,7 @@ fn test_time_sub() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "TIME literal not yet supported"]
 fn test_time_diff() {
     let mut executor = create_executor();
     let result = executor
@@ -412,7 +397,7 @@ fn test_time_diff() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "TIME literal not yet supported"]
 fn test_time_trunc() {
     let mut executor = create_executor();
     let result = executor
@@ -422,7 +407,7 @@ fn test_time_trunc() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "DATETIME literal not yet supported"]
 fn test_datetime_literal() {
     let mut executor = create_executor();
     let result = executor
@@ -432,7 +417,7 @@ fn test_datetime_literal() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "DATETIME literal not yet supported"]
 fn test_datetime_add() {
     let mut executor = create_executor();
     let result = executor
@@ -442,7 +427,7 @@ fn test_datetime_add() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "DATETIME literal not yet supported"]
 fn test_datetime_sub() {
     let mut executor = create_executor();
     let result = executor
@@ -452,7 +437,7 @@ fn test_datetime_sub() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "DATETIME literal not yet supported"]
 fn test_datetime_diff() {
     let mut executor = create_executor();
     let result = executor
@@ -462,7 +447,7 @@ fn test_datetime_diff() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "DATETIME literal not yet supported"]
 fn test_datetime_trunc() {
     let mut executor = create_executor();
     let result = executor
@@ -472,7 +457,7 @@ fn test_datetime_trunc() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "WEEK extraction not yet implemented"]
 fn test_extract_week() {
     let mut executor = create_executor();
     let result = executor

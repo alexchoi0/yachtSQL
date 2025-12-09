@@ -18,8 +18,8 @@ pub use extract::{
 };
 pub use functions::{
     JsonOnBehavior, JsonValueEvalOptions, json_extract_array, json_remove, json_set,
-    json_value_array, lax_bool, lax_float64, lax_int64, lax_string, parse_json, to_json,
-    to_json_string,
+    json_value_array, lax_bool, lax_float64, lax_int64, lax_string, parse_json, strict_bool,
+    strict_float64, strict_int64, strict_string, to_json, to_json_string,
 };
 pub use parser::{DEFAULT_MAX_DEPTH, DEFAULT_MAX_SIZE, parse_json_with_limits};
 pub use path::JsonPath;

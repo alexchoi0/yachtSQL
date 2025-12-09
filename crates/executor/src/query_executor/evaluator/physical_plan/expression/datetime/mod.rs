@@ -6,9 +6,14 @@ mod current_timestamp;
 mod date_add;
 mod date_constructor;
 mod date_diff;
+mod date_from_unix_date;
 mod date_part;
 mod date_sub;
 mod date_trunc;
+mod datetime_add;
+mod datetime_diff;
+mod datetime_sub;
+mod datetime_trunc;
 mod extract;
 mod format_date;
 mod format_timestamp;
@@ -18,8 +23,21 @@ mod make_timestamp;
 mod parse_date;
 mod parse_timestamp;
 mod str_to_date;
+mod time_add;
+mod time_diff;
+mod time_sub;
+mod time_trunc;
+mod timestamp_add;
 mod timestamp_diff;
+mod timestamp_micros;
+mod timestamp_millis;
+mod timestamp_seconds;
+mod timestamp_sub;
 mod timestamp_trunc;
+mod unix_date;
+mod unix_micros;
+mod unix_millis;
+mod unix_seconds;
 
 use yachtsql_core::error::{Error, Result};
 use yachtsql_core::types::Value;
@@ -81,6 +99,24 @@ impl ProjectionWithExprExec {
             "DAYOFWEEK" | "WEEKDAY" => Self::eval_dayofweek(args, batch, row_idx),
             "DAYOFYEAR" => Self::eval_dayofyear(args, batch, row_idx),
             "LAST_DAY" => Self::eval_last_day(args, batch, row_idx),
+            "TIMESTAMP_ADD" => Self::eval_timestamp_add(args, batch, row_idx),
+            "TIMESTAMP_SUB" => Self::eval_timestamp_sub(args, batch, row_idx),
+            "DATETIME_ADD" => Self::eval_datetime_add(args, batch, row_idx),
+            "DATETIME_SUB" => Self::eval_datetime_sub(args, batch, row_idx),
+            "DATETIME_DIFF" => Self::eval_datetime_diff(args, batch, row_idx),
+            "DATETIME_TRUNC" => Self::eval_datetime_trunc(args, batch, row_idx),
+            "TIME_ADD" => Self::eval_time_add(args, batch, row_idx),
+            "TIME_SUB" => Self::eval_time_sub(args, batch, row_idx),
+            "TIME_DIFF" => Self::eval_time_diff(args, batch, row_idx),
+            "TIME_TRUNC" => Self::eval_time_trunc(args, batch, row_idx),
+            "UNIX_DATE" => Self::eval_unix_date(args, batch, row_idx),
+            "DATE_FROM_UNIX_DATE" => Self::eval_date_from_unix_date(args, batch, row_idx),
+            "UNIX_SECONDS" => Self::eval_unix_seconds(args, batch, row_idx),
+            "TIMESTAMP_SECONDS" => Self::eval_timestamp_seconds(args, batch, row_idx),
+            "UNIX_MILLIS" => Self::eval_unix_millis(args, batch, row_idx),
+            "TIMESTAMP_MILLIS" => Self::eval_timestamp_millis(args, batch, row_idx),
+            "UNIX_MICROS" => Self::eval_unix_micros(args, batch, row_idx),
+            "TIMESTAMP_MICROS" => Self::eval_timestamp_micros(args, batch, row_idx),
             "AT_TIME_ZONE" => Self::eval_at_time_zone(args, batch, row_idx),
             "JUSTIFY_DAYS" => Self::eval_justify_days(args, batch, row_idx),
             "JUSTIFY_HOURS" => Self::eval_justify_hours(args, batch, row_idx),
