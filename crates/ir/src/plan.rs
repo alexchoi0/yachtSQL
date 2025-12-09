@@ -81,6 +81,14 @@ pub enum PlanNode {
         join_type: JoinType,
     },
 
+    AsOfJoin {
+        left: Box<PlanNode>,
+        right: Box<PlanNode>,
+        equality_condition: Expr,
+        match_condition: Expr,
+        is_left_join: bool,
+    },
+
     Aggregate {
         group_by: Vec<Expr>,
         aggregates: Vec<Expr>,
@@ -390,6 +398,8 @@ pub enum JoinType {
     Cross,
     Semi,
     Anti,
+    Paste,
+    AsOf,
 }
 
 impl PlanNode {
@@ -433,6 +443,7 @@ impl PlanNode {
             | PlanNode::Window { input, .. } => vec![input],
             PlanNode::Join { left, right, .. }
             | PlanNode::LateralJoin { left, right, .. }
+            | PlanNode::AsOfJoin { left, right, .. }
             | PlanNode::Union { left, right, .. }
             | PlanNode::Intersect { left, right, .. }
             | PlanNode::Except { left, right, .. } => vec![left, right],

@@ -17,7 +17,7 @@ impl JoinReorder {
             PlanNode::Filter { .. } => 1000,
             PlanNode::Projection { input, .. } => Self::estimate_cardinality(input),
             PlanNode::Aggregate { .. } => 100,
-            PlanNode::Join { left, right, .. } => {
+            PlanNode::Join { left, right, .. } | PlanNode::AsOfJoin { left, right, .. } => {
                 let left_card = Self::estimate_cardinality(left);
                 let right_card = Self::estimate_cardinality(right);
 
@@ -133,6 +133,29 @@ impl JoinReorder {
                         right: Box::new(right_opt.unwrap_or_else(|| right.as_ref().clone())),
                         on: on.clone(),
                         join_type: *join_type,
+                    })
+                } else {
+                    None
+                }
+            }
+
+            PlanNode::AsOfJoin {
+                left,
+                right,
+                equality_condition,
+                match_condition,
+                is_left_join,
+            } => {
+                let left_opt = self.optimize_join_chain(left);
+                let right_opt = self.optimize_join_chain(right);
+
+                if left_opt.is_some() || right_opt.is_some() {
+                    Some(PlanNode::AsOfJoin {
+                        left: Box::new(left_opt.unwrap_or_else(|| left.as_ref().clone())),
+                        right: Box::new(right_opt.unwrap_or_else(|| right.as_ref().clone())),
+                        equality_condition: equality_condition.clone(),
+                        match_condition: match_condition.clone(),
+                        is_left_join: *is_left_join,
                     })
                 } else {
                     None

@@ -196,6 +196,15 @@ impl ProjectionPushdown {
                 cols
             }
             PlanNode::Join { on, .. } => Self::get_column_references(on),
+            PlanNode::AsOfJoin {
+                equality_condition,
+                match_condition,
+                ..
+            } => {
+                let mut cols = Self::get_column_references(equality_condition);
+                cols.extend(Self::get_column_references(match_condition));
+                cols
+            }
             _ => HashSet::new(),
         }
     }
@@ -319,6 +328,32 @@ impl ProjectionPushdown {
                         right: Box::new(right_opt.unwrap_or_else(|| right.as_ref().clone())),
                         on: on.clone(),
                         join_type: *join_type,
+                    })
+                } else {
+                    None
+                }
+            }
+            PlanNode::AsOfJoin {
+                left,
+                right,
+                equality_condition,
+                match_condition,
+                is_left_join,
+            } => {
+                let mut cols_needed = required_cols.clone();
+                cols_needed.extend(Self::get_column_references(equality_condition));
+                cols_needed.extend(Self::get_column_references(match_condition));
+
+                let left_opt = self.optimize_node(left, &cols_needed);
+                let right_opt = self.optimize_node(right, &cols_needed);
+
+                if left_opt.is_some() || right_opt.is_some() {
+                    Some(PlanNode::AsOfJoin {
+                        left: Box::new(left_opt.unwrap_or_else(|| left.as_ref().clone())),
+                        right: Box::new(right_opt.unwrap_or_else(|| right.as_ref().clone())),
+                        equality_condition: equality_condition.clone(),
+                        match_condition: match_condition.clone(),
+                        is_left_join: *is_left_join,
                     })
                 } else {
                     None

@@ -255,7 +255,9 @@ pub fn provided_ordering(node: &PlanNode, child_ordering: &OrderingProperty) -> 
 
         PlanNode::Aggregate { .. } => OrderingProperty::empty(),
 
-        PlanNode::Join { .. } | PlanNode::LateralJoin { .. } => OrderingProperty::empty(),
+        PlanNode::Join { .. } | PlanNode::AsOfJoin { .. } | PlanNode::LateralJoin { .. } => {
+            OrderingProperty::empty()
+        }
 
         PlanNode::Limit { .. } => child_ordering.clone(),
 
@@ -303,6 +305,16 @@ pub fn required_ordering(node: &PlanNode) -> OrderingRequirement {
 
         PlanNode::Join { on, .. } | PlanNode::LateralJoin { on, .. } => {
             if let Some(keys) = extract_equi_join_keys(on) {
+                OrderingRequirement::single(OrderingProperty::from_column_names(&keys))
+            } else {
+                OrderingRequirement::empty()
+            }
+        }
+
+        PlanNode::AsOfJoin {
+            equality_condition, ..
+        } => {
+            if let Some(keys) = extract_equi_join_keys(equality_condition) {
                 OrderingRequirement::single(OrderingProperty::from_column_names(&keys))
             } else {
                 OrderingRequirement::empty()

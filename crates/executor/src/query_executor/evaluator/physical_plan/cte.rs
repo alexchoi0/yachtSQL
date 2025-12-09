@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use yachtsql_core::error::Result;
-use yachtsql_storage::Schema;
+use yachtsql_storage::{Column, Schema};
 
 use super::ExecutionPlan;
 use crate::Table;
@@ -96,7 +96,24 @@ impl ExecutionPlan for SubqueryScanExec {
     }
 
     fn execute(&self) -> Result<Vec<Table>> {
-        self.subquery.execute()
+        let results = self.subquery.execute()?;
+        let subquery_schema = self.subquery.schema();
+
+        if subquery_schema == &self.schema {
+            return Ok(results);
+        }
+
+        let mut renamed_results = Vec::with_capacity(results.len());
+        for table in results {
+            let column_table = table.to_column_format()?;
+            let columns: Vec<Column> = column_table
+                .columns()
+                .map(|cols| cols.to_vec())
+                .unwrap_or_default();
+            let renamed = Table::new(self.schema.clone(), columns)?;
+            renamed_results.push(renamed);
+        }
+        Ok(renamed_results)
     }
 
     fn children(&self) -> Vec<Rc<dyn ExecutionPlan>> {

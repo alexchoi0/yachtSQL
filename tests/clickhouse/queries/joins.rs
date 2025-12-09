@@ -59,14 +59,13 @@ fn test_left_join() {
     );
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_full_outer_join() {
     let mut executor = create_executor();
     setup_tables(&mut executor);
 
     let result = executor
-        .execute_sql("SELECT u.name, d.name FROM users u FULL OUTER JOIN departments d ON u.dept_id = d.id ORDER BY u.name, d.name")
+        .execute_sql("SELECT u.name, d.name FROM users u FULL OUTER JOIN departments d ON u.dept_id = d.id ORDER BY u.name NULLS FIRST, d.name NULLS FIRST")
         .unwrap();
 
     assert_table_eq!(

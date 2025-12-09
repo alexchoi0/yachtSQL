@@ -150,7 +150,7 @@ impl ComplexityAnalyzer {
                 self.visit_node(input);
             }
 
-            PlanNode::Join { left, right, .. } => {
+            PlanNode::Join { left, right, .. } | PlanNode::AsOfJoin { left, right, .. } => {
                 self.num_joins += 1;
                 self.visit_node(left);
                 self.visit_node(right);
