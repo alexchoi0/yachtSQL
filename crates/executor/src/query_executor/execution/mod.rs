@@ -27,11 +27,11 @@ pub use query::QueryExecutorTrait;
 use rust_decimal::prelude::ToPrimitive;
 pub use session::{DiagnosticsSnapshot, SessionDiagnostics};
 pub use utility::{
-    apply_interval_to_date, apply_numeric_precision_scale, calculate_date_diff,
-    decode_values_match, evaluate_condition_as_bool, evaluate_numeric_op,
+    add_interval_to_date, apply_interval_to_date, apply_numeric_precision_scale,
+    calculate_date_diff, decode_values_match, evaluate_condition_as_bool, evaluate_numeric_op,
     evaluate_vector_cosine_distance, evaluate_vector_inner_product, evaluate_vector_l2_distance,
     infer_scalar_subquery_type_static, perform_cast, safe_add, safe_divide, safe_multiply,
-    safe_negate, safe_subtract,
+    safe_negate, safe_subtract, sub_interval_from_date,
 };
 use yachtsql_capability::FeatureId;
 use yachtsql_capability::error::CapabilityError;

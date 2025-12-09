@@ -59,6 +59,10 @@ impl ProjectionWithExprExec {
             "LAX_INT64" => Self::evaluate_lax_int64(args, batch, row_idx),
             "LAX_FLOAT64" => Self::evaluate_lax_float64(args, batch, row_idx),
             "LAX_STRING" => Self::evaluate_lax_string(args, batch, row_idx),
+            "BOOL" => Self::evaluate_strict_bool(args, batch, row_idx),
+            "INT64" => Self::evaluate_strict_int64(args, batch, row_idx),
+            "FLOAT64" => Self::evaluate_strict_float64(args, batch, row_idx),
+            "STRING" => Self::evaluate_strict_string(args, batch, row_idx),
             "IS_JSON_VALUE" | "IS_JSON_ARRAY" | "IS_JSON_OBJECT" | "IS_JSON_SCALAR" => {
                 Self::evaluate_is_json_predicate(name, args, batch, row_idx)
             }
@@ -190,5 +194,43 @@ impl ProjectionWithExprExec {
         }
         let json_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
         yachtsql_functions::json::lax_string(&json_val)
+    }
+
+    fn evaluate_strict_bool(args: &[Expr], batch: &Table, row_idx: usize) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(Error::invalid_query("BOOL requires 1 argument".to_string()));
+        }
+        let json_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        yachtsql_functions::json::strict_bool(&json_val)
+    }
+
+    fn evaluate_strict_int64(args: &[Expr], batch: &Table, row_idx: usize) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(Error::invalid_query(
+                "INT64 requires 1 argument".to_string(),
+            ));
+        }
+        let json_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        yachtsql_functions::json::strict_int64(&json_val)
+    }
+
+    fn evaluate_strict_float64(args: &[Expr], batch: &Table, row_idx: usize) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(Error::invalid_query(
+                "FLOAT64 requires 1 argument".to_string(),
+            ));
+        }
+        let json_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        yachtsql_functions::json::strict_float64(&json_val)
+    }
+
+    fn evaluate_strict_string(args: &[Expr], batch: &Table, row_idx: usize) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(Error::invalid_query(
+                "STRING requires 1 argument".to_string(),
+            ));
+        }
+        let json_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        yachtsql_functions::json::strict_string(&json_val)
     }
 }

@@ -512,6 +512,16 @@ impl ProjectionWithExprExec {
                 | FunctionName::Casefold
                 | FunctionName::SplitByChar
                 | FunctionName::SplitByString
+                | FunctionName::SplitByRegexp
+                | FunctionName::SplitByWhitespace
+                | FunctionName::SplitByNonAlpha
+                | FunctionName::ArrayStringConcat
+                | FunctionName::AlphaTokens
+                | FunctionName::ExtractAll
+                | FunctionName::ExtractAllGroupsHorizontal
+                | FunctionName::ExtractAllGroupsVertical
+                | FunctionName::Ngrams
+                | FunctionName::Tokens
                 | FunctionName::BitCount
                 | FunctionName::GetBit
                 | FunctionName::SetBit
@@ -535,16 +545,6 @@ impl ProjectionWithExprExec {
                 | FunctionName::ExtractGroups
                 | FunctionName::NgramDistance
                 | FunctionName::NgramSearch
-                | FunctionName::SplitByRegexp
-                | FunctionName::SplitByWhitespace
-                | FunctionName::SplitByNonAlpha
-                | FunctionName::AlphaTokens
-                | FunctionName::Tokens
-                | FunctionName::Ngrams
-                | FunctionName::ArrayStringConcat
-                | FunctionName::ExtractAll
-                | FunctionName::ExtractAllGroupsHorizontal
-                | FunctionName::ExtractAllGroupsVertical
                 | FunctionName::ReplaceOne
                 | FunctionName::ReplaceAll
                 | FunctionName::TrimBoth
@@ -723,6 +723,24 @@ impl ProjectionWithExprExec {
                 | FunctionName::JustifyDays
                 | FunctionName::JustifyHours
                 | FunctionName::JustifyInterval
+                | FunctionName::TimestampAdd
+                | FunctionName::TimestampSub
+                | FunctionName::DatetimeAdd
+                | FunctionName::DatetimeSub
+                | FunctionName::DatetimeDiff
+                | FunctionName::DatetimeTrunc
+                | FunctionName::TimeAdd
+                | FunctionName::TimeSub
+                | FunctionName::TimeDiff
+                | FunctionName::TimeTrunc
+                | FunctionName::UnixDate
+                | FunctionName::DateFromUnixDate
+                | FunctionName::UnixSeconds
+                | FunctionName::TimestampSeconds
+                | FunctionName::UnixMillis
+                | FunctionName::TimestampMillis
+                | FunctionName::UnixMicros
+                | FunctionName::TimestampMicros
         ) {
             return Self::evaluate_datetime_function(func_name, args, batch, row_idx);
         }
@@ -741,7 +759,11 @@ impl ProjectionWithExprExec {
                     || s == "TO_JSON"
                     || s == "TO_JSONB"
                     || s == "TO_JSON_STRING"
-                    || s == "PARSE_JSON")
+                    || s == "PARSE_JSON"
+                    || s == "BOOL"
+                    || s == "INT64"
+                    || s == "FLOAT64"
+                    || s == "STRING")
             {
                 return Self::evaluate_json_function(func_name, args, batch, row_idx);
             }
@@ -755,7 +777,10 @@ impl ProjectionWithExprExec {
                 | FunctionName::Sha2
                 | FunctionName::Encode
                 | FunctionName::Sha1
+                | FunctionName::Sha224
+                | FunctionName::Sha384
                 | FunctionName::Sha512
+                | FunctionName::Blake3
                 | FunctionName::FarmFingerprint
                 | FunctionName::ToHex
                 | FunctionName::FromHex
@@ -1171,6 +1196,32 @@ impl ProjectionWithExprExec {
                 | FunctionName::TupleNames
         ) {
             return Self::evaluate_tuple_function(name, args, batch, row_idx);
+        }
+
+        if matches!(
+            name,
+            FunctionName::BitmapBuild
+                | FunctionName::BitmapToArray
+                | FunctionName::BitmapCardinality
+                | FunctionName::BitmapAnd
+                | FunctionName::BitmapOr
+                | FunctionName::BitmapXor
+                | FunctionName::BitmapAndnot
+                | FunctionName::BitmapContains
+                | FunctionName::BitmapHasAny
+                | FunctionName::BitmapHasAll
+                | FunctionName::BitmapAndCardinality
+                | FunctionName::BitmapOrCardinality
+                | FunctionName::BitmapXorCardinality
+                | FunctionName::BitmapAndnotCardinality
+                | FunctionName::BitmapMin
+                | FunctionName::BitmapMax
+                | FunctionName::BitmapSubsetInRange
+                | FunctionName::BitmapSubsetLimit
+                | FunctionName::BitmapTransform
+                | FunctionName::SubBitmap
+        ) {
+            return Self::evaluate_bitmap_function(name, args, batch, row_idx);
         }
 
         if let FunctionName::Custom(custom_name) = name {

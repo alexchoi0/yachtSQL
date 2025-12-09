@@ -2,7 +2,6 @@ use crate::assert_table_eq;
 use crate::common::{create_executor, d};
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_day() {
     let mut executor = create_executor();
     let result = executor
@@ -12,7 +11,6 @@ fn test_interval_day() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_month() {
     let mut executor = create_executor();
     let result = executor
@@ -22,7 +20,6 @@ fn test_interval_month() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_year() {
     let mut executor = create_executor();
     let result = executor
@@ -32,7 +29,6 @@ fn test_interval_year() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_hour() {
     let mut executor = create_executor();
     let result = executor
@@ -42,7 +38,6 @@ fn test_interval_hour() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_minute() {
     let mut executor = create_executor();
     let result = executor
@@ -52,7 +47,6 @@ fn test_interval_minute() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_second() {
     let mut executor = create_executor();
     let result = executor
@@ -62,7 +56,6 @@ fn test_interval_second() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_addition_to_date() {
     let mut executor = create_executor();
     let result = executor
@@ -72,7 +65,6 @@ fn test_interval_addition_to_date() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_subtraction_from_date() {
     let mut executor = create_executor();
     let result = executor
@@ -82,7 +74,6 @@ fn test_interval_subtraction_from_date() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_month_addition() {
     let mut executor = create_executor();
     let result = executor
@@ -92,7 +83,6 @@ fn test_interval_month_addition() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_year_addition() {
     let mut executor = create_executor();
     let result = executor
@@ -111,7 +101,6 @@ fn test_interval_timestamp_addition() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_negative() {
     let mut executor = create_executor();
     let result = executor
@@ -121,7 +110,6 @@ fn test_interval_negative() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_interval_multiplication() {
     let mut executor = create_executor();
     let result = executor
@@ -147,7 +135,7 @@ fn test_interval_in_table() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "MAKE_INTERVAL not yet available in BigQuery dialect"]
 fn test_interval_with_column() {
     let mut executor = create_executor();
     executor
@@ -164,7 +152,7 @@ fn test_interval_with_column() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "MAKE_INTERVAL not yet available in BigQuery dialect"]
 fn test_make_interval() {
     let mut executor = create_executor();
     let result = executor
@@ -174,7 +162,7 @@ fn test_make_interval() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
+#[ignore = "MAKE_INTERVAL not yet available in BigQuery dialect"]
 fn test_make_interval_time() {
     let mut executor = create_executor();
     let result = executor
@@ -186,7 +174,6 @@ fn test_make_interval_time() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_extract_from_interval() {
     let mut executor = create_executor();
     let result = executor
@@ -196,7 +183,6 @@ fn test_extract_from_interval() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_extract_month_from_interval() {
     let mut executor = create_executor();
     let result = executor
@@ -231,7 +217,6 @@ fn test_interval_() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_justify_days() {
     let mut executor = create_executor();
     let result = executor
@@ -241,7 +226,6 @@ fn test_justify_days() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_justify_hours() {
     let mut executor = create_executor();
     let result = executor
@@ -251,7 +235,6 @@ fn test_justify_hours() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_justify_interval() {
     let mut executor = create_executor();
     let result = executor

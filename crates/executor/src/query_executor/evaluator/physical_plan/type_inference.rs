@@ -617,6 +617,9 @@ impl ProjectionWithExprExec {
                         | "BASE64ENCODE"
                         | "BASE64DECODE"
                         | "TRYBASE64DECODE"
+                        | "BASE64URLENCODE"
+                        | "BASE64URLDECODE"
+                        | "TRYBASE64URLDECODE"
                         | "BASE58ENCODE"
                         | "BASE58DECODE"
                         | "BIN"
@@ -703,15 +706,41 @@ impl ProjectionWithExprExec {
                         | "TOINT64ORNULL"
                         | "TOINT64ORZERO"
                         | "REINTERPRETASINT64"
+                        | "RAND"
+                        | "RAND32"
+                        | "RAND64"
+                        | "RANDCONSTANT"
+                        | "RANDBERNOULLI"
+                        | "RANDBINOMIAL"
+                        | "RANDNEGATIVEBINOMIAL"
+                        | "RANDPOISSON"
                 ) =>
             {
                 Some(DataType::Int64)
             }
 
+            FunctionName::Custom(s) if matches!(s.as_str(), "ENCRYPT" | "AES_ENCRYPT_MYSQL") => {
+                Some(DataType::Bytes)
+            }
+
+            FunctionName::Custom(s) if matches!(s.as_str(), "DECRYPT" | "AES_DECRYPT_MYSQL") => {
+                Some(DataType::String)
+            }
+
             FunctionName::Custom(s)
                 if matches!(
                     s.as_str(),
-                    "TOFLOAT32" | "TOFLOAT64" | "TOFLOAT64ORNULL" | "TOFLOAT64ORZERO"
+                    "TOFLOAT32"
+                        | "TOFLOAT64"
+                        | "TOFLOAT64ORNULL"
+                        | "TOFLOAT64ORZERO"
+                        | "RANDUNIFORM"
+                        | "RANDNORMAL"
+                        | "RANDLOGNORMAL"
+                        | "RANDEXPONENTIAL"
+                        | "RANDCHISQUARED"
+                        | "RANDSTUDENTT"
+                        | "RANDFISHERF"
                 ) =>
             {
                 Some(DataType::Float64)
@@ -720,7 +749,14 @@ impl ProjectionWithExprExec {
             FunctionName::Custom(s)
                 if matches!(
                     s.as_str(),
-                    "TOSTRING" | "TOFIXEDSTRING" | "REINTERPRETASSTRING" | "TOTYPENAME"
+                    "TOSTRING"
+                        | "TOFIXEDSTRING"
+                        | "REINTERPRETASSTRING"
+                        | "TOTYPENAME"
+                        | "GENERATEUUIDV4"
+                        | "RANDOMPRINTABLEASCII"
+                        | "RANDOMSTRINGUTF8"
+                        | "FAKEDATA"
                 ) =>
             {
                 Some(DataType::String)
@@ -804,6 +840,34 @@ impl ProjectionWithExprExec {
             FunctionName::Custom(s) if matches!(s.as_str(), "NGRAMDISTANCE" | "NGRAMSEARCH") => {
                 Some(DataType::Float64)
             }
+            FunctionName::Custom(s)
+                if matches!(s.as_str(), "RANDOMSTRING" | "RANDOMFIXEDSTRING") =>
+            {
+                Some(DataType::Bytes)
+            }
+
+            FunctionName::BitmapBuild
+            | FunctionName::BitmapToArray
+            | FunctionName::BitmapAnd
+            | FunctionName::BitmapOr
+            | FunctionName::BitmapXor
+            | FunctionName::BitmapAndnot
+            | FunctionName::BitmapSubsetInRange
+            | FunctionName::BitmapSubsetLimit
+            | FunctionName::BitmapTransform
+            | FunctionName::SubBitmap
+            | FunctionName::GroupBitmapState => Some(DataType::Array(Box::new(DataType::Int64))),
+
+            FunctionName::BitmapCardinality
+            | FunctionName::BitmapContains
+            | FunctionName::BitmapHasAny
+            | FunctionName::BitmapHasAll
+            | FunctionName::BitmapAndCardinality
+            | FunctionName::BitmapOrCardinality
+            | FunctionName::BitmapXorCardinality
+            | FunctionName::BitmapAndnotCardinality
+            | FunctionName::BitmapMin
+            | FunctionName::BitmapMax => Some(DataType::Int64),
 
             FunctionName::Abs
             | FunctionName::Absolute
@@ -1071,7 +1135,10 @@ impl ProjectionWithExprExec {
             | FunctionName::Sha256
             | FunctionName::Sha2
             | FunctionName::Sha1
-            | FunctionName::Sha512 => Some(DataType::String),
+            | FunctionName::Sha224
+            | FunctionName::Sha384
+            | FunctionName::Sha512
+            | FunctionName::Blake3 => Some(DataType::String),
 
             FunctionName::FarmFingerprint | FunctionName::Crc32 | FunctionName::Crc32c => {
                 Some(DataType::Int64)
@@ -1128,6 +1195,28 @@ impl ProjectionWithExprExec {
             | FunctionName::JustifyHours
             | FunctionName::JustifyInterval => Some(DataType::Interval),
 
+            FunctionName::UnixDate
+            | FunctionName::UnixSeconds
+            | FunctionName::UnixMillis
+            | FunctionName::UnixMicros
+            | FunctionName::DatetimeDiff
+            | FunctionName::TimeDiff => Some(DataType::Int64),
+
+            FunctionName::DateFromUnixDate | FunctionName::LastDay => Some(DataType::Date),
+
+            FunctionName::TimestampSeconds
+            | FunctionName::TimestampMillis
+            | FunctionName::TimestampMicros
+            | FunctionName::TimestampAdd
+            | FunctionName::TimestampSub
+            | FunctionName::DatetimeAdd
+            | FunctionName::DatetimeSub
+            | FunctionName::DatetimeTrunc => Some(DataType::Timestamp),
+
+            FunctionName::TimeAdd | FunctionName::TimeSub | FunctionName::TimeTrunc => {
+                Some(DataType::Time)
+            }
+
             FunctionName::Year
             | FunctionName::Month
             | FunctionName::Day
@@ -1153,10 +1242,24 @@ impl ProjectionWithExprExec {
             FunctionName::ArrayLength | FunctionName::Cardinality => Some(DataType::Int64),
             FunctionName::ArrayPosition => Some(DataType::Int64),
             FunctionName::ArrayContains | FunctionName::ArrayContainsAll => Some(DataType::Bool),
-            FunctionName::Split | FunctionName::StringSplit => {
-                Some(DataType::Array(Box::new(DataType::String)))
-            }
+            FunctionName::Split
+            | FunctionName::StringSplit
+            | FunctionName::SplitByChar
+            | FunctionName::SplitByString
+            | FunctionName::SplitByRegexp
+            | FunctionName::SplitByWhitespace
+            | FunctionName::SplitByNonAlpha
+            | FunctionName::AlphaTokens
+            | FunctionName::ExtractAll
+            | FunctionName::Ngrams
+            | FunctionName::Tokens => Some(DataType::Array(Box::new(DataType::String))),
             FunctionName::SplitPart => Some(DataType::String),
+            FunctionName::ArrayStringConcat => Some(DataType::String),
+            FunctionName::ExtractAllGroupsHorizontal | FunctionName::ExtractAllGroupsVertical => {
+                Some(DataType::Array(Box::new(DataType::Array(Box::new(
+                    DataType::String,
+                )))))
+            }
             FunctionName::StringToArray => Some(DataType::Array(Box::new(DataType::String))),
 
             FunctionName::GenerateArray => Some(DataType::Array(Box::new(DataType::Int64))),
@@ -1467,6 +1570,16 @@ impl ProjectionWithExprExec {
             | FunctionName::IsNotJsonObject
             | FunctionName::IsNotJsonScalar => Some(DataType::Bool),
 
+            FunctionName::JsonSet | FunctionName::JsonRemove => Some(DataType::Json),
+            FunctionName::JsonExtractArray | FunctionName::JsonQueryArray => {
+                Some(DataType::Array(Box::new(DataType::Json)))
+            }
+            FunctionName::JsonValueArray => Some(DataType::Array(Box::new(DataType::String))),
+            FunctionName::LaxBool | FunctionName::JsonBool => Some(DataType::Bool),
+            FunctionName::LaxInt64 | FunctionName::JsonInt64 => Some(DataType::Int64),
+            FunctionName::LaxFloat64 | FunctionName::JsonFloat64 => Some(DataType::Float64),
+            FunctionName::LaxString | FunctionName::JsonStrict => Some(DataType::String),
+
             FunctionName::JsonValue | FunctionName::JsonExtractScalar => args
                 .get(2)
                 .and_then(|arg| {
@@ -1521,24 +1634,6 @@ impl ProjectionWithExprExec {
             FunctionName::ExtractGroups => Some(DataType::Array(Box::new(DataType::String))),
 
             FunctionName::NgramDistance | FunctionName::NgramSearch => Some(DataType::Float64),
-
-            FunctionName::SplitByChar
-            | FunctionName::SplitByString
-            | FunctionName::SplitByRegexp
-            | FunctionName::SplitByWhitespace
-            | FunctionName::SplitByNonAlpha
-            | FunctionName::AlphaTokens
-            | FunctionName::Tokens
-            | FunctionName::Ngrams
-            | FunctionName::ExtractAll => Some(DataType::Array(Box::new(DataType::String))),
-
-            FunctionName::ArrayStringConcat => Some(DataType::String),
-
-            FunctionName::ExtractAllGroupsHorizontal | FunctionName::ExtractAllGroupsVertical => {
-                Some(DataType::Array(Box::new(DataType::Array(Box::new(
-                    DataType::String,
-                )))))
-            }
 
             FunctionName::ReplaceOne
             | FunctionName::ReplaceAll
@@ -1894,9 +1989,20 @@ impl ProjectionWithExprExec {
             FunctionName::CurrentSchemas => Some(DataType::Array(Box::new(DataType::String))),
 
             // Tuple functions
-            FunctionName::Tuple
-            | FunctionName::TupleElement
-            | FunctionName::Untuple
+            FunctionName::Tuple => {
+                let mut struct_fields = Vec::with_capacity(args.len());
+                for (i, arg) in args.iter().enumerate() {
+                    let field_type = Self::infer_expr_type_with_schema(arg, schema)
+                        .unwrap_or(yachtsql_core::types::DataType::Unknown);
+                    struct_fields.push(yachtsql_core::types::StructField {
+                        name: (i + 1).to_string(),
+                        data_type: field_type,
+                    });
+                }
+                Some(DataType::Struct(struct_fields))
+            }
+
+            FunctionName::Untuple
             | FunctionName::TuplePlus
             | FunctionName::TupleMinus
             | FunctionName::TupleMultiply
@@ -1909,6 +2015,27 @@ impl ProjectionWithExprExec {
             | FunctionName::TupleIntDivOrZero
             | FunctionName::TupleModulo
             | FunctionName::TupleModuloByNumber => Some(DataType::Struct(vec![])),
+
+            FunctionName::TupleElement => {
+                if args.len() >= 2 {
+                    let tuple_type = Self::infer_expr_type_with_schema(&args[0], schema);
+                    if let Some(DataType::Struct(fields)) = tuple_type {
+                        if let yachtsql_optimizer::expr::Expr::Literal(
+                            yachtsql_optimizer::expr::LiteralValue::Int64(idx),
+                        ) = &args[1]
+                        {
+                            let idx = *idx as usize;
+                            if idx > 0 && idx <= fields.len() {
+                                return Some(fields[idx - 1].data_type.clone());
+                            }
+                        }
+                        if !fields.is_empty() {
+                            return Some(fields[0].data_type.clone());
+                        }
+                    }
+                }
+                None
+            }
 
             FunctionName::TupleHammingDistance => Some(DataType::Int64),
 
@@ -2051,6 +2178,18 @@ impl ProjectionWithExprExec {
                 } else {
                     yachtsql_core::types::coercion::CoercionRules::find_common_type(&types).ok()
                 }
+            }
+            Expr::Tuple(exprs) => {
+                let mut struct_fields = Vec::with_capacity(exprs.len());
+                for (i, expr) in exprs.iter().enumerate() {
+                    let field_type = Self::infer_expr_type_with_schema(expr, schema)
+                        .unwrap_or(DataType::Unknown);
+                    struct_fields.push(StructField {
+                        name: (i + 1).to_string(),
+                        data_type: field_type,
+                    });
+                }
+                Some(DataType::Struct(struct_fields))
             }
             _ => None,
         }
