@@ -36,7 +36,8 @@ pub use cte::{CteExec, EmptyRelationExec, MaterializedViewScanExec, SubqueryScan
 pub use distinct::{DistinctExec, DistinctOnExec};
 pub use index_scan::IndexScanExec;
 pub use join::{
-    HashJoinExec, IndexNestedLoopJoinExec, LateralJoinExec, MergeJoinExec, NestedLoopJoinExec,
+    AsOfJoinExec, HashJoinExec, IndexNestedLoopJoinExec, LateralJoinExec, MergeJoinExec,
+    NestedLoopJoinExec, PasteJoinExec,
 };
 pub use join_strategy::JoinStrategy;
 pub use limit::LimitExec;

@@ -19,6 +19,7 @@ use super::super::aggregator::{AggregateSpec, Aggregator};
 use super::super::expression_evaluator::ExpressionEvaluator;
 use super::super::window_functions::{WindowFunction, WindowFunctionType};
 use super::DdlExecutor;
+use super::dml::{DmlDeleteExecutor, DmlInsertExecutor, DmlUpdateExecutor};
 use crate::Table;
 use crate::information_schema::{InformationSchemaProvider, InformationSchemaTable};
 
@@ -5693,6 +5694,28 @@ impl QueryExecutor {
                 (schema, rows)
             };
 
+            let schema = if !cte.alias.columns.is_empty() {
+                let column_aliases: Vec<String> = cte
+                    .alias
+                    .columns
+                    .iter()
+                    .map(|c| c.name.value.clone())
+                    .collect();
+                let renamed_fields: Vec<yachtsql_storage::Field> = schema
+                    .fields()
+                    .iter()
+                    .zip(column_aliases.iter())
+                    .map(|(field, alias)| {
+                        let mut new_field = field.clone();
+                        new_field.name = alias.clone();
+                        new_field
+                    })
+                    .collect();
+                yachtsql_storage::Schema::from_fields(renamed_fields)
+            } else {
+                schema
+            };
+
             let mut storage = self.storage.borrow_mut();
 
             if storage.get_dataset("default").is_none() {
@@ -5728,6 +5751,233 @@ impl QueryExecutor {
         }
 
         Ok(())
+    }
+
+    pub fn execute_cte_dml(
+        &mut self,
+        stmt: &Statement,
+        operation: crate::query_executor::execution::dispatcher::DmlOperation,
+        original_sql: &str,
+    ) -> Result<Table> {
+        use crate::query_executor::execution::dispatcher::DmlOperation;
+
+        let query = match stmt {
+            Statement::Query(q) => q,
+            _ => return Err(Error::InvalidQuery("Expected Query statement".to_string())),
+        };
+
+        let cte_names = if let Some(ref with_clause) = query.with {
+            self.process_ctes(with_clause)?
+        } else {
+            Vec::new()
+        };
+
+        let result = match (operation, query.body.as_ref()) {
+            (DmlOperation::Insert, SetExpr::Insert(insert_stmt)) => {
+                let mut modified_stmt = insert_stmt.clone();
+                Self::rename_cte_refs_in_statement(&mut modified_stmt, &cte_names);
+                let modified_sql = modified_stmt.to_string();
+                self.execute_insert(&modified_stmt, &modified_sql)
+            }
+            (DmlOperation::Update, SetExpr::Update(update_stmt)) => {
+                let mut modified_stmt = update_stmt.clone();
+                Self::rename_cte_refs_in_statement(&mut modified_stmt, &cte_names);
+                let modified_sql = modified_stmt.to_string();
+                self.execute_update(&modified_stmt, &modified_sql)
+            }
+            (DmlOperation::Delete, SetExpr::Delete(delete_stmt)) => {
+                let mut modified_stmt = delete_stmt.clone();
+                Self::rename_cte_refs_in_statement(&mut modified_stmt, &cte_names);
+                let modified_sql = modified_stmt.to_string();
+                self.execute_delete(&modified_stmt, &modified_sql)
+            }
+            _ => Err(Error::InvalidQuery(
+                "Mismatched CTE DML operation".to_string(),
+            )),
+        };
+
+        if !cte_names.is_empty() {
+            self.cleanup_ctes(&cte_names)?;
+        }
+
+        result
+    }
+
+    fn rename_cte_refs_in_statement(stmt: &mut Statement, cte_names: &[String]) {
+        for cte_name in cte_names {
+            let cte_table = format!("__cte_{}", cte_name);
+            Self::rename_cte_refs_in_stmt_inner(stmt, cte_name, &cte_table);
+        }
+    }
+
+    fn rename_cte_refs_in_stmt_inner(stmt: &mut Statement, old_name: &str, new_name: &str) {
+        match stmt {
+            Statement::Insert(insert) => {
+                if let Some(ref mut source) = insert.source {
+                    Self::rename_table_references(&mut source.body, old_name, new_name);
+                }
+            }
+            Statement::Update {
+                selection, from, ..
+            } => {
+                if let Some(sel) = selection {
+                    Self::rename_cte_refs_in_expr(sel, old_name, new_name);
+                }
+                if let Some(from_clause) = from {
+                    Self::rename_cte_refs_in_from(from_clause, old_name, new_name);
+                }
+            }
+            Statement::Delete(delete) => {
+                if let Some(sel) = &mut delete.selection {
+                    Self::rename_cte_refs_in_expr(sel, old_name, new_name);
+                }
+                if let Some(using) = &mut delete.using {
+                    Self::rename_cte_refs_in_using(using, old_name, new_name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rename_cte_refs_in_from(
+        from: &mut sqlparser::ast::UpdateTableFromKind,
+        old_name: &str,
+        new_name: &str,
+    ) {
+        let tables = match from {
+            sqlparser::ast::UpdateTableFromKind::BeforeSet(t) => t,
+            sqlparser::ast::UpdateTableFromKind::AfterSet(t) => t,
+        };
+        for table_with_joins in tables.iter_mut() {
+            Self::rename_cte_refs_in_table_factor(
+                &mut table_with_joins.relation,
+                old_name,
+                new_name,
+            );
+            for join in &mut table_with_joins.joins {
+                Self::rename_cte_refs_in_table_factor(&mut join.relation, old_name, new_name);
+            }
+        }
+    }
+
+    fn rename_cte_refs_in_using(using: &mut [TableWithJoins], old_name: &str, new_name: &str) {
+        for table_with_joins in using.iter_mut() {
+            Self::rename_cte_refs_in_table_factor(
+                &mut table_with_joins.relation,
+                old_name,
+                new_name,
+            );
+            for join in &mut table_with_joins.joins {
+                Self::rename_cte_refs_in_table_factor(&mut join.relation, old_name, new_name);
+            }
+        }
+    }
+
+    fn rename_cte_refs_in_table_factor(table: &mut TableFactor, old_name: &str, new_name: &str) {
+        match table {
+            TableFactor::Table { name, .. } => {
+                if name.to_string() == old_name {
+                    *name = sqlparser::ast::ObjectName(vec![
+                        sqlparser::ast::ObjectNamePart::Identifier(sqlparser::ast::Ident::new(
+                            new_name,
+                        )),
+                    ]);
+                }
+            }
+            TableFactor::Derived { subquery, .. } => {
+                Self::rename_table_references(&mut subquery.body, old_name, new_name);
+            }
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => {
+                Self::rename_cte_refs_in_table_factor(
+                    &mut table_with_joins.relation,
+                    old_name,
+                    new_name,
+                );
+                for join in &mut table_with_joins.joins {
+                    Self::rename_cte_refs_in_table_factor(&mut join.relation, old_name, new_name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rename_cte_refs_in_expr(expr: &mut Expr, old_name: &str, new_name: &str) {
+        match expr {
+            Expr::Subquery(subquery) => {
+                Self::rename_table_references(&mut subquery.body, old_name, new_name);
+            }
+            Expr::InSubquery {
+                subquery,
+                expr: inner_expr,
+                ..
+            } => {
+                Self::rename_table_references(&mut subquery.body, old_name, new_name);
+                Self::rename_cte_refs_in_expr(inner_expr, old_name, new_name);
+            }
+            Expr::Exists { subquery, .. } => {
+                Self::rename_table_references(&mut subquery.body, old_name, new_name);
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::rename_cte_refs_in_expr(left, old_name, new_name);
+                Self::rename_cte_refs_in_expr(right, old_name, new_name);
+            }
+            Expr::UnaryOp { expr: inner, .. } => {
+                Self::rename_cte_refs_in_expr(inner, old_name, new_name);
+            }
+            Expr::Nested(inner) => {
+                Self::rename_cte_refs_in_expr(inner, old_name, new_name);
+            }
+            Expr::Between {
+                expr: inner,
+                low,
+                high,
+                ..
+            } => {
+                Self::rename_cte_refs_in_expr(inner, old_name, new_name);
+                Self::rename_cte_refs_in_expr(low, old_name, new_name);
+                Self::rename_cte_refs_in_expr(high, old_name, new_name);
+            }
+            Expr::InList {
+                expr: inner, list, ..
+            } => {
+                Self::rename_cte_refs_in_expr(inner, old_name, new_name);
+                for item in list {
+                    Self::rename_cte_refs_in_expr(item, old_name, new_name);
+                }
+            }
+            Expr::Case {
+                operand,
+                conditions,
+                else_result,
+                ..
+            } => {
+                if let Some(op) = operand {
+                    Self::rename_cte_refs_in_expr(op, old_name, new_name);
+                }
+                for case_when in conditions {
+                    Self::rename_cte_refs_in_expr(&mut case_when.condition, old_name, new_name);
+                    Self::rename_cte_refs_in_expr(&mut case_when.result, old_name, new_name);
+                }
+                if let Some(else_res) = else_result {
+                    Self::rename_cte_refs_in_expr(else_res, old_name, new_name);
+                }
+            }
+            Expr::Function(func) => {
+                if let sqlparser::ast::FunctionArguments::List(arg_list) = &mut func.args {
+                    for arg in &mut arg_list.args {
+                        if let sqlparser::ast::FunctionArg::Unnamed(
+                            sqlparser::ast::FunctionArgExpr::Expr(e),
+                        ) = arg
+                        {
+                            Self::rename_cte_refs_in_expr(e, old_name, new_name);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn is_cte_recursive(query: &sqlparser::ast::Query, cte_name: &str) -> bool {
@@ -6011,13 +6261,20 @@ impl QueryExecutor {
 
         fn rename_in_table_factor(table: &mut TableFactor, old_name: &str, new_name: &str) {
             match table {
-                TableFactor::Table { name, .. } => {
+                TableFactor::Table { name, alias, .. } => {
                     if name.to_string() == old_name {
                         *name = sqlparser::ast::ObjectName(vec![
                             sqlparser::ast::ObjectNamePart::Identifier(sqlparser::ast::Ident::new(
                                 new_name,
                             )),
                         ]);
+                    }
+                    if name.to_string() == "__PASTE__" {
+                        if let Some(table_alias) = alias {
+                            if table_alias.name.value == old_name {
+                                table_alias.name.value = new_name.to_string();
+                            }
+                        }
                     }
                 }
                 TableFactor::Derived { subquery, .. } => {

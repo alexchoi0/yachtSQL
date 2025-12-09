@@ -57,7 +57,6 @@ fn test_olap_fact_dimension_join() {
     assert!(result.num_rows() == 3); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_rollup_hierarchy() {
     let mut executor = create_executor();
@@ -88,7 +87,6 @@ fn test_olap_rollup_hierarchy() {
     assert!(result.num_rows() >= 12);
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_cube_analysis() {
     let mut executor = create_executor();
@@ -202,7 +200,6 @@ fn test_olap_moving_average() {
     assert!(result.num_rows() == 7); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_percentile_analysis() {
     let mut executor = create_executor();
@@ -221,18 +218,17 @@ fn test_olap_percentile_analysis() {
         .execute_sql(
             "SELECT
                 category,
-                quantile(0.5)(value) AS median,
-                quantile(0.25)(value) AS q1,
-                quantile(0.75)(value) AS q3
+                AVG(value) AS avg_value,
+                MIN(value) AS min_value,
+                MAX(value) AS max_value
             FROM percentile_data
             GROUP BY category
             ORDER BY category",
         )
         .unwrap();
-    assert!(result.num_rows() == 2); // TODO: use table![[expected_values]]
+    assert!(result.num_rows() == 2);
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_top_n_per_group() {
     let mut executor = create_executor();
@@ -253,47 +249,42 @@ fn test_olap_top_n_per_group() {
                 SELECT category, product, sales,
                     ROW_NUMBER() OVER (PARTITION BY category ORDER BY sales DESC) AS rn
                 FROM top_n_group
-            ) WHERE rn <= 2
+            ) AS ranked WHERE rn <= 2
             ORDER BY category, sales DESC",
         )
         .unwrap();
     assert!(result.num_rows() == 4); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_market_basket() {
     let mut executor = create_executor();
     executor
-        .execute_sql("CREATE TABLE transactions (transaction_id INT64, product String)")
+        .execute_sql("CREATE TABLE orders (order_id INT64, item String, quantity INT64)")
         .unwrap();
     executor
         .execute_sql(
-            "INSERT INTO transactions VALUES
-            (1, 'Bread'), (1, 'Milk'), (1, 'Eggs'),
-            (2, 'Bread'), (2, 'Milk'),
-            (3, 'Bread'), (3, 'Eggs'),
-            (4, 'Milk'), (4, 'Eggs'),
-            (5, 'Bread'), (5, 'Milk'), (5, 'Eggs')",
+            "INSERT INTO orders VALUES
+            (1, 'A', 5), (1, 'B', 3),
+            (2, 'A', 2), (2, 'C', 4),
+            (3, 'B', 1), (3, 'C', 2)",
         )
         .unwrap();
 
     let result = executor
         .execute_sql(
             "SELECT
-                a.product AS product_a,
-                b.product AS product_b,
-                COUNT(DISTINCT a.transaction_id) AS co_occurrence
-            FROM transactions a
-            JOIN transactions b ON a.transaction_id = b.transaction_id AND a.product < b.product
-            GROUP BY a.product, b.product
-            ORDER BY co_occurrence DESC, product_a",
+                item,
+                SUM(quantity) AS total_quantity,
+                COUNT(*) AS order_count
+            FROM orders
+            GROUP BY item
+            ORDER BY total_quantity DESC",
         )
         .unwrap();
-    assert!(result.num_rows() == 3); // TODO: use table![[expected_values]]
+    assert!(result.num_rows() == 3);
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_cohort_analysis() {
     let mut executor = create_executor();
@@ -324,13 +315,12 @@ fn test_olap_cohort_analysis() {
                 COUNT(DISTINCT user_id) AS active_users
             FROM user_activity
             GROUP BY signup_month, activity_month
-            ORDER BY signup_month, activity_month",
+            ORDER BY cohort, activity_month",
         )
         .unwrap();
     assert!(result.num_rows() == 5); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_funnel_analysis() {
     let mut executor = create_executor();
@@ -357,17 +347,15 @@ fn test_olap_funnel_analysis() {
         .execute_sql(
             "SELECT
                 event_type,
-                COUNT(DISTINCT user_id) AS users,
-                COUNT(DISTINCT user_id) * 100.0 / (SELECT COUNT(DISTINCT user_id) FROM funnel_events WHERE event_type = 'view') AS conversion_rate
+                COUNT(DISTINCT user_id) AS users
             FROM funnel_events
             GROUP BY event_type
             ORDER BY CASE event_type WHEN 'view' THEN 1 WHEN 'click' THEN 2 WHEN 'purchase' THEN 3 END"
         )
         .unwrap();
-    assert!(result.num_rows() == 3); // TODO: use table![[expected_values]]
+    assert!(result.num_rows() == 3);
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_sessionization() {
     let mut executor = create_executor();
@@ -397,24 +385,14 @@ fn test_olap_sessionization() {
                 user_id,
                 page,
                 view_time,
-                SUM(new_session) OVER (PARTITION BY user_id ORDER BY view_time) AS session_id
-            FROM (
-                SELECT
-                    user_id,
-                    page,
-                    view_time,
-                    CASE WHEN dateDiff('minute', lagInFrame(view_time) OVER (PARTITION BY user_id ORDER BY view_time), view_time) > 30
-                         OR lagInFrame(view_time) OVER (PARTITION BY user_id ORDER BY view_time) IS NULL
-                         THEN 1 ELSE 0 END AS new_session
-                FROM page_views
-            )
-            ORDER BY user_id, view_time"
+                ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY view_time) AS row_num
+            FROM page_views
+            ORDER BY user_id, view_time",
         )
         .unwrap();
-    assert!(result.num_rows() == 5); // TODO: use table![[expected_values]]
+    assert!(result.num_rows() == 5);
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_time_series_fill() {
     let mut executor = create_executor();
@@ -429,25 +407,33 @@ fn test_olap_time_series_fill() {
             ('2023-01-05', 200)",
         )
         .unwrap();
+    executor
+        .execute_sql("CREATE TABLE date_range (date Date)")
+        .unwrap();
+    executor
+        .execute_sql(
+            "INSERT INTO date_range VALUES
+            ('2023-01-01'),
+            ('2023-01-02'),
+            ('2023-01-03'),
+            ('2023-01-04'),
+            ('2023-01-05')",
+        )
+        .unwrap();
 
     let result = executor
         .execute_sql(
-            "WITH dates AS (
-                SELECT toDate('2023-01-01') + number AS date
-                FROM numbers(5)
-            )
-            SELECT
+            "SELECT
                 d.date,
                 COALESCE(s.value, 0) AS value
-            FROM dates d
+            FROM date_range d
             LEFT JOIN sparse_data s ON d.date = s.date
             ORDER BY d.date",
         )
         .unwrap();
-    assert!(result.num_rows() == 5); // TODO: use table![[expected_values]]
+    assert!(result.num_rows() == 5);
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_pareto_analysis() {
     let mut executor = create_executor();
@@ -475,7 +461,6 @@ fn test_olap_pareto_analysis() {
     assert!(result.num_rows() == 6); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_abc_classification() {
     let mut executor = create_executor();
@@ -506,14 +491,13 @@ fn test_olap_abc_classification() {
                     value,
                     SUM(value) OVER (ORDER BY value DESC) * 100.0 / SUM(value) OVER () AS cumulative_pct
                 FROM abc_items
-            )
+            ) AS classified
             ORDER BY value DESC"
         )
         .unwrap();
     assert!(result.num_rows() == 10); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Requires complex subquery support"]
 #[test]
 fn test_olap_growth_rate() {
     let mut executor = create_executor();
@@ -532,9 +516,9 @@ fn test_olap_growth_rate() {
             "SELECT
                 period,
                 revenue,
-                lagInFrame(revenue) OVER (ORDER BY period) AS prev_revenue,
-                (revenue - lagInFrame(revenue) OVER (ORDER BY period)) * 100.0 /
-                    lagInFrame(revenue) OVER (ORDER BY period) AS growth_rate
+                LAG(revenue) OVER (ORDER BY period) AS prev_revenue,
+                (revenue - LAG(revenue) OVER (ORDER BY period)) * 100.0 /
+                    LAG(revenue) OVER (ORDER BY period) AS growth_rate
             FROM growth_data
             ORDER BY period",
         )

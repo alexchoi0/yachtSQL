@@ -103,7 +103,7 @@ impl CostModel {
                 let input_cost = self.estimate_node_cost(input);
                 self.estimate_projection_cost(&input_cost, expressions.len())
             }
-            PlanNode::Join { left, right, .. } => {
+            PlanNode::Join { left, right, .. } | PlanNode::AsOfJoin { left, right, .. } => {
                 let left_cost = self.estimate_node_cost(left);
                 let right_cost = self.estimate_node_cost(right);
                 self.estimate_join_cost(&left_cost, &right_cost)

@@ -3,16 +3,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use yachtsql_core::error::{Error, Result};
-use yachtsql_ir::plan::{LogicalPlan, PlanNode};
+use yachtsql_ir::plan::{JoinType, LogicalPlan, PlanNode};
 
 use super::evaluator::physical_plan::{
-    AggregateExec, AggregateStrategy, ArrayJoinExec, CteExec, DistinctExec, DistinctOnExec,
-    EmptyRelationExec, ExceptExec, ExecutionPlan, FilterExec, HashJoinExec, IndexScanExec,
-    IntersectExec, JoinStrategy, LateralJoinExec, LimitExec, MaterializedViewScanExec, MergeExec,
-    MergeJoinExec, NestedLoopJoinExec, PhysicalPlan, PivotAggregateFunction, PivotExec,
-    ProjectionWithExprExec, SampleSize, SamplingMethod, SortAggregateExec, SortExec,
-    SubqueryScanExec, TableSampleExec, TableScanExec, TableValuedFunctionExec, UnionExec,
-    UnnestExec, UnpivotExec, ValuesExec, WindowExec, infer_values_schema,
+    AggregateExec, AggregateStrategy, ArrayJoinExec, AsOfJoinExec, CteExec, DistinctExec,
+    DistinctOnExec, EmptyRelationExec, ExceptExec, ExecutionPlan, FilterExec, HashJoinExec,
+    IndexScanExec, IntersectExec, JoinStrategy, LateralJoinExec, LimitExec,
+    MaterializedViewScanExec, MergeExec, MergeJoinExec, NestedLoopJoinExec, PasteJoinExec,
+    PhysicalPlan, PivotAggregateFunction, PivotExec, ProjectionWithExprExec, SampleSize,
+    SamplingMethod, SortAggregateExec, SortExec, SubqueryScanExec, TableSampleExec, TableScanExec,
+    TableValuedFunctionExec, UnionExec, UnnestExec, UnpivotExec, ValuesExec, WindowExec,
+    infer_values_schema,
 };
 use super::returning::{
     ReturningColumn, ReturningColumnOrigin, ReturningExpressionItem, ReturningSpec,
@@ -1049,6 +1050,10 @@ impl LogicalToPhysicalPlanner {
                 let left_exec = self.plan_node_to_exec(left)?;
                 let right_exec = self.plan_node_to_exec(right)?;
 
+                if matches!(join_type, JoinType::Paste) {
+                    return Ok(Rc::new(PasteJoinExec::new(left_exec, right_exec)?));
+                }
+
                 self.validate_join_condition_types(on, left_exec.schema(), right_exec.schema())?;
 
                 let left_tables = self.collect_table_names(left);
@@ -1102,6 +1107,25 @@ impl LogicalToPhysicalPlanner {
                     (**right).clone(),
                     join_type.clone(),
                     Rc::clone(&self.storage),
+                )?))
+            }
+
+            PlanNode::AsOfJoin {
+                left,
+                right,
+                equality_condition,
+                match_condition,
+                is_left_join,
+            } => {
+                let left_exec = self.plan_node_to_exec(left)?;
+                let right_exec = self.plan_node_to_exec(right)?;
+
+                Ok(Rc::new(AsOfJoinExec::new(
+                    left_exec,
+                    right_exec,
+                    equality_condition.clone(),
+                    match_condition.clone(),
+                    *is_left_join,
                 )?))
             }
 

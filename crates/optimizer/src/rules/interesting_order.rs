@@ -131,6 +131,51 @@ impl InterestingOrderRule {
                 Ok((new_node, output_order, left_changed || right_changed))
             }
 
+            PlanNode::AsOfJoin {
+                left,
+                right,
+                equality_condition,
+                match_condition,
+                is_left_join,
+            } => {
+                let join_order = if is_equi_join(equality_condition) {
+                    self.extract_join_key_ordering(equality_condition)
+                } else {
+                    OrderingProperty::empty()
+                };
+
+                let left_requirement = if !join_order.is_empty() {
+                    self.merge_requirements(required_order, &join_order)
+                } else {
+                    required_order.clone()
+                };
+
+                let (opt_left, left_order, left_changed) =
+                    self.optimize_with_context(left, &left_requirement)?;
+
+                let right_requirement = join_order.clone();
+                let (opt_right, right_order, right_changed) =
+                    self.optimize_with_context(right, &right_requirement)?;
+
+                let output_order = if left_order.satisfies(&join_order)
+                    && right_order.satisfies(&join_order)
+                    && !join_order.is_empty()
+                {
+                    left_order
+                } else {
+                    OrderingProperty::empty()
+                };
+
+                let new_node = PlanNode::AsOfJoin {
+                    left: Box::new(opt_left),
+                    right: Box::new(opt_right),
+                    equality_condition: equality_condition.clone(),
+                    match_condition: match_condition.clone(),
+                    is_left_join: *is_left_join,
+                };
+                Ok((new_node, output_order, left_changed || right_changed))
+            }
+
             PlanNode::LateralJoin {
                 left,
                 right,

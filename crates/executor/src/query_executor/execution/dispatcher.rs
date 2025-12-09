@@ -21,6 +21,11 @@ pub enum StatementJob {
         stmt: Box<SqlStatement>,
     },
 
+    CteDml {
+        operation: DmlOperation,
+        stmt: Box<SqlStatement>,
+    },
+
     Query {
         stmt: Box<SqlStatement>,
     },
@@ -414,9 +419,27 @@ impl Dispatcher {
                         },
                     }),
 
-                    SqlStatement::Query(_) => Ok(StatementJob::Query {
-                        stmt: Box::new(ast.clone()),
-                    }),
+                    SqlStatement::Query(query) => {
+                        use sqlparser::ast::SetExpr;
+
+                        match query.body.as_ref() {
+                            SetExpr::Insert(_) => Ok(StatementJob::CteDml {
+                                operation: DmlOperation::Insert,
+                                stmt: Box::new(ast.clone()),
+                            }),
+                            SetExpr::Update(_) => Ok(StatementJob::CteDml {
+                                operation: DmlOperation::Update,
+                                stmt: Box::new(ast.clone()),
+                            }),
+                            SetExpr::Delete(_) => Ok(StatementJob::CteDml {
+                                operation: DmlOperation::Delete,
+                                stmt: Box::new(ast.clone()),
+                            }),
+                            _ => Ok(StatementJob::Query {
+                                stmt: Box::new(ast.clone()),
+                            }),
+                        }
+                    }
 
                     SqlStatement::Set(set_stmt) => self.handle_set_statement(set_stmt),
 

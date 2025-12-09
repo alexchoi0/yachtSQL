@@ -1275,6 +1275,9 @@ impl ExecutionPlan for MergeJoinExec {
                     return self.build_result_batch(&result_rows);
                 }
                 JoinType::Cross => {}
+                JoinType::Paste | JoinType::AsOf => {
+                    panic!("Paste and AsOf joins should not use MergeJoinExec")
+                }
             }
         }
 
@@ -1619,6 +1622,9 @@ impl ExecutionPlan for IndexNestedLoopJoinExec {
                             result_rows.push(left_row);
                         }
                         JoinType::Inner | JoinType::Right | JoinType::Cross | JoinType::Semi => {}
+                        JoinType::Paste | JoinType::AsOf => {
+                            panic!("Paste and AsOf joins should not use IndexNestedLoopJoinExec")
+                        }
                     }
                     continue;
                 }
@@ -1636,6 +1642,9 @@ impl ExecutionPlan for IndexNestedLoopJoinExec {
                             result_rows.push(left_row);
                         }
                         JoinType::Inner | JoinType::Right | JoinType::Cross | JoinType::Semi => {}
+                        JoinType::Paste | JoinType::AsOf => {
+                            panic!("Paste and AsOf joins should not use IndexNestedLoopJoinExec")
+                        }
                     }
                 } else {
                     match self.join_type {
@@ -1654,6 +1663,9 @@ impl ExecutionPlan for IndexNestedLoopJoinExec {
                                 result_rows.push(combined);
                             }
                         }
+                        JoinType::Paste | JoinType::AsOf => {
+                            panic!("Paste and AsOf joins should not use IndexNestedLoopJoinExec")
+                        }
                     }
                 }
             }
@@ -1671,6 +1683,484 @@ impl ExecutionPlan for IndexNestedLoopJoinExec {
             "IndexNestedLoopJoin [{:?}, table={}, index={}]",
             self.join_type, self.right_table_name, self.right_index_name
         )
+    }
+}
+
+#[derive(Debug)]
+pub struct PasteJoinExec {
+    left: Rc<dyn ExecutionPlan>,
+    right: Rc<dyn ExecutionPlan>,
+    schema: Schema,
+}
+
+impl PasteJoinExec {
+    pub fn new(left: Rc<dyn ExecutionPlan>, right: Rc<dyn ExecutionPlan>) -> Result<Self> {
+        let left_schema = left.schema();
+        let right_schema = right.schema();
+
+        let mut fields = Vec::new();
+        for field in left_schema.fields() {
+            fields.push(field.clone());
+        }
+        for field in right_schema.fields() {
+            fields.push(field.clone());
+        }
+
+        let schema = Schema::from_fields(fields);
+
+        Ok(Self {
+            left,
+            right,
+            schema,
+        })
+    }
+
+    fn build_result_batch(&self, result_rows: &[Vec<Value>]) -> Result<Vec<Table>> {
+        if result_rows.is_empty() {
+            return Ok(vec![Table::empty(self.schema.clone())]);
+        }
+
+        let num_output_rows = result_rows.len();
+        let num_cols = self.schema.fields().len();
+        let mut columns = Vec::new();
+
+        for col_idx in 0..num_cols {
+            let field = &self.schema.fields()[col_idx];
+            let mut column = Column::new(&field.data_type, num_output_rows);
+
+            for row in result_rows {
+                column.push(row[col_idx].clone())?;
+            }
+
+            columns.push(column);
+        }
+
+        Ok(vec![Table::new(self.schema.clone(), columns)?])
+    }
+}
+
+impl PasteJoinExec {
+    fn extract_row(&self, batch: &Table, row_idx: usize) -> Result<Vec<Value>> {
+        let mut row = Vec::new();
+        for col in batch.expect_columns() {
+            row.push(col.get(row_idx)?);
+        }
+        Ok(row)
+    }
+}
+
+impl ExecutionPlan for PasteJoinExec {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn execute(&self) -> Result<Vec<Table>> {
+        let left_batches: Vec<Table> = self
+            .left
+            .execute()?
+            .into_iter()
+            .map(|b| b.to_column_format())
+            .collect::<Result<Vec<_>>>()?;
+        let right_batches: Vec<Table> = self
+            .right
+            .execute()?
+            .into_iter()
+            .map(|b| b.to_column_format())
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut left_rows: Vec<Vec<Value>> = Vec::new();
+        for batch in &left_batches {
+            for idx in 0..batch.num_rows() {
+                left_rows.push(self.extract_row(batch, idx)?);
+            }
+        }
+
+        let mut right_rows: Vec<Vec<Value>> = Vec::new();
+        for batch in &right_batches {
+            for idx in 0..batch.num_rows() {
+                right_rows.push(self.extract_row(batch, idx)?);
+            }
+        }
+
+        let max_rows = left_rows.len().max(right_rows.len());
+        let left_num_cols = self.left.schema().fields().len();
+        let right_num_cols = self.right.schema().fields().len();
+
+        let mut result_rows: Vec<Vec<Value>> = Vec::with_capacity(max_rows);
+
+        for i in 0..max_rows {
+            let mut row = Vec::with_capacity(left_num_cols + right_num_cols);
+
+            if i < left_rows.len() {
+                row.extend(left_rows[i].clone());
+            } else {
+                row.extend(vec![Value::null(); left_num_cols]);
+            }
+
+            if i < right_rows.len() {
+                row.extend(right_rows[i].clone());
+            } else {
+                row.extend(vec![Value::null(); right_num_cols]);
+            }
+
+            result_rows.push(row);
+        }
+
+        self.build_result_batch(&result_rows)
+    }
+
+    fn children(&self) -> Vec<Rc<dyn ExecutionPlan>> {
+        vec![self.left.clone(), self.right.clone()]
+    }
+
+    fn describe(&self) -> String {
+        "PasteJoin".to_string()
+    }
+}
+
+#[derive(Debug)]
+pub struct AsOfJoinExec {
+    left: Rc<dyn ExecutionPlan>,
+    right: Rc<dyn ExecutionPlan>,
+    schema: Schema,
+    equality_condition: Expr,
+    match_condition: Expr,
+    is_left_join: bool,
+}
+
+impl AsOfJoinExec {
+    pub fn new(
+        left: Rc<dyn ExecutionPlan>,
+        right: Rc<dyn ExecutionPlan>,
+        equality_condition: Expr,
+        match_condition: Expr,
+        is_left_join: bool,
+    ) -> Result<Self> {
+        let left_schema = left.schema();
+        let right_schema = right.schema();
+
+        let mut fields = Vec::new();
+        for field in left_schema.fields() {
+            fields.push(field.clone());
+        }
+        for field in right_schema.fields() {
+            fields.push(field.clone());
+        }
+
+        let schema = Schema::from_fields(fields);
+
+        Ok(Self {
+            left,
+            right,
+            schema,
+            equality_condition,
+            match_condition,
+            is_left_join,
+        })
+    }
+
+    fn extract_row(&self, batch: &Table, row_idx: usize) -> Result<Vec<Value>> {
+        let mut row = Vec::new();
+        for col in batch.expect_columns() {
+            row.push(col.get(row_idx)?);
+        }
+        Ok(row)
+    }
+
+    fn build_result_batch(&self, result_rows: &[Vec<Value>]) -> Result<Vec<Table>> {
+        if result_rows.is_empty() {
+            return Ok(vec![Table::empty(self.schema.clone())]);
+        }
+
+        let num_output_rows = result_rows.len();
+        let num_cols = self.schema.fields().len();
+        let mut columns = Vec::new();
+
+        for col_idx in 0..num_cols {
+            let field = &self.schema.fields()[col_idx];
+            let mut column = Column::new(&field.data_type, num_output_rows);
+
+            for row in result_rows {
+                column.push(row[col_idx].clone())?;
+            }
+
+            columns.push(column);
+        }
+
+        Ok(vec![Table::new(self.schema.clone(), columns)?])
+    }
+
+    fn extract_equality_columns(&self) -> (Vec<String>, Vec<String>) {
+        let mut left_cols = Vec::new();
+        let mut right_cols = Vec::new();
+
+        fn format_col_name(name: &str, table: &Option<String>) -> String {
+            match table {
+                Some(t) if t == "__left__" || t == "__right__" => name.to_string(),
+                Some(t) => format!("{}.{}", t, name),
+                None => name.to_string(),
+            }
+        }
+
+        fn collect_columns(expr: &Expr, left_cols: &mut Vec<String>, right_cols: &mut Vec<String>) {
+            match expr {
+                Expr::BinaryOp { left, op, right } => {
+                    if matches!(op, yachtsql_ir::expr::BinaryOp::Equal) {
+                        if let (
+                            Expr::Column {
+                                name: left_name,
+                                table: left_table,
+                                ..
+                            },
+                            Expr::Column {
+                                name: right_name,
+                                table: right_table,
+                                ..
+                            },
+                        ) = (left.as_ref(), right.as_ref())
+                        {
+                            let left_full = format_col_name(left_name, left_table);
+                            let right_full = format_col_name(right_name, right_table);
+                            left_cols.push(left_full);
+                            right_cols.push(right_full);
+                        }
+                    } else if matches!(op, yachtsql_ir::expr::BinaryOp::And) {
+                        collect_columns(left, left_cols, right_cols);
+                        collect_columns(right, left_cols, right_cols);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        collect_columns(&self.equality_condition, &mut left_cols, &mut right_cols);
+        (left_cols, right_cols)
+    }
+
+    fn extract_match_columns(&self) -> Option<(String, String, bool)> {
+        fn format_col_name(name: &str, table: &Option<String>) -> String {
+            match table {
+                Some(t) if t == "__left__" || t == "__right__" => name.to_string(),
+                Some(t) => format!("{}.{}", t, name),
+                None => name.to_string(),
+            }
+        }
+
+        match &self.match_condition {
+            Expr::BinaryOp { left, op, right } => {
+                let is_ge = matches!(
+                    op,
+                    yachtsql_ir::expr::BinaryOp::GreaterThanOrEqual
+                        | yachtsql_ir::expr::BinaryOp::GreaterThan
+                );
+
+                if let (
+                    Expr::Column {
+                        name: left_name,
+                        table: left_table,
+                        ..
+                    },
+                    Expr::Column {
+                        name: right_name,
+                        table: right_table,
+                        ..
+                    },
+                ) = (left.as_ref(), right.as_ref())
+                {
+                    let left_full = format_col_name(left_name, left_table);
+                    let right_full = format_col_name(right_name, right_table);
+                    return Some((left_full, right_full, is_ge));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn get_column_value(&self, batch: &Table, row_idx: usize, col_name: &str) -> Result<Value> {
+        for (idx, field) in batch.schema().fields().iter().enumerate() {
+            let full_name = if let Some(ref src) = field.source_table {
+                format!("{}.{}", src, field.name)
+            } else {
+                field.name.clone()
+            };
+
+            if full_name == col_name || field.name == col_name {
+                return batch.expect_columns()[idx].get(row_idx);
+            }
+        }
+        Err(Error::internal(format!(
+            "Column '{}' not found in schema",
+            col_name
+        )))
+    }
+
+    fn compute_equality_key(
+        &self,
+        batch: &Table,
+        row_idx: usize,
+        cols: &[String],
+    ) -> Result<Option<Vec<u8>>> {
+        let mut key_values = Vec::new();
+        for col_name in cols {
+            let value = self.get_column_value(batch, row_idx, col_name)?;
+            if value.is_null() {
+                return Ok(None);
+            }
+            key_values.push(value);
+        }
+        Ok(Some(serialize_key(&key_values)))
+    }
+
+    fn value_cmp(&self, left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+        if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
+            return Some(l.cmp(&r));
+        }
+        if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
+            return l.partial_cmp(&r);
+        }
+        if let (Some(l), Some(r)) = (left.as_str(), right.as_str()) {
+            return Some(l.cmp(r));
+        }
+        if let (Some(l), Some(r)) = (left.as_timestamp(), right.as_timestamp()) {
+            return Some(l.cmp(&r));
+        }
+        if let (Some(l), Some(r)) = (left.as_datetime(), right.as_datetime()) {
+            return Some(l.cmp(&r));
+        }
+        if let (Some(l), Some(r)) = (left.as_date(), right.as_date()) {
+            return Some(l.cmp(&r));
+        }
+        None
+    }
+}
+
+impl ExecutionPlan for AsOfJoinExec {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn execute(&self) -> Result<Vec<Table>> {
+        let left_batches: Vec<Table> = self
+            .left
+            .execute()?
+            .into_iter()
+            .map(|b| b.to_column_format())
+            .collect::<Result<Vec<_>>>()?;
+        let right_batches: Vec<Table> = self
+            .right
+            .execute()?
+            .into_iter()
+            .map(|b| b.to_column_format())
+            .collect::<Result<Vec<_>>>()?;
+
+        let (left_eq_cols, right_eq_cols) = self.extract_equality_columns();
+        let match_cols = self.extract_match_columns();
+
+        let right_num_cols = self.right.schema().fields().len();
+
+        let mut right_hash: HashMap<Vec<u8>, Vec<(Value, Vec<Value>)>> = HashMap::new();
+        for batch in &right_batches {
+            for row_idx in 0..batch.num_rows() {
+                if let Some(key) = self.compute_equality_key(batch, row_idx, &right_eq_cols)? {
+                    let match_value = if let Some((_, ref right_col, _)) = match_cols {
+                        self.get_column_value(batch, row_idx, right_col)?
+                    } else {
+                        Value::null()
+                    };
+                    let row = self.extract_row(batch, row_idx)?;
+                    right_hash.entry(key).or_default().push((match_value, row));
+                }
+            }
+        }
+
+        let mut result_rows: Vec<Vec<Value>> = Vec::new();
+
+        for batch in &left_batches {
+            for row_idx in 0..batch.num_rows() {
+                let left_row = self.extract_row(batch, row_idx)?;
+
+                let matched_right =
+                    if let Some(key) = self.compute_equality_key(batch, row_idx, &left_eq_cols)? {
+                        if let Some(right_rows) = right_hash.get(&key) {
+                            if let Some((ref left_col, _, is_ge)) = match_cols {
+                                let left_value = self.get_column_value(batch, row_idx, left_col)?;
+
+                                let mut best_match: Option<&Vec<Value>> = None;
+                                let mut best_value: Option<&Value> = None;
+
+                                for (right_value, right_row) in right_rows {
+                                    let should_match = if is_ge {
+                                        matches!(
+                                            self.value_cmp(&left_value, right_value),
+                                            Some(std::cmp::Ordering::Greater)
+                                                | Some(std::cmp::Ordering::Equal)
+                                        )
+                                    } else {
+                                        matches!(
+                                            self.value_cmp(&left_value, right_value),
+                                            Some(std::cmp::Ordering::Less)
+                                                | Some(std::cmp::Ordering::Equal)
+                                        )
+                                    };
+
+                                    if should_match {
+                                        let is_better = match best_value {
+                                            None => true,
+                                            Some(bv) => {
+                                                if is_ge {
+                                                    matches!(
+                                                        self.value_cmp(right_value, bv),
+                                                        Some(std::cmp::Ordering::Greater)
+                                                    )
+                                                } else {
+                                                    matches!(
+                                                        self.value_cmp(right_value, bv),
+                                                        Some(std::cmp::Ordering::Less)
+                                                    )
+                                                }
+                                            }
+                                        };
+
+                                        if is_better {
+                                            best_match = Some(right_row);
+                                            best_value = Some(right_value);
+                                        }
+                                    }
+                                }
+
+                                best_match.cloned()
+                            } else {
+                                right_rows.first().map(|(_, r)| r.clone())
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                if let Some(right_row) = matched_right {
+                    let mut combined = left_row;
+                    combined.extend(right_row);
+                    result_rows.push(combined);
+                } else if self.is_left_join {
+                    let mut combined = left_row;
+                    combined.extend(vec![Value::null(); right_num_cols]);
+                    result_rows.push(combined);
+                }
+            }
+        }
+
+        self.build_result_batch(&result_rows)
+    }
+
+    fn children(&self) -> Vec<Rc<dyn ExecutionPlan>> {
+        vec![self.left.clone(), self.right.clone()]
+    }
+
+    fn describe(&self) -> String {
+        format!("AsOfJoin [is_left_join={}]", self.is_left_join)
     }
 }
 

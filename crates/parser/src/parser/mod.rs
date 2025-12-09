@@ -78,7 +78,25 @@ impl Parser {
             sql_without_codec
         };
 
-        let rewritten_sql = self.rewrite_json_item_methods(&sql_without_ttl)?;
+        let sql_with_paste_join = if matches!(self.dialect_type, DialectType::ClickHouse) {
+            Self::rewrite_paste_join(&sql_without_ttl)
+        } else {
+            sql_without_ttl
+        };
+
+        let sql_with_asof_left = if matches!(self.dialect_type, DialectType::ClickHouse) {
+            Self::rewrite_asof_left_to_left_asof(&sql_with_paste_join)
+        } else {
+            sql_with_paste_join
+        };
+
+        let sql_with_asof_join = if matches!(self.dialect_type, DialectType::ClickHouse) {
+            Self::rewrite_asof_join(&sql_with_asof_left)
+        } else {
+            sql_with_asof_left
+        };
+
+        let rewritten_sql = self.rewrite_json_item_methods(&sql_with_asof_join)?;
         let parse_result = SqlParser::parse_sql(&*self.dialect, &rewritten_sql);
 
         let sql_statements = match parse_result {
@@ -405,6 +423,180 @@ impl Parser {
         }
 
         result
+    }
+
+    fn rewrite_asof_join(sql: &str) -> String {
+        let mut result = String::with_capacity(sql.len());
+        let upper = sql.to_uppercase();
+        let mut idx = 0;
+
+        while idx < sql.len() {
+            if let Some((asof_match, is_left)) = Self::match_asof_join_at(&upper, idx) {
+                idx += asof_match;
+
+                while idx < sql.len() && sql[idx..].starts_with(char::is_whitespace) {
+                    idx += sql[idx..].chars().next().unwrap().len_utf8();
+                }
+
+                let table_start = idx;
+                while idx < sql.len() {
+                    let ch = sql[idx..].chars().next().unwrap();
+                    if ch.is_whitespace() || ch == '(' {
+                        break;
+                    }
+                    idx += ch.len_utf8();
+                }
+                let table_name = &sql[table_start..idx];
+
+                if is_left {
+                    result.push_str(&format!("LEFT OUTER JOIN __ASOF_LEFT__{} ", table_name));
+                } else {
+                    result.push_str(&format!("INNER JOIN __ASOF__{} ", table_name));
+                }
+            } else {
+                let ch = sql[idx..].chars().next().unwrap();
+                result.push(ch);
+                idx += ch.len_utf8();
+            }
+        }
+
+        result
+    }
+
+    fn match_asof_join_at(upper_sql: &str, start: usize) -> Option<(usize, bool)> {
+        let rest = &upper_sql[start..];
+
+        if rest.starts_with("ASOF JOIN ") {
+            return Some(("ASOF JOIN ".len(), false));
+        }
+        if rest.starts_with("LEFT ASOF JOIN ") {
+            return Some(("LEFT ASOF JOIN ".len(), true));
+        }
+        None
+    }
+
+    fn rewrite_asof_left_to_left_asof(sql: &str) -> String {
+        let upper = sql.to_uppercase();
+        let mut result = String::with_capacity(sql.len());
+        let mut idx = 0;
+
+        while idx < sql.len() {
+            if upper[idx..].starts_with("ASOF LEFT JOIN ") {
+                result.push_str("LEFT ASOF JOIN ");
+                idx += "ASOF LEFT JOIN ".len();
+            } else {
+                let ch = sql[idx..].chars().next().unwrap();
+                result.push(ch);
+                idx += ch.len_utf8();
+            }
+        }
+
+        result
+    }
+
+    fn rewrite_paste_join(sql: &str) -> String {
+        let mut result = String::with_capacity(sql.len());
+        let mut idx = 0;
+        let upper = sql.to_uppercase();
+        let mut paste_count = 0;
+
+        while idx < sql.len() {
+            if let Some(paste_match) = Self::match_paste_join_at(&upper, idx) {
+                idx += paste_match;
+
+                while idx < sql.len() && sql[idx..].starts_with(char::is_whitespace) {
+                    idx += sql[idx..].chars().next().unwrap().len_utf8();
+                }
+
+                if idx < sql.len() && sql[idx..].starts_with('(') {
+                    if let Some(close_paren) = Self::find_matching_paren_at(sql, idx) {
+                        let subquery = &sql[idx..=close_paren];
+                        result.push_str(&format!(
+                            "CROSS JOIN {} AS __PASTE_SUBQUERY_{}__",
+                            subquery, paste_count
+                        ));
+                        idx = close_paren + 1;
+                        paste_count += 1;
+                    } else {
+                        result.push_str("CROSS JOIN __PASTE__ ");
+                    }
+                } else {
+                    result.push_str("CROSS JOIN __PASTE__ ");
+                }
+            } else {
+                let ch = sql[idx..].chars().next().unwrap();
+                result.push(ch);
+                idx += ch.len_utf8();
+            }
+        }
+
+        result
+    }
+
+    fn find_matching_paren_at(sql: &str, start: usize) -> Option<usize> {
+        if !sql[start..].starts_with('(') {
+            return None;
+        }
+        let mut depth = 0;
+        let mut in_string = false;
+        let mut string_char = ' ';
+
+        for (i, ch) in sql[start..].char_indices() {
+            if in_string {
+                if ch == string_char {
+                    in_string = false;
+                }
+            } else {
+                match ch {
+                    '\'' | '"' => {
+                        in_string = true;
+                        string_char = ch;
+                    }
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(start + i);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    fn match_paste_join_at(upper_sql: &str, start: usize) -> Option<usize> {
+        let rest = &upper_sql[start..];
+        if !rest.starts_with("PASTE") {
+            return None;
+        }
+
+        if start > 0 {
+            let prev_char = upper_sql[..start].chars().next_back()?;
+            if prev_char.is_ascii_alphanumeric() || prev_char == '_' {
+                return None;
+            }
+        }
+
+        let mut pos = 5;
+        while pos < rest.len() && rest[pos..].starts_with(char::is_whitespace) {
+            pos += rest[pos..].chars().next()?.len_utf8();
+        }
+
+        if !rest[pos..].starts_with("JOIN") {
+            return None;
+        }
+        pos += 4;
+
+        if pos < rest.len() {
+            let next_char = rest[pos..].chars().next()?;
+            if next_char.is_ascii_alphanumeric() || next_char == '_' {
+                return None;
+            }
+        }
+
+        Some(pos)
     }
 
     fn is_ttl_at(sql: &str, start: usize) -> bool {
