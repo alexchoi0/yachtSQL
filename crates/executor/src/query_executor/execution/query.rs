@@ -522,6 +522,11 @@ impl QueryExecutor {
             Self::merge_batches(batches)
         };
 
+        if let Some(sqlparser::ast::FormatClause::Null) = query.format_clause {
+            let schema = result?.schema().clone();
+            return Ok(Table::empty(schema));
+        }
+
         result
     }
 
