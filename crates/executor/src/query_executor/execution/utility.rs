@@ -5,7 +5,7 @@ use chrono::{Datelike, Days, Months, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use yachtsql_core::error::{Error, Result};
-use yachtsql_core::types::{DataType, Value};
+use yachtsql_core::types::{DataType, Interval, Value};
 use yachtsql_optimizer::expr::Expr;
 use yachtsql_optimizer::plan::PlanNode;
 use yachtsql_storage::Schema;
@@ -177,6 +177,36 @@ fn function_return_type(name: &yachtsql_ir::FunctionName) -> Option<DataType> {
         | FunctionName::TrimLeft
         | FunctionName::Rtrim
         | FunctionName::TrimRight => Some(DataType::String),
+        FunctionName::UnixDate
+        | FunctionName::UnixSeconds
+        | FunctionName::UnixMillis
+        | FunctionName::UnixMicros
+        | FunctionName::DateDiff
+        | FunctionName::Datediff
+        | FunctionName::TimestampDiff
+        | FunctionName::DatetimeDiff
+        | FunctionName::TimeDiff => Some(DataType::Int64),
+        FunctionName::DateFromUnixDate
+        | FunctionName::DateAdd
+        | FunctionName::Dateadd
+        | FunctionName::Adddate
+        | FunctionName::DateSub
+        | FunctionName::Datesub
+        | FunctionName::Subdate
+        | FunctionName::DateTrunc
+        | FunctionName::LastDay => Some(DataType::Date),
+        FunctionName::TimestampSeconds
+        | FunctionName::TimestampMillis
+        | FunctionName::TimestampMicros
+        | FunctionName::TimestampAdd
+        | FunctionName::TimestampSub
+        | FunctionName::TimestampTrunc
+        | FunctionName::DatetimeAdd
+        | FunctionName::DatetimeSub
+        | FunctionName::DatetimeTrunc => Some(DataType::Timestamp),
+        FunctionName::TimeAdd | FunctionName::TimeSub | FunctionName::TimeTrunc => {
+            Some(DataType::Time)
+        }
         _ => None,
     }
 }
@@ -455,6 +485,45 @@ pub fn apply_interval_to_date(
             interval_unit
         ))),
     }
+}
+
+pub fn add_interval_to_date(date: NaiveDate, interval: &Interval) -> Result<NaiveDate> {
+    let mut result = date;
+
+    if interval.months != 0 {
+        result = if interval.months > 0 {
+            result.checked_add_months(Months::new(interval.months as u32))
+        } else {
+            result.checked_sub_months(Months::new((-interval.months) as u32))
+        }
+        .ok_or_else(|| {
+            Error::ExecutionError(format!(
+                "Date arithmetic overflow: {} + {} months",
+                date, interval.months
+            ))
+        })?;
+    }
+
+    if interval.days != 0 {
+        result = if interval.days > 0 {
+            result.checked_add_days(Days::new(interval.days as u64))
+        } else {
+            result.checked_sub_days(Days::new((-interval.days) as u64))
+        }
+        .ok_or_else(|| {
+            Error::ExecutionError(format!(
+                "Date arithmetic overflow: {} + {} days",
+                date, interval.days
+            ))
+        })?;
+    }
+
+    Ok(result)
+}
+
+pub fn sub_interval_from_date(date: NaiveDate, interval: &Interval) -> Result<NaiveDate> {
+    let negated = Interval::new(-interval.months, -interval.days, -interval.micros);
+    add_interval_to_date(date, &negated)
 }
 
 pub fn calculate_date_diff(date1: NaiveDate, date2: NaiveDate, unit: &str) -> Result<i64> {

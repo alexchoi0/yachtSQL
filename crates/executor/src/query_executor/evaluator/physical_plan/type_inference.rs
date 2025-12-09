@@ -1095,6 +1095,28 @@ impl ProjectionWithExprExec {
             | FunctionName::JustifyHours
             | FunctionName::JustifyInterval => Some(DataType::Interval),
 
+            FunctionName::UnixDate
+            | FunctionName::UnixSeconds
+            | FunctionName::UnixMillis
+            | FunctionName::UnixMicros
+            | FunctionName::DatetimeDiff
+            | FunctionName::TimeDiff => Some(DataType::Int64),
+
+            FunctionName::DateFromUnixDate | FunctionName::LastDay => Some(DataType::Date),
+
+            FunctionName::TimestampSeconds
+            | FunctionName::TimestampMillis
+            | FunctionName::TimestampMicros
+            | FunctionName::TimestampAdd
+            | FunctionName::TimestampSub
+            | FunctionName::DatetimeAdd
+            | FunctionName::DatetimeSub
+            | FunctionName::DatetimeTrunc => Some(DataType::Timestamp),
+
+            FunctionName::TimeAdd | FunctionName::TimeSub | FunctionName::TimeTrunc => {
+                Some(DataType::Time)
+            }
+
             FunctionName::Year
             | FunctionName::Month
             | FunctionName::Day
@@ -1447,6 +1469,16 @@ impl ProjectionWithExprExec {
             | FunctionName::IsNotJsonArray
             | FunctionName::IsNotJsonObject
             | FunctionName::IsNotJsonScalar => Some(DataType::Bool),
+
+            FunctionName::JsonSet | FunctionName::JsonRemove => Some(DataType::Json),
+            FunctionName::JsonExtractArray | FunctionName::JsonQueryArray => {
+                Some(DataType::Array(Box::new(DataType::Json)))
+            }
+            FunctionName::JsonValueArray => Some(DataType::Array(Box::new(DataType::String))),
+            FunctionName::LaxBool | FunctionName::JsonBool => Some(DataType::Bool),
+            FunctionName::LaxInt64 | FunctionName::JsonInt64 => Some(DataType::Int64),
+            FunctionName::LaxFloat64 | FunctionName::JsonFloat64 => Some(DataType::Float64),
+            FunctionName::LaxString | FunctionName::JsonStrict => Some(DataType::String),
 
             FunctionName::JsonValue | FunctionName::JsonExtractScalar => args
                 .get(2)

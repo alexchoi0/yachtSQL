@@ -723,6 +723,24 @@ impl ProjectionWithExprExec {
                 | FunctionName::JustifyDays
                 | FunctionName::JustifyHours
                 | FunctionName::JustifyInterval
+                | FunctionName::TimestampAdd
+                | FunctionName::TimestampSub
+                | FunctionName::DatetimeAdd
+                | FunctionName::DatetimeSub
+                | FunctionName::DatetimeDiff
+                | FunctionName::DatetimeTrunc
+                | FunctionName::TimeAdd
+                | FunctionName::TimeSub
+                | FunctionName::TimeDiff
+                | FunctionName::TimeTrunc
+                | FunctionName::UnixDate
+                | FunctionName::DateFromUnixDate
+                | FunctionName::UnixSeconds
+                | FunctionName::TimestampSeconds
+                | FunctionName::UnixMillis
+                | FunctionName::TimestampMillis
+                | FunctionName::UnixMicros
+                | FunctionName::TimestampMicros
         ) {
             return Self::evaluate_datetime_function(func_name, args, batch, row_idx);
         }
@@ -741,7 +759,11 @@ impl ProjectionWithExprExec {
                     || s == "TO_JSON"
                     || s == "TO_JSONB"
                     || s == "TO_JSON_STRING"
-                    || s == "PARSE_JSON")
+                    || s == "PARSE_JSON"
+                    || s == "BOOL"
+                    || s == "INT64"
+                    || s == "FLOAT64"
+                    || s == "STRING")
             {
                 return Self::evaluate_json_function(func_name, args, batch, row_idx);
             }

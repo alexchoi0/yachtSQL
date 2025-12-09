@@ -34,6 +34,10 @@ pub fn bigquery_scalar_functions() -> Vec<&'static str> {
         "LAX_INT64",
         "LAX_FLOAT64",
         "LAX_STRING",
+        "BOOL",
+        "INT64",
+        "FLOAT64",
+        "STRING",
         "STARTS_WITH",
         "ENDS_WITH",
         "CONCAT_WS",
@@ -135,6 +139,16 @@ pub fn bigquery_scalar_functions() -> Vec<&'static str> {
         "GROUPING",
         "BIT_COUNT",
         "BYTE_LENGTH",
+        "NET.IP_FROM_STRING",
+        "NET.SAFE_IP_FROM_STRING",
+        "NET.IPV4_FROM_INT64",
+        "NET.IP_NET_MASK",
+        "NET.IP_TRUNC",
+        "NET.IPV4_TO_INT64",
+        "NET.IP_TO_STRING",
+        "NET.HOST",
+        "NET.PUBLIC_SUFFIX",
+        "NET.REG_DOMAIN",
     ]
 }
 
