@@ -191,7 +191,6 @@ fn test_all_subquery() {
     assert_table_eq!(result, [[2], [3]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_derived_table_subquery() {
     let mut executor = create_executor();
@@ -203,12 +202,11 @@ fn test_derived_table_subquery() {
         .unwrap();
 
     let result = executor
-        .execute_sql("SELECT category, total FROM (SELECT category, SUM(value) AS total FROM derived_src GROUP BY category) ORDER BY category")
+        .execute_sql("SELECT category, total FROM (SELECT category, SUM(value) AS total FROM derived_src GROUP BY category) AS derived ORDER BY category")
         .unwrap();
     assert_table_eq!(result, [["A", 30], ["B", 70]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_nested_subqueries() {
     let mut executor = create_executor();
@@ -258,7 +256,6 @@ fn test_subquery_in_from_with_join() {
     assert_table_eq!(result, [[1, 200, "alice"], [2, 400, "bob"]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_lateral_subquery() {
     let mut executor = create_executor();
@@ -286,7 +283,6 @@ fn test_lateral_subquery() {
     assert!(result.num_rows() == 2); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_subquery_with_window_function() {
     let mut executor = create_executor();
@@ -302,13 +298,12 @@ fn test_subquery_with_window_function() {
             "SELECT id, category, value, rn FROM (
                 SELECT id, category, value, ROW_NUMBER() OVER (PARTITION BY category ORDER BY value DESC) AS rn
                 FROM sub_window
-            ) WHERE rn = 1 ORDER BY category"
+            ) AS ranked WHERE rn = 1 ORDER BY category"
         )
         .unwrap();
     assert!(result.num_rows() == 2); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_subquery_union() {
     let mut executor = create_executor();
@@ -331,7 +326,7 @@ fn test_subquery_union() {
                 SELECT id, value FROM union_a
                 UNION ALL
                 SELECT id, value FROM union_b
-            ) ORDER BY id",
+            ) AS combined ORDER BY id",
         )
         .unwrap();
     assert!(result.num_rows() == 4); // TODO: use table![[expected_values]]
@@ -416,7 +411,6 @@ fn test_subquery_comparison_operators() {
     assert_table_eq!(result, [[4]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_subquery_with_limit() {
     let mut executor = create_executor();

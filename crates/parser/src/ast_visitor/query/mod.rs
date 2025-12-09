@@ -254,6 +254,14 @@ impl LogicalPlanBuilder {
 
         let has_distinct = matches!(select.distinct, Some(ast::Distinct::Distinct));
 
+        if let Some(prewhere) = &select.prewhere {
+            let predicate = self.sql_expr_to_expr(prewhere)?;
+            plan = LogicalPlan::new(PlanNode::Filter {
+                predicate,
+                input: plan.root,
+            });
+        }
+
         if let Some(selection) = &select.selection {
             let predicate = self.sql_expr_to_expr(selection)?;
             plan = LogicalPlan::new(PlanNode::Filter {
@@ -379,9 +387,11 @@ impl LogicalPlanBuilder {
 
             if let Some(having_expr) = &select.having {
                 let having_predicate = self.sql_expr_to_expr(having_expr)?;
+                let having_predicate_resolved =
+                    Self::resolve_having_aliases(&having_predicate, &select_alias_map);
 
                 let having_predicate_rewritten =
-                    self.rewrite_post_aggregate_expr(&having_predicate, &group_by_exprs);
+                    self.rewrite_post_aggregate_expr(&having_predicate_resolved, &group_by_exprs);
                 plan = LogicalPlan::new(PlanNode::Filter {
                     predicate: having_predicate_rewritten,
                     input: plan.root,
@@ -688,6 +698,76 @@ impl LogicalPlanBuilder {
             }
         }
         builder.sql_expr_to_expr(ast_expr)
+    }
+
+    fn resolve_having_aliases(expr: &Expr, select_alias_map: &HashMap<String, Expr>) -> Expr {
+        match expr {
+            Expr::Column { name, table: None } => {
+                let name_lower = name.to_lowercase();
+                if let Some(aliased_expr) = select_alias_map.get(&name_lower) {
+                    return aliased_expr.clone();
+                }
+                expr.clone()
+            }
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(Self::resolve_having_aliases(left, select_alias_map)),
+                op: *op,
+                right: Box::new(Self::resolve_having_aliases(right, select_alias_map)),
+            },
+            Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(Self::resolve_having_aliases(inner, select_alias_map)),
+            },
+            Expr::Function { name, args } => Expr::Function {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| Self::resolve_having_aliases(a, select_alias_map))
+                    .collect(),
+            },
+            Expr::Aggregate {
+                name,
+                args,
+                distinct,
+                order_by,
+                filter,
+            } => Expr::Aggregate {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| Self::resolve_having_aliases(a, select_alias_map))
+                    .collect(),
+                distinct: *distinct,
+                order_by: order_by.clone(),
+                filter: filter
+                    .as_ref()
+                    .map(|f| Box::new(Self::resolve_having_aliases(f, select_alias_map))),
+            },
+            Expr::Between {
+                expr: inner,
+                low,
+                high,
+                negated,
+            } => Expr::Between {
+                expr: Box::new(Self::resolve_having_aliases(inner, select_alias_map)),
+                low: Box::new(Self::resolve_having_aliases(low, select_alias_map)),
+                high: Box::new(Self::resolve_having_aliases(high, select_alias_map)),
+                negated: *negated,
+            },
+            Expr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => Expr::InList {
+                expr: Box::new(Self::resolve_having_aliases(inner, select_alias_map)),
+                list: list
+                    .iter()
+                    .map(|e| Self::resolve_having_aliases(e, select_alias_map))
+                    .collect(),
+                negated: *negated,
+            },
+            _ => expr.clone(),
+        }
     }
 
     fn extract_grouping_extension(
@@ -1872,25 +1952,93 @@ impl LogicalPlanBuilder {
         for join in &table_with_joins.joins {
             let is_lateral = Self::is_lateral_derived_table(&join.relation);
 
-            let right_plan = self.plan_join_relation(&join.relation, &plan)?;
+            let is_paste_join = Self::is_paste_join_marker(&join.relation);
+            let asof_marker = Self::is_asof_join_marker(&join.relation);
 
-            let join_type = match join.join_operator {
-                ast::JoinOperator::Join(_) => JoinType::Inner,
-                ast::JoinOperator::Inner(_) => JoinType::Inner,
-                ast::JoinOperator::Left(_) => JoinType::Left,
-                ast::JoinOperator::LeftOuter(_) => JoinType::Left,
-                ast::JoinOperator::Right(_) => JoinType::Right,
-                ast::JoinOperator::RightOuter(_) => JoinType::Right,
-                ast::JoinOperator::FullOuter(_) => JoinType::Full,
-                ast::JoinOperator::CrossJoin(_) => JoinType::Cross,
+            let right_plan = if is_paste_join {
+                self.plan_paste_join_relation(&join.relation, &plan)?
+            } else if let Some((actual_table, _)) = &asof_marker {
+                self.plan_asof_join_relation(&join.relation, actual_table)?
+            } else {
+                self.plan_join_relation(&join.relation, &plan)?
+            };
 
-                ast::JoinOperator::CrossApply => JoinType::Cross,
+            if let Some((_, is_left)) = asof_marker {
+                let (equality_expr, match_expr) = match &join.join_operator {
+                    ast::JoinOperator::Inner(ast::JoinConstraint::On(expr))
+                    | ast::JoinOperator::LeftOuter(ast::JoinConstraint::On(expr)) => {
+                        self.split_asof_condition(expr)?
+                    }
+                    ast::JoinOperator::Inner(ast::JoinConstraint::Using(cols))
+                    | ast::JoinOperator::LeftOuter(ast::JoinConstraint::Using(cols)) => {
+                        self.build_asof_using_condition(cols)?
+                    }
+                    _ => {
+                        return Err(Error::parse_error(
+                            "ASOF JOIN requires ON or USING clause".to_string(),
+                        ));
+                    }
+                };
 
-                ast::JoinOperator::OuterApply => JoinType::Left,
-                _ => {
-                    return Err(Error::unsupported_feature(
-                        "Join type not supported".to_string(),
-                    ));
+                plan = LogicalPlan::new(PlanNode::AsOfJoin {
+                    left: plan.root,
+                    right: right_plan.root,
+                    equality_condition: equality_expr,
+                    match_condition: match_expr,
+                    is_left_join: is_left,
+                });
+                continue;
+            }
+
+            if let ast::JoinOperator::AsOf {
+                match_condition,
+                constraint,
+            } = &join.join_operator
+            {
+                let match_cond_expr = self.sql_expr_to_expr(match_condition)?;
+                let equality_expr = match constraint {
+                    ast::JoinConstraint::On(expr) => self.sql_expr_to_expr(expr)?,
+                    ast::JoinConstraint::Using(cols) => {
+                        let ident_cols = Self::object_names_to_idents(cols)?;
+                        self.build_using_condition(&ident_cols)?
+                    }
+                    ast::JoinConstraint::Natural => {
+                        self.build_natural_join_condition(&plan, &right_plan)?
+                    }
+                    ast::JoinConstraint::None => Expr::Literal(LiteralValue::Boolean(true)),
+                };
+
+                plan = LogicalPlan::new(PlanNode::AsOfJoin {
+                    left: plan.root,
+                    right: right_plan.root,
+                    equality_condition: equality_expr,
+                    match_condition: match_cond_expr,
+                    is_left_join: false,
+                });
+                continue;
+            }
+
+            let join_type = if is_paste_join {
+                JoinType::Paste
+            } else {
+                match join.join_operator {
+                    ast::JoinOperator::Join(_) => JoinType::Inner,
+                    ast::JoinOperator::Inner(_) => JoinType::Inner,
+                    ast::JoinOperator::Left(_) => JoinType::Left,
+                    ast::JoinOperator::LeftOuter(_) => JoinType::Left,
+                    ast::JoinOperator::Right(_) => JoinType::Right,
+                    ast::JoinOperator::RightOuter(_) => JoinType::Right,
+                    ast::JoinOperator::FullOuter(_) => JoinType::Full,
+                    ast::JoinOperator::CrossJoin(_) => JoinType::Cross,
+
+                    ast::JoinOperator::CrossApply => JoinType::Cross,
+
+                    ast::JoinOperator::OuterApply => JoinType::Left,
+                    _ => {
+                        return Err(Error::unsupported_feature(
+                            "Join type not supported".to_string(),
+                        ));
+                    }
                 }
             };
 

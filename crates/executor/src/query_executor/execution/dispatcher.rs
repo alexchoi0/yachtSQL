@@ -21,6 +21,11 @@ pub enum StatementJob {
         stmt: Box<SqlStatement>,
     },
 
+    CteDml {
+        operation: DmlOperation,
+        stmt: Box<SqlStatement>,
+    },
+
     Query {
         stmt: Box<SqlStatement>,
     },
@@ -78,6 +83,7 @@ pub enum DdlOperation {
     DropSchema,
 
     CreateFunction,
+    DropFunction,
 
     CreateDatabase {
         name: ObjectName,
@@ -323,10 +329,13 @@ impl Dispatcher {
                         stmt: Box::new(ast.clone()),
                     }),
 
-                    SqlStatement::CreateFunction { .. } => Ok(StatementJob::DDL {
-                        operation: DdlOperation::CreateFunction,
-                        stmt: Box::new(ast.clone()),
-                    }),
+                    SqlStatement::CreateFunction(_) => {
+                        debug_print::debug_eprintln!("[dispatcher] Matched CreateFunction");
+                        Ok(StatementJob::DDL {
+                            operation: DdlOperation::CreateFunction,
+                            stmt: Box::new(ast.clone()),
+                        })
+                    }
 
                     SqlStatement::CreateSchema { .. } => Ok(StatementJob::DDL {
                         operation: DdlOperation::CreateSchema,
@@ -373,6 +382,11 @@ impl Dispatcher {
                         stmt: Box::new(ast.clone()),
                     }),
 
+                    SqlStatement::DropFunction { .. } => Ok(StatementJob::DDL {
+                        operation: DdlOperation::DropFunction,
+                        stmt: Box::new(ast.clone()),
+                    }),
+
                     SqlStatement::AlterTable { .. } => Ok(StatementJob::DDL {
                         operation: DdlOperation::AlterTable,
                         stmt: Box::new(ast.clone()),
@@ -405,9 +419,27 @@ impl Dispatcher {
                         },
                     }),
 
-                    SqlStatement::Query(_) => Ok(StatementJob::Query {
-                        stmt: Box::new(ast.clone()),
-                    }),
+                    SqlStatement::Query(query) => {
+                        use sqlparser::ast::SetExpr;
+
+                        match query.body.as_ref() {
+                            SetExpr::Insert(_) => Ok(StatementJob::CteDml {
+                                operation: DmlOperation::Insert,
+                                stmt: Box::new(ast.clone()),
+                            }),
+                            SetExpr::Update(_) => Ok(StatementJob::CteDml {
+                                operation: DmlOperation::Update,
+                                stmt: Box::new(ast.clone()),
+                            }),
+                            SetExpr::Delete(_) => Ok(StatementJob::CteDml {
+                                operation: DmlOperation::Delete,
+                                stmt: Box::new(ast.clone()),
+                            }),
+                            _ => Ok(StatementJob::Query {
+                                stmt: Box::new(ast.clone()),
+                            }),
+                        }
+                    }
 
                     SqlStatement::Set(set_stmt) => self.handle_set_statement(set_stmt),
 

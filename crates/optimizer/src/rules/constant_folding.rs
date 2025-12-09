@@ -208,6 +208,34 @@ impl ConstantFolding {
                     None
                 }
             }
+            PlanNode::AsOfJoin {
+                left,
+                right,
+                equality_condition,
+                match_condition,
+                is_left_join,
+            } => {
+                let folded_eq = self.fold_expr(equality_condition);
+                let folded_match = self.fold_expr(match_condition);
+                let left_opt = self.optimize_node(left);
+                let right_opt = self.optimize_node(right);
+
+                if folded_eq != *equality_condition
+                    || folded_match != *match_condition
+                    || left_opt.is_some()
+                    || right_opt.is_some()
+                {
+                    Some(PlanNode::AsOfJoin {
+                        left: Box::new(left_opt.unwrap_or_else(|| left.as_ref().clone())),
+                        right: Box::new(right_opt.unwrap_or_else(|| right.as_ref().clone())),
+                        equality_condition: folded_eq,
+                        match_condition: folded_match,
+                        is_left_join: *is_left_join,
+                    })
+                } else {
+                    None
+                }
+            }
             PlanNode::LateralJoin {
                 left,
                 right,
