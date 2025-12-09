@@ -435,6 +435,7 @@ impl QueryExecutor {
                     drop(cache);
 
                     let plan_builder = yachtsql_parser::LogicalPlanBuilder::new()
+                        .with_sql(original_sql)
                         .with_storage(Rc::clone(&self.storage))
                         .with_dialect(self.dialect());
                     let logical_plan = plan_builder.query_to_plan(&query_for_plan)?;
@@ -473,6 +474,7 @@ impl QueryExecutor {
                     .collect();
 
                 let plan_builder = yachtsql_parser::LogicalPlanBuilder::new()
+                    .with_sql(original_sql)
                     .with_storage(Rc::clone(&self.storage))
                     .with_dialect(self.dialect())
                     .with_variables(parser_vars)
@@ -4070,6 +4072,43 @@ impl QueryExecutor {
                         | "BITMAP_CARDINALITY"
                         | "BITMAP_AND_CARDINALITY"
                         | "BITMAP_OR_CARDINALITY"
+                        | "GROUPARRAY"
+                        | "GROUPARRAYSAMPLE"
+                        | "GROUPARRAYSORTED"
+                        | "GROUPARRAYINSERTAT"
+                        | "GROUPARRAYMOVINGAVG"
+                        | "GROUPARRAYMOVINGSUM"
+                        | "GROUPUNIQARRAY"
+                        | "GROUPARRAYLAST"
+                        | "GROUPARRAYINTERSECT"
+                        | "GROUPBITAND"
+                        | "GROUPBITOR"
+                        | "GROUPBITXOR"
+                        | "GROUPBITMAP"
+                        | "GROUPCONCAT"
+                        | "SUMMAP"
+                        | "MINMAP"
+                        | "MAXMAP"
+                        | "AVGMAP"
+                        | "AVG_MAP"
+                        | "GROUP_ARRAY_LAST"
+                        | "GROUP_ARRAY_SORTED"
+                        | "GROUP_ARRAY_INTERSECT"
+                        | "HISTOGRAM"
+                        | "SUMDISTINCT"
+                        | "AVGDISTINCT"
+                        | "SKEW_POP"
+                        | "SKEWPOP"
+                        | "SKEW_SAMP"
+                        | "SKEWSAMP"
+                        | "KURT_POP"
+                        | "KURTPOP"
+                        | "KURT_SAMP"
+                        | "KURTSAMP"
+                        | "AVG_WEIGHTED"
+                        | "AVGWEIGHTED"
+                        | "ANY_IF"
+                        | "ANYIF"
                 )
             }
             _ => false,

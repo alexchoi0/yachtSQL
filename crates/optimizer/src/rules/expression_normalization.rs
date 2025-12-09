@@ -113,6 +113,7 @@ impl ExpressionNormalization {
                             asc: o.asc,
                             nulls_first: o.nulls_first,
                             collation: o.collation.clone(),
+                            with_fill: o.with_fill.clone(),
                         })
                         .collect()
                 });
@@ -530,6 +531,7 @@ mod tests {
             table_name: "test_table".to_string(),
             projection: None,
             only: false,
+            final_modifier: false,
         };
 
         let filter = PlanNode::Filter {
