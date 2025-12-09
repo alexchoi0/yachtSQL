@@ -939,14 +939,61 @@ impl QueryExecutor {
     fn execute_clickhouse_show(&mut self, statement: &str) -> Result<Table> {
         let statement_upper = statement.to_uppercase();
 
-        match statement_upper.as_str() {
-            s if s.starts_with("SHOW DATABASES") => self.execute_show_databases(),
-            s if s.starts_with("SHOW QUOTAS") => self.execute_show_quotas(),
-            s if s.starts_with("SHOW ROW POLICIES") => self.execute_show_row_policies(),
-            s if s.starts_with("SHOW SETTINGS PROFILES") => self.execute_show_settings_profiles(),
-            s if s.starts_with("SHOW DICTIONARIES") => self.execute_show_dictionaries(),
-            _ => Self::empty_result(),
+        if statement_upper.starts_with("SHOW DATABASES") {
+            return self.execute_show_databases();
         }
+        if statement_upper.starts_with("SHOW QUOTAS") {
+            return self.execute_show_quotas();
+        }
+        if statement_upper.starts_with("SHOW ROW POLICIES") {
+            return self.execute_show_row_policies();
+        }
+        if statement_upper.starts_with("SHOW SETTINGS PROFILES") {
+            return self.execute_show_settings_profiles();
+        }
+        if statement_upper.starts_with("SHOW DICTIONARIES") {
+            return self.execute_show_dictionaries();
+        }
+        if statement_upper.starts_with("SHOW CREATE TABLE") {
+            let prefix_len = "SHOW CREATE TABLE".len();
+            let table_name = statement[prefix_len..].trim();
+            let obj_name =
+                sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                    sqlparser::ast::Ident::new(table_name),
+                )]);
+            return self.execute_show_create_table(&obj_name);
+        }
+        if statement_upper.starts_with("SHOW TABLES") {
+            let prefix_len = "SHOW TABLES".len();
+            let rest = statement[prefix_len..].trim();
+            let rest_upper = rest.to_uppercase();
+            let filter = if let Some(pos) = rest_upper.find("LIKE") {
+                let pattern = rest[pos + 4..].trim().trim_matches('\'');
+                Some(pattern.to_string())
+            } else {
+                None
+            };
+            return self.execute_show_tables(filter.as_deref());
+        }
+        if statement_upper.starts_with("SHOW COLUMNS FROM") {
+            let prefix_len = "SHOW COLUMNS FROM".len();
+            let table_name = statement[prefix_len..].trim();
+            let obj_name =
+                sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                    sqlparser::ast::Ident::new(table_name),
+                )]);
+            return self.execute_show_columns(&obj_name);
+        }
+        if statement_upper.starts_with("SHOW COLUMNS IN") {
+            let prefix_len = "SHOW COLUMNS IN".len();
+            let table_name = statement[prefix_len..].trim();
+            let obj_name =
+                sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                    sqlparser::ast::Ident::new(table_name),
+                )]);
+            return self.execute_show_columns(&obj_name);
+        }
+        Self::empty_result()
     }
 
     fn execute_show_databases(&mut self) -> Result<Table> {
