@@ -586,6 +586,22 @@ impl QueryExecutor {
                 }
             }
 
+            StatementJob::CteDml { operation, stmt } => {
+                if self.is_transaction_read_only() {
+                    let op_name = match operation {
+                        DmlOperation::Insert => "INSERT",
+                        DmlOperation::Update => "UPDATE",
+                        DmlOperation::Delete => "DELETE",
+                        DmlOperation::Truncate => "TRUNCATE",
+                    };
+                    return Err(Error::InvalidOperation(format!(
+                        "cannot execute {} in a read-only transaction",
+                        op_name
+                    )));
+                }
+                self.execute_cte_dml(&stmt, operation, sql)
+            }
+
             StatementJob::Query { stmt } => self.execute_select(&stmt, sql),
 
             StatementJob::Merge { operation } => {

@@ -27,6 +27,7 @@ pub fn infer_output_columns(node: &PlanNode) -> Option<HashSet<String>> {
         | PlanNode::Window { input, .. } => infer_output_columns(input),
         PlanNode::Aggregate { .. } => None,
         PlanNode::Join { left, right, .. }
+        | PlanNode::AsOfJoin { left, right, .. }
         | PlanNode::LateralJoin { left, right, .. }
         | PlanNode::Union { left, right, .. }
         | PlanNode::Intersect { left, right, .. }

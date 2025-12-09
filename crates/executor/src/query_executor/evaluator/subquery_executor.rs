@@ -183,10 +183,10 @@ impl SubqueryExecutorImpl {
                     let mut result_columns = Vec::new();
                     let mut result_fields = Vec::new();
 
-                    for (agg_idx, agg_expr) in aggregates.iter().enumerate() {
+                    for agg_expr in aggregates.iter() {
                         let (agg_value, agg_type) = self.evaluate_aggregate(agg_expr, &batch)?;
 
-                        let field_name = format!("agg_{}", agg_idx);
+                        let field_name = Self::aggregate_field_name(agg_expr);
                         let mut col = Column::new(&agg_type, 1);
                         col.push(agg_value)?;
                         result_columns.push(col);
@@ -415,6 +415,65 @@ impl SubqueryExecutorImpl {
                 Ok(Table::new(batch.schema().clone(), new_columns)?)
             }
 
+            PlanNode::Cte {
+                name,
+                cte_plan,
+                input,
+                column_aliases,
+                ..
+            } => {
+                let cte_result = self.execute_plan(cte_plan)?;
+                let cte_table = cte_result.to_column_format()?;
+
+                let mut schema = cte_table.schema().clone();
+                if let Some(aliases) = column_aliases {
+                    let renamed_fields: Vec<yachtsql_storage::Field> = schema
+                        .fields()
+                        .iter()
+                        .zip(aliases.iter())
+                        .map(|(field, alias)| {
+                            let mut new_field = field.clone();
+                            new_field.name = alias.clone();
+                            new_field
+                        })
+                        .collect();
+                    schema = yachtsql_storage::Schema::from_fields(renamed_fields);
+                }
+
+                let temp_table_name = format!("__cte_{}", name);
+
+                {
+                    let mut storage = self._storage.borrow_mut();
+                    if storage.get_dataset("default").is_none() {
+                        storage.create_dataset("default".to_string())?;
+                    }
+                    let dataset = storage
+                        .get_dataset_mut("default")
+                        .ok_or_else(|| Error::DatasetNotFound("default".to_string()))?;
+
+                    dataset.create_table(temp_table_name.clone(), schema)?;
+                    let table = dataset
+                        .get_table_mut(&temp_table_name)
+                        .ok_or_else(|| Error::table_not_found(temp_table_name.clone()))?;
+
+                    for row_idx in 0..cte_table.num_rows() {
+                        let row = cte_table.row(row_idx)?;
+                        table.insert_row(row)?;
+                    }
+                }
+
+                let result = self.execute_plan(input);
+
+                {
+                    let mut storage = self._storage.borrow_mut();
+                    if let Some(dataset) = storage.get_dataset_mut("default") {
+                        let _ = dataset.delete_table(&temp_table_name);
+                    }
+                }
+
+                result
+            }
+
             PlanNode::Union { left, right, all } => {
                 let left_batch = self.execute_plan(left)?.to_column_format()?;
                 let right_batch = self.execute_plan(right)?.to_column_format()?;
@@ -496,6 +555,24 @@ impl SubqueryExecutorImpl {
                 "Subquery execution for {:?} not yet implemented",
                 plan
             ))),
+        }
+    }
+
+    fn aggregate_field_name(agg_expr: &Expr) -> String {
+        match agg_expr {
+            Expr::Aggregate { name, args, .. } => {
+                let args_str = args
+                    .iter()
+                    .map(|arg| match arg {
+                        Expr::Column { name, .. } => name.clone(),
+                        Expr::Literal(lit) => format!("{:?}", lit),
+                        _ => "expr".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}({})", name.as_str(), args_str)
+            }
+            _ => "agg".to_string(),
         }
     }
 
@@ -627,6 +704,26 @@ impl SubqueryExecutorImpl {
                         }
                     }
                 }
+            }
+
+            Expr::InSubquery {
+                expr,
+                plan,
+                negated,
+            } => {
+                let value = self.evaluate_predicate(expr, batch, row_idx)?;
+                let subquery_values = self.execute_in_subquery(plan)?;
+
+                if subquery_values.is_empty() {
+                    return Ok(Value::bool_val(*negated));
+                }
+
+                for subquery_val in &subquery_values {
+                    if !subquery_val.is_null() && !value.is_null() && value == *subquery_val {
+                        return Ok(Value::bool_val(!*negated));
+                    }
+                }
+                Ok(Value::bool_val(*negated))
             }
 
             _ => Err(Error::UnsupportedFeature(format!(

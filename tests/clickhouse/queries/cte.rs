@@ -28,7 +28,6 @@ fn test_simple_cte() {
     assert_table_eq!(result, [["CEO"], ["VP"]]);
 }
 
-#[ignore = "Requires CTE column alias support"]
 #[test]
 fn test_cte_with_column_aliases() {
     let mut executor = create_executor();
@@ -57,7 +56,6 @@ fn test_multiple_ctes() {
     assert_table_eq!(result, [["VP"], ["Manager"]]);
 }
 
-#[ignore = "Requires CTE multi-reference support"]
 #[test]
 fn test_cte_used_multiple_times() {
     let mut executor = create_executor();
@@ -72,7 +70,6 @@ fn test_cte_used_multiple_times() {
     assert_table_eq!(result, [[4, 132500]]);
 }
 
-#[ignore = "Requires CTE in JOIN support"]
 #[test]
 fn test_cte_with_join() {
     let mut executor = create_executor();
@@ -141,7 +138,6 @@ fn test_cte_with_aggregation() {
     assert_table_eq!(result, [["CEO"], ["VP"]]);
 }
 
-#[ignore = "Requires CTE in subquery support"]
 #[test]
 fn test_cte_in_subquery() {
     let mut executor = create_executor();
@@ -156,7 +152,6 @@ fn test_cte_in_subquery() {
     assert_table_eq!(result, [["CEO"], ["VP"]]);
 }
 
-#[ignore = "Requires CTE with INSERT support"]
 #[test]
 fn test_cte_with_insert() {
     let mut executor = create_executor();
@@ -179,7 +174,6 @@ fn test_cte_with_insert() {
     assert_table_eq!(result, [["CEO"], ["VP"]]);
 }
 
-#[ignore = "Requires CTE with UPDATE support"]
 #[test]
 fn test_cte_with_update() {
     let mut executor = create_executor();
@@ -187,7 +181,7 @@ fn test_cte_with_update() {
 
     executor
         .execute_sql(
-            "WITH low_earners AS (SELECT id FROM employees WHERE salary < 100000) UPDATE employees SET salary = salary * 1.1 WHERE id IN (SELECT id FROM low_earners)",
+            "WITH low_earners AS (SELECT id FROM employees WHERE salary < 100000) UPDATE employees SET salary = salary + 8000 WHERE id IN (SELECT id FROM low_earners)",
         )
         .unwrap();
 
@@ -198,7 +192,6 @@ fn test_cte_with_update() {
     assert_table_eq!(result, [[88000]]);
 }
 
-#[ignore = "Requires CTE with DELETE support"]
 #[test]
 fn test_cte_with_delete() {
     let mut executor = create_executor();

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast;
 use yachtsql_core::error::{Error, Result};
+use yachtsql_ir::expr::{BinaryOp, Expr, LiteralValue};
 use yachtsql_ir::plan::{LogicalPlan, PlanNode};
 
 struct GroupingExtension {
@@ -463,6 +464,126 @@ impl LogicalPlanBuilder {
         )
     }
 
+    fn is_paste_join_marker(factor: &ast::TableFactor) -> bool {
+        match factor {
+            ast::TableFactor::Table { name, .. } => {
+                return name
+                    .0
+                    .first()
+                    .and_then(|p| p.as_ident())
+                    .map(|ident| ident.value == "__PASTE__")
+                    .unwrap_or(false);
+            }
+            ast::TableFactor::Derived {
+                alias: Some(table_alias),
+                ..
+            } => {
+                return table_alias.name.value.starts_with("__PASTE_SUBQUERY_");
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn plan_paste_join_relation(
+        &self,
+        relation: &ast::TableFactor,
+        _left_plan: &LogicalPlan,
+    ) -> Result<LogicalPlan> {
+        match relation {
+            ast::TableFactor::Table {
+                alias: Some(table_alias),
+                ..
+            } => {
+                let real_table_name = table_alias.name.value.clone();
+                let fake_table_factor = ast::TableFactor::Table {
+                    name: ast::ObjectName(vec![ast::ObjectNamePart::Identifier(ast::Ident::new(
+                        &real_table_name,
+                    ))]),
+                    alias: None,
+                    args: None,
+                    with_hints: vec![],
+                    version: None,
+                    with_ordinality: false,
+                    partitions: vec![],
+                    json_path: None,
+                    sample: None,
+                    index_hints: vec![],
+                };
+                return self.table_factor_to_plan(&fake_table_factor);
+            }
+            ast::TableFactor::Derived { subquery, .. } => {
+                let subquery_plan = self.query_to_plan(subquery)?;
+                return Ok(LogicalPlan::new(PlanNode::SubqueryScan {
+                    subquery: subquery_plan.root,
+                    alias: "__paste_subquery__".to_string(),
+                }));
+            }
+            _ => {}
+        }
+        Err(Error::parse_error(
+            "Invalid PASTE JOIN: missing table name".to_string(),
+        ))
+    }
+
+    fn is_asof_join_marker(factor: &ast::TableFactor) -> Option<(String, bool)> {
+        match factor {
+            ast::TableFactor::Table { name, .. } => {
+                let table_name = name
+                    .0
+                    .first()
+                    .and_then(|p| p.as_ident())
+                    .map(|ident| &ident.value)?;
+
+                if let Some(actual_table) = table_name.strip_prefix("__ASOF_LEFT__") {
+                    return Some((actual_table.to_string(), true));
+                }
+                if let Some(actual_table) = table_name.strip_prefix("__ASOF__") {
+                    return Some((actual_table.to_string(), false));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn plan_asof_join_relation(
+        &self,
+        relation: &ast::TableFactor,
+        actual_table_name: &str,
+    ) -> Result<LogicalPlan> {
+        match relation {
+            ast::TableFactor::Table { alias, .. } => {
+                let table_alias = alias.as_ref().map(|a| a.name.value.clone());
+                let fake_table_factor = ast::TableFactor::Table {
+                    name: ast::ObjectName(vec![ast::ObjectNamePart::Identifier(ast::Ident::new(
+                        actual_table_name,
+                    ))]),
+                    alias: alias.clone(),
+                    args: None,
+                    with_hints: vec![],
+                    version: None,
+                    with_ordinality: false,
+                    partitions: vec![],
+                    json_path: None,
+                    sample: None,
+                    index_hints: vec![],
+                };
+                let plan = self.table_factor_to_plan(&fake_table_factor)?;
+                if let Some(alias_name) = table_alias {
+                    return Ok(LogicalPlan::new(PlanNode::SubqueryScan {
+                        subquery: plan.root,
+                        alias: alias_name,
+                    }));
+                }
+                Ok(plan)
+            }
+            _ => Err(Error::parse_error(
+                "Invalid ASOF JOIN: expected table".to_string(),
+            )),
+        }
+    }
+
     fn object_name_to_string(name: &ast::ObjectName) -> String {
         name.0
             .iter()
@@ -495,6 +616,152 @@ impl LogicalPlanBuilder {
 
     fn resolve_table_name(&self, name: &str) -> String {
         name.to_string()
+    }
+
+    fn build_asof_using_condition(&self, cols: &[ast::ObjectName]) -> Result<(Expr, Expr)> {
+        if cols.is_empty() {
+            return Err(Error::parse_error(
+                "ASOF JOIN USING requires at least one column".to_string(),
+            ));
+        }
+
+        let ident_cols: Vec<String> = cols
+            .iter()
+            .filter_map(|name| {
+                name.0
+                    .last()
+                    .and_then(|part| part.as_ident())
+                    .map(|ident| ident.value.clone())
+            })
+            .collect();
+
+        if ident_cols.is_empty() {
+            return Err(Error::parse_error(
+                "ASOF JOIN USING requires at least one column".to_string(),
+            ));
+        }
+
+        let match_col = ident_cols.last().unwrap().clone();
+
+        let match_expr = Expr::BinaryOp {
+            left: Box::new(Expr::Column {
+                name: match_col.clone(),
+                table: Some("__left__".to_string()),
+            }),
+            op: BinaryOp::GreaterThanOrEqual,
+            right: Box::new(Expr::Column {
+                name: match_col,
+                table: Some("__right__".to_string()),
+            }),
+        };
+
+        let equality_cols = &ident_cols[..ident_cols.len() - 1];
+
+        let equality_expr = if equality_cols.is_empty() {
+            Expr::Literal(LiteralValue::Boolean(true))
+        } else {
+            let mut result = Expr::BinaryOp {
+                left: Box::new(Expr::Column {
+                    name: equality_cols[0].clone(),
+                    table: Some("__left__".to_string()),
+                }),
+                op: BinaryOp::Equal,
+                right: Box::new(Expr::Column {
+                    name: equality_cols[0].clone(),
+                    table: Some("__right__".to_string()),
+                }),
+            };
+
+            for col in equality_cols.iter().skip(1) {
+                result = Expr::BinaryOp {
+                    left: Box::new(result),
+                    op: BinaryOp::And,
+                    right: Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::Column {
+                            name: col.clone(),
+                            table: Some("__left__".to_string()),
+                        }),
+                        op: BinaryOp::Equal,
+                        right: Box::new(Expr::Column {
+                            name: col.clone(),
+                            table: Some("__right__".to_string()),
+                        }),
+                    }),
+                };
+            }
+
+            result
+        };
+
+        Ok((equality_expr, match_expr))
+    }
+
+    fn split_asof_condition(&self, expr: &ast::Expr) -> Result<(Expr, Expr)> {
+        let mut equality_parts = Vec::new();
+        let mut match_part: Option<&ast::Expr> = None;
+
+        Self::collect_asof_conditions(expr, &mut equality_parts, &mut match_part)?;
+
+        let match_expr = match_part.ok_or_else(|| {
+            Error::parse_error("ASOF JOIN requires a match condition (>=, <=, >, <)".to_string())
+        })?;
+
+        let equality_expr = if equality_parts.is_empty() {
+            Expr::Literal(LiteralValue::Boolean(true))
+        } else if equality_parts.len() == 1 {
+            self.sql_expr_to_expr(equality_parts[0])?
+        } else {
+            let mut result = self.sql_expr_to_expr(equality_parts[0])?;
+            for part in equality_parts.iter().skip(1) {
+                result = Expr::BinaryOp {
+                    left: Box::new(result),
+                    op: BinaryOp::And,
+                    right: Box::new(self.sql_expr_to_expr(part)?),
+                };
+            }
+            result
+        };
+
+        Ok((equality_expr, self.sql_expr_to_expr(match_expr)?))
+    }
+
+    fn collect_asof_conditions<'a>(
+        expr: &'a ast::Expr,
+        equality_parts: &mut Vec<&'a ast::Expr>,
+        match_part: &mut Option<&'a ast::Expr>,
+    ) -> Result<()> {
+        match expr {
+            ast::Expr::BinaryOp { left, op, right } => match op {
+                ast::BinaryOperator::And => {
+                    Self::collect_asof_conditions(left, equality_parts, match_part)?;
+                    Self::collect_asof_conditions(right, equality_parts, match_part)?;
+                }
+                ast::BinaryOperator::Eq => {
+                    equality_parts.push(expr);
+                }
+                ast::BinaryOperator::Gt
+                | ast::BinaryOperator::GtEq
+                | ast::BinaryOperator::Lt
+                | ast::BinaryOperator::LtEq => {
+                    if match_part.is_some() {
+                        return Err(Error::parse_error(
+                            "ASOF JOIN supports only one match condition".to_string(),
+                        ));
+                    }
+                    *match_part = Some(expr);
+                }
+                _ => {
+                    equality_parts.push(expr);
+                }
+            },
+            ast::Expr::Nested(inner) => {
+                Self::collect_asof_conditions(inner, equality_parts, match_part)?;
+            }
+            _ => {
+                equality_parts.push(expr);
+            }
+        }
+        Ok(())
     }
 }
 

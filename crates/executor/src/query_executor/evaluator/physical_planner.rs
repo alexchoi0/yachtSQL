@@ -121,6 +121,11 @@ impl PhysicalPlanner {
                 on: _,
             } => self.create_lateral_join(left, right, *join_type),
 
+            PlanNode::AsOfJoin { .. } => Err(Error::unsupported_feature(
+                "AsOfJoin requires the LogicalToPhysicalPlanner (use execute_sql instead)"
+                    .to_string(),
+            )),
+
             PlanNode::Union { left, right, all } => self.create_union(left, right, *all),
 
             PlanNode::Intersect { left, right, all } => self.create_intersect(left, right, *all),
