@@ -230,26 +230,6 @@ impl ProjectionWithExprExec {
             };
         }
 
-        if let (Some(l), Some(r)) = (left.as_str(), right.as_str()) {
-            return match op {
-                BinaryOp::Equal => Ok(Value::bool_val(l.eq_ignore_ascii_case(r))),
-                BinaryOp::NotEqual => Ok(Value::bool_val(!l.eq_ignore_ascii_case(r))),
-                BinaryOp::LessThan => Ok(Value::bool_val(l < r)),
-                BinaryOp::LessThanOrEqual => Ok(Value::bool_val(l <= r)),
-                BinaryOp::GreaterThan => Ok(Value::bool_val(l > r)),
-                BinaryOp::GreaterThanOrEqual => Ok(Value::bool_val(l >= r)),
-                BinaryOp::Concat => {
-                    let mut result = l.to_string();
-                    result.push_str(r);
-                    Ok(Value::string(result))
-                }
-                _ => Err(crate::error::Error::unsupported_feature(format!(
-                    "Operator {:?} not supported for STRING",
-                    op
-                ))),
-            };
-        }
-
         if let (Some(fs_l), Some(fs_r)) = (left.as_fixed_string(), right.as_fixed_string()) {
             return match op {
                 BinaryOp::Equal => Ok(Value::bool_val(fs_l.data == fs_r.data)),
@@ -299,6 +279,17 @@ impl ProjectionWithExprExec {
 
         if let (Some(l), Some(r)) = (left.as_str(), right.as_str()) {
             return match op {
+                BinaryOp::Equal => Ok(Value::bool_val(l.eq_ignore_ascii_case(r))),
+                BinaryOp::NotEqual => Ok(Value::bool_val(!l.eq_ignore_ascii_case(r))),
+                BinaryOp::LessThan => Ok(Value::bool_val(l < r)),
+                BinaryOp::LessThanOrEqual => Ok(Value::bool_val(l <= r)),
+                BinaryOp::GreaterThan => Ok(Value::bool_val(l > r)),
+                BinaryOp::GreaterThanOrEqual => Ok(Value::bool_val(l >= r)),
+                BinaryOp::Concat => {
+                    let mut result = l.to_string();
+                    result.push_str(r);
+                    Ok(Value::string(result))
+                }
                 BinaryOp::Like => Ok(Value::bool_val(crate::pattern_matching::matches_pattern(
                     l, r,
                 ))),
