@@ -274,6 +274,10 @@ impl AggregateExec {
                     LiteralValue::Point(_) => DataType::Point,
                     LiteralValue::PgBox(_) => DataType::PgBox,
                     LiteralValue::Circle(_) => DataType::Circle,
+                    LiteralValue::Line(_) => DataType::Line,
+                    LiteralValue::Lseg(_) => DataType::Lseg,
+                    LiteralValue::Path(_) => DataType::Path,
+                    LiteralValue::Polygon(_) => DataType::Polygon,
                     LiteralValue::MacAddr(_) => DataType::MacAddr,
                     LiteralValue::MacAddr8(_) => DataType::MacAddr8,
                 })
@@ -534,7 +538,7 @@ impl AggregateExec {
                     }
                 }
 
-                FunctionName::Any | FunctionName::AnyHeavy => {
+                FunctionName::Any | FunctionName::AnyLast | FunctionName::AnyHeavy => {
                     if let Some(arg) = args.first() {
                         Self::infer_expr_type(arg, schema)
                     } else {
@@ -585,6 +589,8 @@ impl AggregateExec {
                 }
 
                 FunctionName::WindowFunnel => Some(DataType::Int64),
+
+                FunctionName::Retention => Some(DataType::Array(Box::new(DataType::Bool))),
 
                 FunctionName::BitAnd | FunctionName::BitOr | FunctionName::BitXor => {
                     Some(DataType::Int64)
