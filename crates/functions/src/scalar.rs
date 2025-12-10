@@ -471,8 +471,12 @@ pub fn eval_to_hex(value: &Value) -> Result<Value> {
         return Ok(Value::string(hex::encode(b)));
     }
 
+    if let Some(i) = value.as_i64() {
+        return Ok(Value::string(format!("{:x}", i)));
+    }
+
     Err(yachtsql_core::error::Error::TypeMismatch {
-        expected: "TO_HEX requires BYTES".to_string(),
+        expected: "TO_HEX requires BYTES or INT64".to_string(),
         actual: value.data_type().to_string(),
     })
 }

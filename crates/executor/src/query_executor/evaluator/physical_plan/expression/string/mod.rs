@@ -154,6 +154,17 @@ impl ProjectionWithExprExec {
             "NORMALIZEUTF8NFD" => Self::evaluate_normalize_utf8_nfd(args, batch, row_idx),
             "NORMALIZEUTF8NFKC" => Self::evaluate_normalize_utf8_nfkc(args, batch, row_idx),
             "NORMALIZEUTF8NFKD" => Self::evaluate_normalize_utf8_nfkd(args, batch, row_idx),
+            "BTRIM" => Self::evaluate_btrim(args, batch, row_idx),
+            "BIT_LENGTH" => Self::evaluate_bit_length(args, batch, row_idx),
+            "CONCAT_WS" => Self::evaluate_concat_ws(args, batch, row_idx),
+            "QUOTE_NULLABLE" => Self::evaluate_quote_nullable(args, batch, row_idx),
+            "REGEXP_COUNT" => Self::evaluate_regexp_count(args, batch, row_idx),
+            "REGEXP_INSTR" => Self::evaluate_regexp_instr(args, batch, row_idx),
+            "REGEXP_SUBSTR" => Self::evaluate_regexp_substr(args, batch, row_idx),
+            "PARSE_IDENT" => Self::evaluate_parse_ident(args, batch, row_idx),
+            "NORMALIZE" => Self::evaluate_normalize(args, batch, row_idx),
+            "IS_NORMALIZED" => Self::evaluate_is_normalized(args, batch, row_idx),
+            "OVERLAY" => Self::evaluate_overlay(args, batch, row_idx),
             _ => Err(Error::unsupported_feature(format!(
                 "Unknown string function: {}",
                 name
@@ -163,6 +174,326 @@ impl ProjectionWithExprExec {
 }
 
 impl ProjectionWithExprExec {
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_bit_length(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        Self::validate_arg_count("BIT_LENGTH", args, 1)?;
+        let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        if val.is_null() {
+            return Ok(Value::null());
+        }
+        if let Some(s) = val.as_str() {
+            return Ok(Value::int64((s.len() * 8) as i64));
+        }
+        if let Some(b) = val.as_bytes() {
+            return Ok(Value::int64((b.len() * 8) as i64));
+        }
+        Err(Error::TypeMismatch {
+            expected: "STRING or BYTES".to_string(),
+            actual: val.data_type().to_string(),
+        })
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_btrim(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 2 {
+            return Err(Error::invalid_query("BTRIM requires 1 or 2 arguments"));
+        }
+        let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        if val.is_null() {
+            return Ok(Value::null());
+        }
+        let s = val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: val.data_type().to_string(),
+        })?;
+        let chars_to_trim = if args.len() == 2 {
+            let trim_arg = Self::evaluate_expr(&args[1], batch, row_idx)?;
+            if trim_arg.is_null() {
+                return Ok(Value::null());
+            }
+            trim_arg
+                .as_str()
+                .ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: trim_arg.data_type().to_string(),
+                })?
+                .to_string()
+        } else {
+            " ".to_string()
+        };
+        let result = s.trim_matches(|c: char| chars_to_trim.contains(c));
+        Ok(Value::string(result.to_string()))
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_concat_ws(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        if args.is_empty() {
+            return Err(Error::invalid_query(
+                "CONCAT_WS requires at least 1 argument",
+            ));
+        }
+        let sep_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        if sep_val.is_null() {
+            return Ok(Value::null());
+        }
+        let separator = sep_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: sep_val.data_type().to_string(),
+        })?;
+        let mut parts = Vec::new();
+        for arg in &args[1..] {
+            let val = Self::evaluate_expr(arg, batch, row_idx)?;
+            if !val.is_null() {
+                if let Some(s) = val.as_str() {
+                    parts.push(s.to_string());
+                } else {
+                    parts.push(val.to_string());
+                }
+            }
+        }
+        Ok(Value::string(parts.join(separator)))
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_quote_nullable(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        Self::validate_arg_count("QUOTE_NULLABLE", args, 1)?;
+        let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        if val.is_null() {
+            return Ok(Value::string("NULL".to_string()));
+        }
+        let s = if let Some(s) = val.as_str() {
+            s.to_string()
+        } else {
+            val.to_string()
+        };
+        let escaped = s.replace('\'', "''");
+        Ok(Value::string(format!("'{}'", escaped)))
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_regexp_count(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        Self::validate_arg_count("REGEXP_COUNT", args, 2)?;
+        let string_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        let pattern_val = Self::evaluate_expr(&args[1], batch, row_idx)?;
+        if string_val.is_null() || pattern_val.is_null() {
+            return Ok(Value::null());
+        }
+        let string = string_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: string_val.data_type().to_string(),
+        })?;
+        let pattern = pattern_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: pattern_val.data_type().to_string(),
+        })?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| Error::invalid_query(format!("Invalid regex pattern: {}", e)))?;
+        let count = re.find_iter(string).count();
+        Ok(Value::int64(count as i64))
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_regexp_instr(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        Self::validate_arg_count("REGEXP_INSTR", args, 2)?;
+        let string_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        let pattern_val = Self::evaluate_expr(&args[1], batch, row_idx)?;
+        if string_val.is_null() || pattern_val.is_null() {
+            return Ok(Value::null());
+        }
+        let string = string_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: string_val.data_type().to_string(),
+        })?;
+        let pattern = pattern_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: pattern_val.data_type().to_string(),
+        })?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| Error::invalid_query(format!("Invalid regex pattern: {}", e)))?;
+        if let Some(mat) = re.find(string) {
+            Ok(Value::int64((mat.start() + 1) as i64))
+        } else {
+            Ok(Value::int64(0))
+        }
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_regexp_substr(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        Self::validate_arg_count("REGEXP_SUBSTR", args, 2)?;
+        let string_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        let pattern_val = Self::evaluate_expr(&args[1], batch, row_idx)?;
+        if string_val.is_null() || pattern_val.is_null() {
+            return Ok(Value::null());
+        }
+        let string = string_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: string_val.data_type().to_string(),
+        })?;
+        let pattern = pattern_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: pattern_val.data_type().to_string(),
+        })?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| Error::invalid_query(format!("Invalid regex pattern: {}", e)))?;
+        if let Some(mat) = re.find(string) {
+            Ok(Value::string(mat.as_str().to_string()))
+        } else {
+            Ok(Value::null())
+        }
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_parse_ident(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        Self::validate_arg_count("PARSE_IDENT", args, 1)?;
+        let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        if val.is_null() {
+            return Ok(Value::null());
+        }
+        let s = val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: val.data_type().to_string(),
+        })?;
+        let parts: Vec<Value> = s
+            .split('.')
+            .map(|part| {
+                let trimmed = part.trim();
+                let unquoted =
+                    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+                        trimmed[1..trimmed.len() - 1].replace("\"\"", "\"")
+                    } else {
+                        trimmed.to_lowercase()
+                    };
+                Value::string(unquoted)
+            })
+            .collect();
+        Ok(Value::array(parts))
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_normalize(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 2 {
+            return Err(Error::invalid_query("NORMALIZE requires 1 or 2 arguments"));
+        }
+        let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        if val.is_null() {
+            return Ok(Value::null());
+        }
+        let s = val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: val.data_type().to_string(),
+        })?;
+        Ok(Value::string(s.to_string()))
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_is_normalized(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 2 {
+            return Err(Error::invalid_query(
+                "IS_NORMALIZED requires 1 or 2 arguments",
+            ));
+        }
+        let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        if val.is_null() {
+            return Ok(Value::null());
+        }
+        if val.as_str().is_some() {
+            Ok(Value::bool_val(true))
+        } else {
+            Err(Error::TypeMismatch {
+                expected: "STRING".to_string(),
+                actual: val.data_type().to_string(),
+            })
+        }
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_overlay(
+        args: &[Expr],
+        batch: &Table,
+        row_idx: usize,
+    ) -> Result<Value> {
+        if args.len() < 3 || args.len() > 4 {
+            return Err(Error::invalid_query("OVERLAY requires 3 or 4 arguments"));
+        }
+        let string_val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+        let replacement_val = Self::evaluate_expr(&args[1], batch, row_idx)?;
+        let start_val = Self::evaluate_expr(&args[2], batch, row_idx)?;
+        if string_val.is_null() || replacement_val.is_null() || start_val.is_null() {
+            return Ok(Value::null());
+        }
+        let string = string_val.as_str().ok_or_else(|| Error::TypeMismatch {
+            expected: "STRING".to_string(),
+            actual: string_val.data_type().to_string(),
+        })?;
+        let replacement = replacement_val
+            .as_str()
+            .ok_or_else(|| Error::TypeMismatch {
+                expected: "STRING".to_string(),
+                actual: replacement_val.data_type().to_string(),
+            })?;
+        let start = start_val.as_i64().ok_or_else(|| Error::TypeMismatch {
+            expected: "INT64".to_string(),
+            actual: start_val.data_type().to_string(),
+        })?;
+        let length = if args.len() == 4 {
+            let length_val = Self::evaluate_expr(&args[3], batch, row_idx)?;
+            if length_val.is_null() {
+                return Ok(Value::null());
+            }
+            length_val.as_i64().ok_or_else(|| Error::TypeMismatch {
+                expected: "INT64".to_string(),
+                actual: length_val.data_type().to_string(),
+            })? as usize
+        } else {
+            replacement.chars().count()
+        };
+        let chars: Vec<char> = string.chars().collect();
+        let start_idx = (start - 1).max(0) as usize;
+        let mut result = String::new();
+        for (i, ch) in chars.iter().enumerate() {
+            if i < start_idx {
+                result.push(*ch);
+            }
+        }
+        result.push_str(replacement);
+        let skip_end = start_idx + length;
+        for (i, ch) in chars.iter().enumerate() {
+            if i >= skip_end {
+                result.push(*ch);
+            }
+        }
+        Ok(Value::string(result))
+    }
+
     pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_bit_count(
         args: &[Expr],
         batch: &Table,

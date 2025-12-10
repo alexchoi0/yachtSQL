@@ -1023,7 +1023,10 @@ impl QueryExecutor {
                     "UPPER" | "LOWER" | "CONCAT" | "SUBSTRING" | "SUBSTR" | "TRIM" | "LTRIM"
                     | "RTRIM" | "REPLACE" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REPEAT"
                     | "FORMAT" | "CHR" | "INITCAP" | "TO_CHAR" | "TO_HEX" | "MD5" | "SHA256"
-                    | "SHA512" | "BASE64_ENCODE" | "BASE64_DECODE" => Ok(DataType::String),
+                    | "SHA512" | "BASE64_ENCODE" | "BASE64_DECODE" | "BTRIM" | "CONCAT_WS"
+                    | "QUOTE_NULLABLE" | "REGEXP_SUBSTR" | "NORMALIZE" | "OVERLAY" => {
+                        Ok(DataType::String)
+                    }
 
                     "REVERSE" => {
                         if let sqlparser::ast::FunctionArguments::List(args) = &func.args {
@@ -1044,7 +1047,8 @@ impl QueryExecutor {
 
                     "LENGTH" | "LEN" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "OCTET_LENGTH"
                     | "ASCII" | "POSITION" | "STRPOS" | "INSTR" | "BIT_COUNT" | "ARRAY_LENGTH"
-                    | "CARDINALITY" | "ARRAY_POSITION" => Ok(DataType::Int64),
+                    | "CARDINALITY" | "ARRAY_POSITION" | "REGEXP_COUNT" | "REGEXP_INSTR"
+                    | "BIT_LENGTH" => Ok(DataType::Int64),
 
                     "CURRENT_DATE" | "DATE" | "DATE_TRUNC" => Ok(DataType::Date),
                     "CURRENT_TIMESTAMP" | "NOW" | "TIMESTAMP" => Ok(DataType::Timestamp),
@@ -1111,7 +1115,11 @@ impl QueryExecutor {
                     | "POWER" | "POW" | "MOD" | "RANDOM" | "RAND" | "SIGN" | "GREATEST"
                     | "LEAST" => Ok(DataType::Float64),
 
-                    "ISNULL" | "ISNOTNULL" | "REGEXP_LIKE" | "LIKE" | "ILIKE" => Ok(DataType::Bool),
+                    "ISNULL" | "ISNOTNULL" | "REGEXP_LIKE" | "LIKE" | "ILIKE" | "IS_NORMALIZED" => {
+                        Ok(DataType::Bool)
+                    }
+
+                    "PARSE_IDENT" => Ok(DataType::Array(Box::new(DataType::String))),
 
                     "POINT" => Ok(DataType::Point),
                     "BOX" => Ok(DataType::PgBox),
