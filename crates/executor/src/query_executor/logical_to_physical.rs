@@ -1122,7 +1122,8 @@ impl LogicalToPhysicalPlanner {
                         table_id
                     );
                     let info_table = InformationSchemaTable::from_str(table_id)?;
-                    let provider = InformationSchemaProvider::new(Rc::clone(&self.storage));
+                    let provider =
+                        InformationSchemaProvider::new(Rc::clone(&self.storage), self.dialect);
                     let (schema, rows) = provider.query(info_table)?;
 
                     let source_table = alias.as_ref().unwrap_or(table_name);

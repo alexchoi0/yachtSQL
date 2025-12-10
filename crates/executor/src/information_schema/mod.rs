@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use yachtsql_core::error::{Error, Result};
 use yachtsql_core::types::{DataType, Value};
+use yachtsql_parser::DialectType;
 use yachtsql_storage::{Field, Row, Schema, Storage, TableIndexOps};
 
 use crate::record_batch::Table;
@@ -198,11 +199,12 @@ impl InformationSchemaTable {
 
 pub struct InformationSchemaProvider {
     storage: Rc<RefCell<Storage>>,
+    dialect: DialectType,
 }
 
 impl InformationSchemaProvider {
-    pub fn new(storage: Rc<RefCell<Storage>>) -> Self {
-        Self { storage }
+    pub fn new(storage: Rc<RefCell<Storage>>, dialect: DialectType) -> Self {
+        Self { storage, dialect }
     }
 
     pub fn query(&self, table: InformationSchemaTable) -> Result<(Schema, Vec<Row>)> {
@@ -263,8 +265,8 @@ impl InformationSchemaProvider {
         }
     }
 
-    fn dataset_to_schema_name(dataset_id: &str) -> String {
-        if dataset_id == "default" {
+    fn dataset_to_schema_name(&self, dataset_id: &str) -> String {
+        if dataset_id == "default" && self.dialect == DialectType::PostgreSQL {
             "public".to_string()
         } else {
             dataset_id.to_string()
@@ -284,7 +286,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for table_name in dataset.tables().keys() {
                     rows.push(Row::from_values(vec![
@@ -337,7 +339,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     let table_schema = table.schema();
@@ -380,7 +382,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             rows.push(Row::from_values(vec![
                 Value::string(schema_name.clone()),
                 Value::string(schema_name),
@@ -405,7 +407,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for view_name in dataset.views().list_views() {
                     if let Some(view) = dataset.views().get_view(&view_name) {
@@ -439,7 +441,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     let table_schema = table.schema();
@@ -525,7 +527,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     let table_schema = table.schema();
@@ -618,7 +620,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     for fk in table.foreign_keys() {
@@ -659,7 +661,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     let table_schema = table.schema();
@@ -796,7 +798,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     let table_schema = table.schema();
@@ -851,7 +853,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     for fk in table.foreign_keys() {
@@ -970,7 +972,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for type_name in dataset.types().list_types() {
                     rows.push(Row::from_values(vec![
@@ -1000,7 +1002,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for type_name in dataset.types().list_types() {
                     if let Some(udt) = dataset.types().get_type(type_name) {
@@ -1331,7 +1333,7 @@ impl InformationSchemaProvider {
         let mut rows = Vec::new();
 
         for dataset_id in storage.list_datasets() {
-            let schema_name = Self::dataset_to_schema_name(dataset_id);
+            let schema_name = self.dataset_to_schema_name(dataset_id);
             if let Some(dataset) = storage.get_dataset(dataset_id) {
                 for (table_name, table) in dataset.tables() {
                     for idx_meta in table.index_metadata() {
