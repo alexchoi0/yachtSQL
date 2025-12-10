@@ -5265,6 +5265,45 @@ impl ProjectionWithExprExec {
                 Ok(Value::bool_val(false))
             }
 
+            "HLL_COUNT.INIT" | "HLL_COUNT_INIT" => {
+                if args.len() != 1 {
+                    return Err(Error::invalid_query("HLL_COUNT.INIT requires 1 argument"));
+                }
+                let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+                if val.is_null() {
+                    return Ok(Value::string("HLL_SKETCH:p15:n0".to_string()));
+                }
+                let key = format!("{:?}", val);
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                key.hash(&mut hasher);
+                let hash = hasher.finish();
+                Ok(Value::string(format!("HLL_SKETCH:p15:h{}", hash)))
+            }
+
+            "HLL_COUNT.EXTRACT" | "HLL_COUNT_EXTRACT" => {
+                if args.len() != 1 {
+                    return Err(Error::invalid_query(
+                        "HLL_COUNT.EXTRACT requires 1 argument",
+                    ));
+                }
+                let sketch = Self::evaluate_expr(&args[0], batch, row_idx)?;
+                if let Some(s) = sketch.as_str() {
+                    if let Some(parts) = s.strip_prefix("HLL_SKETCH:p") {
+                        let segments: Vec<&str> = parts.split(':').collect();
+                        if segments.len() == 2 {
+                            if let Some(count_str) = segments[1].strip_prefix('n') {
+                                if let Ok(count) = count_str.parse::<i64>() {
+                                    return Ok(Value::int64(count));
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Value::int64(0))
+            }
+
             _ => Err(Error::unsupported_feature(format!(
                 "Unknown custom function: {}",
                 name

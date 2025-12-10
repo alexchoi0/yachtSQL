@@ -98,8 +98,8 @@ impl AggregateExec {
                 Self::expr_to_field_name(agg_expr).unwrap_or_else(|| format!("agg_{}", idx))
             });
 
-            let data_type = Self::infer_aggregate_type(agg_expr, input_schema)
-                .unwrap_or(yachtsql_core::types::DataType::Float64);
+            let inferred_type = Self::infer_aggregate_type(agg_expr, input_schema);
+            let data_type = inferred_type.unwrap_or(yachtsql_core::types::DataType::Float64);
             fields.push(Field::nullable(field_name, data_type));
         }
 
@@ -211,6 +211,7 @@ impl AggregateExec {
                                     | FunctionName::RegrSxy
                                     | FunctionName::JsonObjectAgg
                                     | FunctionName::JsonbObjectAgg
+                                    | FunctionName::ApproxTopSum
                             );
                             if needs_array {
                                 let mut values = Vec::with_capacity(args.len());
@@ -625,8 +626,33 @@ impl AggregateExec {
 
                 FunctionName::GroupBitmapState => Some(DataType::Array(Box::new(DataType::Int64))),
 
+                FunctionName::Custom(name)
+                    if name.eq_ignore_ascii_case("HLL_COUNT.MERGE")
+                        || name.eq_ignore_ascii_case("HLL_COUNT_MERGE")
+                        || name.eq_ignore_ascii_case("HLL_COUNT.MERGE_PARTIAL")
+                        || name.eq_ignore_ascii_case("HLL_COUNT_MERGE_PARTIAL") =>
+                {
+                    Some(DataType::String)
+                }
+
                 _ => Some(DataType::Float64),
             },
+            Expr::Function { name, args } => {
+                use super::ProjectionWithExprExec;
+                ProjectionWithExprExec::infer_function_type(name, args, schema)
+            }
+            Expr::Cast { data_type, .. } | Expr::TryCast { data_type, .. } => {
+                use super::ProjectionWithExprExec;
+                Some(ProjectionWithExprExec::cast_type_to_data_type(data_type))
+            }
+            Expr::BinaryOp { left, op, right } => {
+                let left_type = Self::infer_aggregate_type(left, schema)
+                    .or_else(|| Self::infer_expr_type(left, schema));
+                let right_type = Self::infer_aggregate_type(right, schema)
+                    .or_else(|| Self::infer_expr_type(right, schema));
+                use super::ProjectionWithExprExec;
+                ProjectionWithExprExec::infer_binary_op_type(op, left_type, right_type)
+            }
             _ => None,
         }
     }
@@ -680,6 +706,36 @@ impl ExecutionPlan for AggregateExec {
 
     fn execute(&self) -> Result<Vec<Table>> {
         let input_batches = self.input.execute()?;
+
+        let has_no_rows =
+            input_batches.is_empty() || input_batches.iter().all(|t| t.num_rows() == 0);
+
+        if has_no_rows && self.group_by.is_empty() {
+            let empty_agg_values: Vec<Value> = self
+                .aggregates
+                .iter()
+                .map(|(agg_expr, _)| match agg_expr {
+                    Expr::Aggregate { name, .. } => {
+                        use yachtsql_ir::FunctionName;
+                        match name {
+                            FunctionName::Count => Value::int64(0),
+                            _ => Value::null(),
+                        }
+                    }
+                    _ => Value::null(),
+                })
+                .collect();
+
+            let mut columns = Vec::new();
+
+            for (idx, field) in self.schema.fields().iter().enumerate() {
+                let mut column = Column::new(&field.data_type, 1);
+                column.push(empty_agg_values.get(idx).cloned().unwrap_or(Value::null()))?;
+                columns.push(column);
+            }
+
+            return Ok(vec![Table::new(self.schema.clone(), columns)?]);
+        }
 
         if input_batches.is_empty() {
             return Ok(vec![Table::empty(self.schema.clone())]);
@@ -2495,6 +2551,28 @@ impl AggregateExec {
                             .map(|(_, value)| value.clone())
                             .unwrap_or(Value::null())
                     }
+                    FunctionName::Custom(name)
+                        if name.eq_ignore_ascii_case("HLL_COUNT.MERGE")
+                            || name.eq_ignore_ascii_case("HLL_COUNT_MERGE")
+                            || name.eq_ignore_ascii_case("HLL_COUNT.MERGE_PARTIAL")
+                            || name.eq_ignore_ascii_case("HLL_COUNT_MERGE_PARTIAL") =>
+                    {
+                        let mut unique_hashes = std::collections::HashSet::new();
+                        for val in &values {
+                            if let Some(sketch_str) = val.as_str() {
+                                if let Some(rest) = sketch_str.strip_prefix("HLL_SKETCH:p") {
+                                    let segments: Vec<&str> = rest.split(':').collect();
+                                    if segments.len() == 2 {
+                                        if let Some(hash_str) = segments[1].strip_prefix('h') {
+                                            unique_hashes.insert(hash_str.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let count = unique_hashes.len();
+                        Value::string(format!("HLL_SKETCH:p15:n{}", count))
+                    }
                     _ => Value::null(),
                 },
                 _ => Value::null(),
@@ -2721,6 +2799,7 @@ impl SortAggregateExec {
                                     | FunctionName::RegrSxy
                                     | FunctionName::JsonObjectAgg
                                     | FunctionName::JsonbObjectAgg
+                                    | FunctionName::ApproxTopSum
                             );
                             if needs_array {
                                 let mut values = Vec::with_capacity(args.len());
@@ -4148,6 +4227,28 @@ impl SortAggregateExec {
                             .map(|(_, value)| value.clone())
                             .unwrap_or(Value::null())
                     }
+                    FunctionName::Custom(name)
+                        if name.eq_ignore_ascii_case("HLL_COUNT.MERGE")
+                            || name.eq_ignore_ascii_case("HLL_COUNT_MERGE")
+                            || name.eq_ignore_ascii_case("HLL_COUNT.MERGE_PARTIAL")
+                            || name.eq_ignore_ascii_case("HLL_COUNT_MERGE_PARTIAL") =>
+                    {
+                        let mut unique_hashes = std::collections::HashSet::new();
+                        for val in &values {
+                            if let Some(sketch_str) = val.as_str() {
+                                if let Some(rest) = sketch_str.strip_prefix("HLL_SKETCH:p") {
+                                    let segments: Vec<&str> = rest.split(':').collect();
+                                    if segments.len() == 2 {
+                                        if let Some(hash_str) = segments[1].strip_prefix('h') {
+                                            unique_hashes.insert(hash_str.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let count = unique_hashes.len();
+                        Value::string(format!("HLL_SKETCH:p15:n{}", count))
+                    }
                     _ => Value::null(),
                 },
                 _ => Value::null(),
@@ -4167,6 +4268,36 @@ impl ExecutionPlan for SortAggregateExec {
 
     fn execute(&self) -> Result<Vec<Table>> {
         let input_batches = self.input.execute()?;
+
+        let has_no_rows =
+            input_batches.is_empty() || input_batches.iter().all(|t| t.num_rows() == 0);
+
+        if has_no_rows && self.group_by.is_empty() {
+            let empty_agg_values: Vec<Value> = self
+                .aggregates
+                .iter()
+                .map(|(agg_expr, _)| match agg_expr {
+                    Expr::Aggregate { name, .. } => {
+                        use yachtsql_ir::FunctionName;
+                        match name {
+                            FunctionName::Count => Value::int64(0),
+                            _ => Value::null(),
+                        }
+                    }
+                    _ => Value::null(),
+                })
+                .collect();
+
+            let mut columns = Vec::new();
+
+            for (idx, field) in self.schema.fields().iter().enumerate() {
+                let mut column = Column::new(&field.data_type, 1);
+                column.push(empty_agg_values.get(idx).cloned().unwrap_or(Value::null()))?;
+                columns.push(column);
+            }
+
+            return Ok(vec![Table::new(self.schema.clone(), columns)?]);
+        }
 
         if input_batches.is_empty() {
             return Ok(vec![Table::empty(self.schema.clone())]);

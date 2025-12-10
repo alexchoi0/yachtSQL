@@ -333,11 +333,29 @@ impl QueryExecutor {
         Ok(())
     }
 
+    fn preprocess_bigquery_null_treatment(sql: &str) -> String {
+        use regex::Regex;
+
+        let pattern = Regex::new(
+            r"(?i)\b(APPROX_QUANTILES\s*\([^)]*?)\s+(IGNORE\s+NULLS|RESPECT\s+NULLS)(\s*,)",
+        )
+        .unwrap();
+
+        pattern.replace_all(sql, "$1$3").to_string()
+    }
+
     pub fn execute_sql(&mut self, sql: &str) -> Result<Table> {
         use yachtsql_parser::validator::CustomStatement;
         use yachtsql_parser::{Parser, Statement};
 
         Self::validate_sql_before_parse(sql, self.dialect())?;
+
+        let sql = if self.dialect() == DialectType::BigQuery {
+            std::borrow::Cow::Owned(Self::preprocess_bigquery_null_treatment(sql))
+        } else {
+            std::borrow::Cow::Borrowed(sql)
+        };
+        let sql = sql.as_ref();
 
         let _registry_guard =
             crate::query_executor::evaluator::physical_plan::ProjectionWithExprExec::enter_feature_registry_context(

@@ -1718,11 +1718,39 @@ impl LogicalToPhysicalPlanner {
             }
 
             Expr::Literal(yachtsql_ir::expr::LiteralValue::Null) => DataType::Unknown,
+            Expr::Literal(yachtsql_ir::expr::LiteralValue::Int64(_)) => DataType::Int64,
+            Expr::Literal(yachtsql_ir::expr::LiteralValue::Float64(_)) => DataType::Float64,
+            Expr::Literal(yachtsql_ir::expr::LiteralValue::String(_)) => DataType::String,
+            Expr::Literal(yachtsql_ir::expr::LiteralValue::Boolean(_)) => DataType::Bool,
 
             Expr::Cast { data_type, .. } => self.cast_data_type_to_data_type(data_type),
 
+            Expr::Function { name, args } => {
+                use yachtsql_ir::FunctionName;
+                match name {
+                    FunctionName::GenerateArray => {
+                        if let Some(first) = args.first() {
+                            self.infer_unnest_element_type(first)
+                        } else {
+                            DataType::Int64
+                        }
+                    }
+                    FunctionName::GenerateDateArray => DataType::Date,
+                    FunctionName::GenerateTimestampArray => DataType::Timestamp,
+                    FunctionName::Custom(s) if s.eq_ignore_ascii_case("GENERATE_DATE_ARRAY") => {
+                        DataType::Date
+                    }
+                    FunctionName::Custom(s)
+                        if s.eq_ignore_ascii_case("GENERATE_TIMESTAMP_ARRAY") =>
+                    {
+                        DataType::Timestamp
+                    }
+                    _ => DataType::Unknown,
+                }
+            }
+
             _ => panic!(
-                "infer_aggregate_result_type: unhandled expression type: {:?}",
+                "infer_unnest_element_type: unhandled expression type: {:?}",
                 expr
             ),
         }

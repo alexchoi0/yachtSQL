@@ -3519,7 +3519,7 @@ impl FunctionName {
                 | Self::Entropy
                 | Self::MeanZscore
                 | Self::UniqUpdown
-        )
+        ) || matches!(self, Self::Custom(name) if is_custom_aggregate(name))
     }
 
     pub fn is_window(&self) -> bool {
@@ -3549,6 +3549,17 @@ impl FunctionName {
     pub fn is_scalar(&self) -> bool {
         !self.is_aggregate() && !self.is_window()
     }
+}
+
+fn is_custom_aggregate(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    matches!(
+        upper.as_str(),
+        "HLL_COUNT.MERGE"
+            | "HLL_COUNT_MERGE"
+            | "HLL_COUNT.MERGE_PARTIAL"
+            | "HLL_COUNT_MERGE_PARTIAL"
+    )
 }
 
 impl std::fmt::Display for FunctionName {

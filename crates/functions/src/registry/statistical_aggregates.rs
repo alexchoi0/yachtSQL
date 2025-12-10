@@ -10,8 +10,7 @@ use crate::aggregate::array_agg::{ArrayAggFunction, ArrayConcatAggFunction};
 use crate::aggregate::bigquery::{
     AnyValueFunction as BqAnyValueFunction, ArrayAggDistinctFunction,
     ArrayConcatAggFunction as BqArrayConcatAggFunction, CorrFunction as BqCorrFunction,
-    HllCountExtractFunction, HllCountInitFunction, HllCountMergeFunction,
-    StddevFunction as BqStddevFunction, StringAggDistinctFunction,
+    HllCountMergeFunction, StddevFunction as BqStddevFunction, StringAggDistinctFunction,
     VarianceFunction as BqVarianceFunction,
 };
 use crate::aggregate::boolean_bitwise::{
@@ -297,9 +296,7 @@ pub(super) fn register(registry: &mut FunctionRegistry) {
     }
 
     let bigquery_functions: Vec<Rc<dyn AggregateFunction>> = vec![
-        Rc::new(HllCountInitFunction::default()),
         Rc::new(HllCountMergeFunction),
-        Rc::new(HllCountExtractFunction),
         Rc::new(BqCorrFunction),
         Rc::new(BqStddevFunction),
         Rc::new(BqVarianceFunction),
@@ -312,6 +309,15 @@ pub(super) fn register(registry: &mut FunctionRegistry) {
     for func in bigquery_functions {
         registry.register_aggregate(func.name().to_string(), func);
     }
+
+    registry.register_aggregate(
+        "HLL_COUNT.MERGE".to_string(),
+        Rc::new(HllCountMergeFunction),
+    );
+    registry.register_aggregate(
+        "HLL_COUNT.MERGE_PARTIAL".to_string(),
+        Rc::new(HllCountMergeFunction),
+    );
 
     let window_functions: Vec<Rc<dyn AggregateFunction>> = vec![
         Rc::new(RowNumberFunction),

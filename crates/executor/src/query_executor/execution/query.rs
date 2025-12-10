@@ -1020,13 +1020,42 @@ impl QueryExecutor {
             Expr::Function(func) => {
                 let func_name = func.name.to_string().to_uppercase();
                 match func_name.as_str() {
-                    "UPPER" | "LOWER" | "CONCAT" | "SUBSTRING" | "SUBSTR" | "TRIM" | "LTRIM"
-                    | "RTRIM" | "REPLACE" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REPEAT"
-                    | "FORMAT" | "CHR" | "INITCAP" | "TO_CHAR" | "TO_HEX" | "MD5" | "SHA256"
-                    | "SHA512" | "BASE64_ENCODE" | "BASE64_DECODE" | "BTRIM" | "CONCAT_WS"
-                    | "QUOTE_NULLABLE" | "REGEXP_SUBSTR" | "NORMALIZE" | "OVERLAY" => {
-                        Ok(DataType::String)
-                    }
+                    "UPPER"
+                    | "LOWER"
+                    | "CONCAT"
+                    | "SUBSTRING"
+                    | "SUBSTR"
+                    | "TRIM"
+                    | "LTRIM"
+                    | "RTRIM"
+                    | "REPLACE"
+                    | "LEFT"
+                    | "RIGHT"
+                    | "LPAD"
+                    | "RPAD"
+                    | "REPEAT"
+                    | "FORMAT"
+                    | "CHR"
+                    | "INITCAP"
+                    | "TO_CHAR"
+                    | "TO_HEX"
+                    | "MD5"
+                    | "SHA256"
+                    | "SHA512"
+                    | "BASE64_ENCODE"
+                    | "BASE64_DECODE"
+                    | "BTRIM"
+                    | "CONCAT_WS"
+                    | "QUOTE_NULLABLE"
+                    | "REGEXP_SUBSTR"
+                    | "NORMALIZE"
+                    | "OVERLAY"
+                    | "HLL_COUNT.INIT"
+                    | "HLL_COUNT_INIT"
+                    | "HLL_COUNT.MERGE"
+                    | "HLL_COUNT_MERGE"
+                    | "HLL_COUNT.MERGE_PARTIAL"
+                    | "HLL_COUNT_MERGE_PARTIAL" => Ok(DataType::String),
 
                     "REVERSE" => {
                         if let sqlparser::ast::FunctionArguments::List(args) = &func.args {
@@ -1048,7 +1077,9 @@ impl QueryExecutor {
                     "LENGTH" | "LEN" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "OCTET_LENGTH"
                     | "ASCII" | "POSITION" | "STRPOS" | "INSTR" | "BIT_COUNT" | "ARRAY_LENGTH"
                     | "CARDINALITY" | "ARRAY_POSITION" | "REGEXP_COUNT" | "REGEXP_INSTR"
-                    | "BIT_LENGTH" => Ok(DataType::Int64),
+                    | "BIT_LENGTH" | "HLL_COUNT.EXTRACT" | "HLL_COUNT_EXTRACT" => {
+                        Ok(DataType::Int64)
+                    }
 
                     "CURRENT_DATE" | "DATE" | "DATE_TRUNC" => Ok(DataType::Date),
                     "CURRENT_TIMESTAMP" | "NOW" | "TIMESTAMP" => Ok(DataType::Timestamp),
@@ -4031,14 +4062,10 @@ impl QueryExecutor {
                         | "ARRAY_AGG_DISTINCT"
                         | "ARRAY_CONCAT_AGG"
                         | "STRING_AGG_DISTINCT"
-                        | "HLL_COUNT_INIT"
-                        | "HLL_COUNT.INIT"
                         | "HLL_COUNT_MERGE"
                         | "HLL_COUNT.MERGE"
                         | "HLL_COUNT_MERGE_PARTIAL"
                         | "HLL_COUNT.MERGE_PARTIAL"
-                        | "HLL_COUNT_EXTRACT"
-                        | "HLL_COUNT.EXTRACT"
                         | "JSON_AGG"
                         | "JSONB_AGG"
                         | "JSON_OBJECT_AGG"

@@ -119,7 +119,7 @@ impl ProjectionWithExprExec {
         Self::infer_array_type_from_first_arg(args, schema)
     }
 
-    fn cast_type_to_data_type(
+    pub(crate) fn cast_type_to_data_type(
         cast_type: &crate::optimizer::expr::CastDataType,
     ) -> crate::types::DataType {
         use yachtsql_core::types::DataType;
@@ -169,7 +169,7 @@ impl ProjectionWithExprExec {
         }
     }
 
-    fn infer_binary_op_type(
+    pub(crate) fn infer_binary_op_type(
         op: &crate::optimizer::expr::BinaryOp,
         left_type: Option<crate::types::DataType>,
         right_type: Option<crate::types::DataType>,
@@ -455,7 +455,7 @@ impl ProjectionWithExprExec {
         Some(DataType::Bool)
     }
 
-    fn infer_function_type(
+    pub(crate) fn infer_function_type(
         name: &yachtsql_ir::FunctionName,
         args: &[crate::optimizer::expr::Expr],
         schema: &Schema,
@@ -605,6 +605,26 @@ impl ProjectionWithExprExec {
             }
 
             FunctionName::Custom(s) if s == "INET_SAME_FAMILY" => Some(DataType::Bool),
+
+            FunctionName::Custom(s)
+                if matches!(
+                    s.as_str(),
+                    "HLL_COUNT.INIT"
+                        | "HLL_COUNT_INIT"
+                        | "HLL_COUNT.MERGE"
+                        | "HLL_COUNT_MERGE"
+                        | "HLL_COUNT.MERGE_PARTIAL"
+                        | "HLL_COUNT_MERGE_PARTIAL"
+                ) =>
+            {
+                Some(DataType::String)
+            }
+
+            FunctionName::Custom(s)
+                if matches!(s.as_str(), "HLL_COUNT.EXTRACT" | "HLL_COUNT_EXTRACT") =>
+            {
+                Some(DataType::Int64)
+            }
 
             FunctionName::Custom(s) if s == "SET_MASKLEN" => {
                 Self::infer_first_arg_type(args, schema).or(Some(DataType::Inet))
