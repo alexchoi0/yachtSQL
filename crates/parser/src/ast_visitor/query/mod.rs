@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use sqlparser::ast::{self, CteAsMaterialized};
 use yachtsql_core::error::{Error, Result};
-use yachtsql_ir::expr::{Expr, LiteralValue};
+use yachtsql_ir::expr::{BinaryOp, Expr, LiteralValue};
 use yachtsql_ir::plan::{JoinType, LogicalPlan, PlanNode, SampleSize, SamplingMethod};
 
 use super::{AliasScopeGuard, GroupingExtension, LogicalPlanBuilder};
@@ -2703,21 +2703,7 @@ impl LogicalPlanBuilder {
         let size = match &sample_info.quantity {
             Some(quantity) => {
                 let value = self.sql_expr_to_expr(&quantity.value)?;
-                let num = match value {
-                    Expr::Literal(LiteralValue::Int64(n)) => n as f64,
-                    Expr::Literal(LiteralValue::Float64(f)) => f,
-                    Expr::Literal(LiteralValue::Numeric(ref d)) => {
-                        use rust_decimal::prelude::ToPrimitive;
-                        d.to_f64().ok_or_else(|| {
-                            Error::invalid_query(format!("Invalid TABLESAMPLE size: {}", d))
-                        })?
-                    }
-                    _ => {
-                        return Err(Error::invalid_query(
-                            "TABLESAMPLE size must be a numeric literal".to_string(),
-                        ));
-                    }
-                };
+                let num = extract_sample_size_value(&value)?;
                 match quantity.unit {
                     Some(ast::TableSampleUnit::Rows) => SampleSize::Rows(num as usize),
                     Some(ast::TableSampleUnit::Percent) | None => SampleSize::Percent(num),
@@ -2749,5 +2735,42 @@ impl LogicalPlanBuilder {
             size,
             seed,
         })
+    }
+}
+
+fn extract_sample_size_value(expr: &Expr) -> Result<f64> {
+    use rust_decimal::prelude::ToPrimitive;
+
+    match expr {
+        Expr::Literal(LiteralValue::Int64(n)) => Ok(*n as f64),
+        Expr::Literal(LiteralValue::Float64(f)) => Ok(*f),
+        Expr::Literal(LiteralValue::Numeric(d)) => d
+            .to_f64()
+            .ok_or_else(|| Error::invalid_query(format!("Invalid TABLESAMPLE size: {}", d))),
+        Expr::BinaryOp { left, op, right } => {
+            let left_val = extract_sample_size_value(left)?;
+            let right_val = extract_sample_size_value(right)?;
+            match op {
+                BinaryOp::Divide => {
+                    if right_val == 0.0 {
+                        Err(Error::invalid_query(
+                            "Division by zero in TABLESAMPLE size".to_string(),
+                        ))
+                    } else {
+                        Ok(left_val / right_val)
+                    }
+                }
+                BinaryOp::Multiply => Ok(left_val * right_val),
+                BinaryOp::Add => Ok(left_val + right_val),
+                BinaryOp::Subtract => Ok(left_val - right_val),
+                _ => Err(Error::invalid_query(format!(
+                    "Unsupported operator in TABLESAMPLE size: {:?}",
+                    op
+                ))),
+            }
+        }
+        _ => Err(Error::invalid_query(
+            "TABLESAMPLE size must be a numeric expression".to_string(),
+        )),
     }
 }
