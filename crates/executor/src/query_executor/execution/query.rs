@@ -1269,6 +1269,11 @@ impl QueryExecutor {
             }
 
             Expr::Interval(_) => Ok(DataType::Interval),
+            Expr::Overlay { .. } => Ok(DataType::String),
+            Expr::Position { .. } => Ok(DataType::Int64),
+            Expr::Trim { .. } => Ok(DataType::String),
+            Expr::Substring { .. } => Ok(DataType::String),
+            Expr::Extract { .. } => Ok(DataType::Int64),
             _ => panic!(
                 "infer_expression_type: unhandled expression type: {:?}",
                 expr
