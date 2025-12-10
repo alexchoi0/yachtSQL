@@ -24,6 +24,7 @@ use crate::system_schema::{SystemSchemaProvider, SystemTable};
 #[allow(dead_code)]
 pub struct LogicalToPhysicalPlanner {
     storage: Rc<RefCell<yachtsql_storage::Storage>>,
+    transaction_manager: Option<Rc<RefCell<yachtsql_storage::TransactionManager>>>,
     dialect: crate::DialectType,
     cte_plans: RefCell<HashMap<String, (Rc<dyn ExecutionPlan>, Option<Vec<String>>)>>,
 }
@@ -977,6 +978,7 @@ impl LogicalToPhysicalPlanner {
     pub fn new(storage: Rc<RefCell<yachtsql_storage::Storage>>) -> Self {
         Self {
             storage,
+            transaction_manager: None,
             dialect: crate::DialectType::BigQuery,
             cte_plans: RefCell::new(HashMap::new()),
         }
@@ -984,6 +986,14 @@ impl LogicalToPhysicalPlanner {
 
     pub fn with_dialect(mut self, dialect: crate::DialectType) -> Self {
         self.dialect = dialect;
+        self
+    }
+
+    pub fn with_transaction_manager(
+        mut self,
+        tm: Rc<RefCell<yachtsql_storage::TransactionManager>>,
+    ) -> Self {
+        self.transaction_manager = Some(tm);
         self
     }
 
@@ -1157,13 +1167,25 @@ impl LogicalToPhysicalPlanner {
 
                 let schema = self.expand_schema_custom_types(&base_schema);
 
-                Ok(Rc::new(TableScanExec::new_with_final(
-                    schema,
-                    table_name.clone(),
-                    Rc::clone(&self.storage),
-                    *only,
-                    *final_modifier,
-                )))
+                let scan_exec = match &self.transaction_manager {
+                    Some(tm) => TableScanExec::new_with_transaction(
+                        schema,
+                        table_name.clone(),
+                        Rc::clone(&self.storage),
+                        Rc::clone(tm),
+                        *only,
+                        *final_modifier,
+                    ),
+                    None => TableScanExec::new_with_final(
+                        schema,
+                        table_name.clone(),
+                        Rc::clone(&self.storage),
+                        *only,
+                        *final_modifier,
+                    ),
+                };
+
+                Ok(Rc::new(scan_exec))
             }
 
             PlanNode::IndexScan {

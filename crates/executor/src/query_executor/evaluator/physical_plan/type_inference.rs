@@ -2528,6 +2528,10 @@ impl ProjectionWithExprExec {
 
         match expr {
             Expr::Column { name, table } => {
+                if let Some(sys_type) = Self::get_system_column_type(name) {
+                    return Some(sys_type);
+                }
+
                 if let Some(table_name) = table {
                     let qualified_name = format!("{}.{}", table_name, name);
                     if let Some(field) = schema.field(&qualified_name) {
@@ -2680,6 +2684,7 @@ impl ProjectionWithExprExec {
         use yachtsql_optimizer::expr::Expr;
 
         match expr {
+            Expr::Column { name, .. } => Self::get_system_column_type(name),
             Expr::Literal(lit) => Self::infer_literal_type(lit),
             Expr::BinaryOp { left, op, right } => {
                 let left_type = Self::infer_expr_type(left);
@@ -2760,6 +2765,16 @@ impl ProjectionWithExprExec {
                     yachtsql_core::types::coercion::CoercionRules::find_common_type(&types).ok()
                 }
             }
+            _ => None,
+        }
+    }
+
+    fn get_system_column_type(name: &str) -> Option<yachtsql_core::types::DataType> {
+        match name {
+            "ctid" => Some(yachtsql_core::types::DataType::Tid),
+            "xmin" | "xmax" => Some(yachtsql_core::types::DataType::Xid),
+            "cmin" | "cmax" => Some(yachtsql_core::types::DataType::Cid),
+            "tableoid" => Some(yachtsql_core::types::DataType::Oid),
             _ => None,
         }
     }

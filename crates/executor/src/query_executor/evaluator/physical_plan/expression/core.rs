@@ -122,6 +122,12 @@ impl ProjectionWithExprExec {
         row_idx: usize,
         occurrence_index: usize,
     ) -> Result<Value> {
+        if occurrence_index == 0 {
+            if let Some(system_value) = Self::evaluate_system_column(name, row_idx) {
+                return Ok(system_value);
+            }
+        }
+
         let col_idx = Self::find_column_by_occurrence(batch.schema(), name, occurrence_index)?;
         batch
             .column(col_idx)
@@ -1661,5 +1667,20 @@ impl ProjectionWithExprExec {
         }
 
         None
+    }
+
+    pub(in crate::query_executor::evaluator::physical_plan) fn evaluate_system_column(
+        name: &str,
+        row_idx: usize,
+    ) -> Option<Value> {
+        match name {
+            "ctid" => Some(Value::int64((row_idx + 1) as i64)),
+            "xmin" => Some(Value::int64(1)),
+            "xmax" => Some(Value::int64(0)),
+            "cmin" => Some(Value::int64(0)),
+            "cmax" => Some(Value::int64(0)),
+            "tableoid" => Some(Value::int64(0)),
+            _ => None,
+        }
     }
 }

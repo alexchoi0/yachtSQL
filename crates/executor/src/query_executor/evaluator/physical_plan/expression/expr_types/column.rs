@@ -10,6 +10,10 @@ impl ProjectionWithExprExec {
         batch: &Table,
         row_idx: usize,
     ) -> Result<Value> {
+        if let Some(system_value) = Self::evaluate_system_column(name, row_idx) {
+            return Ok(system_value);
+        }
+
         let schema = batch.schema();
         let col_idx = schema
             .field_index(name)

@@ -545,7 +545,8 @@ impl QueryExecutor {
         let planner = crate::query_executor::logical_to_physical::LogicalToPhysicalPlanner::new(
             Rc::clone(&self.storage),
         )
-        .with_dialect(self.dialect());
+        .with_dialect(self.dialect())
+        .with_transaction_manager(Rc::clone(&self.transaction_manager));
 
         let logical_plan_for_conversion = yachtsql_ir::plan::LogicalPlan::new(optimized_plan);
         let physical_plan = planner.create_physical_plan(&logical_plan_for_conversion)?;
