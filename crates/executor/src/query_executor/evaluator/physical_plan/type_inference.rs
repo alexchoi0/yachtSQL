@@ -1348,8 +1348,13 @@ impl ProjectionWithExprExec {
             FunctionName::Format
             | FunctionName::QuoteIdent
             | FunctionName::QuoteLiteral
+            | FunctionName::QuoteNullable
+            | FunctionName::Overlay
+            | FunctionName::Normalize
+            | FunctionName::ConcatWs
             | FunctionName::RegexpExtract
             | FunctionName::RegexpReplace
+            | FunctionName::RegexpSubstr
             | FunctionName::ReplaceRegexpAll
             | FunctionName::ReplaceRegexpOne => Some(DataType::String),
 
@@ -1467,17 +1472,23 @@ impl ProjectionWithExprExec {
             | FunctionName::CharacterLength
             | FunctionName::OctetLength
             | FunctionName::ByteLength
+            | FunctionName::BitLength
             | FunctionName::Lengthb
             | FunctionName::Position
             | FunctionName::Strpos
             | FunctionName::Instr
             | FunctionName::Locate
             | FunctionName::Ascii
-            | FunctionName::Ord => Some(DataType::Int64),
+            | FunctionName::Ord
+            | FunctionName::RegexpCount
+            | FunctionName::RegexpInstr => Some(DataType::Int64),
 
-            FunctionName::StartsWith | FunctionName::EndsWith | FunctionName::RegexpContains => {
-                Some(DataType::Bool)
-            }
+            FunctionName::StartsWith
+            | FunctionName::EndsWith
+            | FunctionName::RegexpContains
+            | FunctionName::IsNormalized => Some(DataType::Bool),
+
+            FunctionName::ParseIdent => Some(DataType::Array(Box::new(DataType::String))),
 
             FunctionName::Md5
             | FunctionName::Md5Hash

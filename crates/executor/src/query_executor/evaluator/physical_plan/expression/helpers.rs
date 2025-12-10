@@ -257,6 +257,54 @@ impl ProjectionWithExprExec {
         }
     }
 
+    fn format_value_as_string(arg: &crate::types::Value) -> String {
+        if arg.is_null() {
+            "NULL".to_string()
+        } else if let Some(s) = arg.as_str() {
+            s.to_string()
+        } else if let Some(i) = arg.as_i64() {
+            i.to_string()
+        } else if let Some(f) = arg.as_f64() {
+            f.to_string()
+        } else if let Some(b) = arg.as_bool() {
+            b.to_string()
+        } else if let Some(d) = arg.as_date() {
+            format!("{}", d)
+        } else if let Some(t) = arg.as_timestamp() {
+            format!("{}", t)
+        } else {
+            arg.to_string()
+        }
+    }
+
+    fn format_value_as_identifier(arg: &crate::types::Value) -> String {
+        if arg.is_null() {
+            "NULL".to_string()
+        } else {
+            let s = if let Some(s) = arg.as_str() {
+                s.to_string()
+            } else {
+                arg.to_string()
+            };
+            let escaped = s.replace('"', "\"\"");
+            format!("\"{}\"", escaped)
+        }
+    }
+
+    fn format_value_as_literal(arg: &crate::types::Value) -> String {
+        if arg.is_null() {
+            "NULL".to_string()
+        } else {
+            let s = if let Some(s) = arg.as_str() {
+                s.to_string()
+            } else {
+                arg.to_string()
+            };
+            let escaped = s.replace('\'', "''");
+            format!("'{}'", escaped)
+        }
+    }
+
     pub(super) fn apply_format_string(
         format_str: &str,
         args: &[crate::types::Value],
@@ -265,7 +313,7 @@ impl ProjectionWithExprExec {
 
         let mut result = String::new();
         let mut chars = format_str.chars().peekable();
-        let mut arg_idx = 0;
+        let mut sequential_arg_idx = 0;
 
         while let Some(ch) = chars.next() {
             if ch == '%' {
@@ -279,6 +327,7 @@ impl ProjectionWithExprExec {
 
                 let mut width: Option<usize> = None;
                 let mut precision: Option<usize> = None;
+                let mut positional_arg: Option<usize> = None;
                 let mut num_buf = String::new();
 
                 while let Some(&next_ch) = chars.peek() {
@@ -288,7 +337,14 @@ impl ProjectionWithExprExec {
                         break;
                     }
                 }
-                if !num_buf.is_empty() {
+
+                if let Some(&'$') = chars.peek() {
+                    chars.next();
+                    if !num_buf.is_empty() {
+                        positional_arg = num_buf.parse().ok();
+                    }
+                    num_buf.clear();
+                } else if !num_buf.is_empty() {
                     width = num_buf.parse().ok();
                     num_buf.clear();
                 }
@@ -308,6 +364,20 @@ impl ProjectionWithExprExec {
                 }
 
                 if let Some(spec) = chars.next() {
+                    let arg_idx = match positional_arg {
+                        Some(pos) if pos > 0 => pos - 1,
+                        Some(_) => {
+                            return Err(crate::error::Error::invalid_query(
+                                "FORMAT: positional argument must be greater than 0".to_string(),
+                            ));
+                        }
+                        None => {
+                            let idx = sequential_arg_idx;
+                            sequential_arg_idx += 1;
+                            idx
+                        }
+                    };
+
                     if arg_idx >= args.len() {
                         return Err(crate::error::Error::invalid_query(format!(
                             "FORMAT: not enough arguments for format string (expected at least {})",
@@ -316,28 +386,11 @@ impl ProjectionWithExprExec {
                     }
 
                     let arg = &args[arg_idx];
-                    arg_idx += 1;
 
                     let formatted = match spec {
-                        's' => {
-                            if arg.is_null() {
-                                "NULL".to_string()
-                            } else if let Some(s) = arg.as_str() {
-                                s.to_string()
-                            } else if let Some(i) = arg.as_i64() {
-                                i.to_string()
-                            } else if let Some(f) = arg.as_f64() {
-                                f.to_string()
-                            } else if let Some(b) = arg.as_bool() {
-                                b.to_string()
-                            } else if let Some(d) = arg.as_date() {
-                                format!("{}", d)
-                            } else if let Some(t) = arg.as_timestamp() {
-                                format!("{}", t)
-                            } else {
-                                arg.to_string()
-                            }
-                        }
+                        's' => Self::format_value_as_string(arg),
+                        'I' => Self::format_value_as_identifier(arg),
+                        'L' => Self::format_value_as_literal(arg),
                         'd' | 'i' => {
                             if arg.is_null() {
                                 "NULL".to_string()

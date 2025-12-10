@@ -865,6 +865,17 @@ impl LogicalPlanBuilder {
         expr.clone()
     }
 
+    fn convert_normalization_form_column_to_string(expr: &Expr) -> Expr {
+        if let Expr::Column { name, table: None } = expr {
+            let upper = name.to_uppercase();
+            let forms = ["NFC", "NFD", "NFKC", "NFKD"];
+            if forms.contains(&upper.as_str()) {
+                return Expr::Literal(LiteralValue::String(upper));
+            }
+        }
+        expr.clone()
+    }
+
     fn expand_udf_call(
         &self,
         name_str: &str,
@@ -1258,7 +1269,21 @@ impl LogicalPlanBuilder {
                 }
                 _ => None,
             },
-            DialectType::PostgreSQL => None,
+            DialectType::PostgreSQL => match name_str.to_uppercase().as_str() {
+                "NORMALIZE" | "IS_NORMALIZED" => {
+                    if args.len() == 2 {
+                        let text_arg = args[0].clone();
+                        let form_arg = Self::convert_normalization_form_column_to_string(&args[1]);
+                        Some(Expr::Function {
+                            name: yachtsql_ir::FunctionName::parse(name_str),
+                            args: vec![text_arg, form_arg],
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
         };
 
         Ok(normalized)
