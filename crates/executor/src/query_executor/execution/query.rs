@@ -1355,7 +1355,7 @@ impl QueryExecutor {
                 table_id
             );
             let info_table = InformationSchemaTable::from_str(&table_id)?;
-            let provider = InformationSchemaProvider::new(Rc::clone(&self.storage));
+            let provider = InformationSchemaProvider::new(Rc::clone(&self.storage), self.dialect());
             let (schema, rows) = provider.query(info_table)?;
 
             let filtered_rows = if let Some(ref where_expr) = select.selection {
