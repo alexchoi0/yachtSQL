@@ -753,6 +753,25 @@ impl LogicalPlanBuilder {
                 })
             }
 
+            ast::Expr::Overlay {
+                expr,
+                overlay_what,
+                overlay_from,
+                overlay_for,
+            } => {
+                let string_expr = self.sql_expr_to_expr(expr)?;
+                let replacement_expr = self.sql_expr_to_expr(overlay_what)?;
+                let start_expr = self.sql_expr_to_expr(overlay_from)?;
+                let mut args = vec![string_expr, replacement_expr, start_expr];
+                if let Some(length_expr) = overlay_for {
+                    args.push(self.sql_expr_to_expr(length_expr)?);
+                }
+                Ok(Expr::Function {
+                    name: yachtsql_ir::FunctionName::parse("OVERLAY"),
+                    args,
+                })
+            }
+
             _ => Err(Error::unsupported_feature(format!(
                 "Expression type not supported: {:?}",
                 expr

@@ -609,6 +609,16 @@ impl ProjectionWithExprExec {
                 | FunctionName::NormalizeUtf8Nfd
                 | FunctionName::NormalizeUtf8Nfkc
                 | FunctionName::NormalizeUtf8Nfkd
+                | FunctionName::BitLength
+                | FunctionName::ConcatWs
+                | FunctionName::QuoteNullable
+                | FunctionName::RegexpCount
+                | FunctionName::RegexpInstr
+                | FunctionName::RegexpSubstr
+                | FunctionName::ParseIdent
+                | FunctionName::Normalize
+                | FunctionName::IsNormalized
+                | FunctionName::Overlay
         ) {
             return Self::evaluate_string_function(func_name, args, batch, row_idx);
         }

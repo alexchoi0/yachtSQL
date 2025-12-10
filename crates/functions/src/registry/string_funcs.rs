@@ -18,6 +18,7 @@ pub(super) fn register(registry: &mut FunctionRegistry) {
     register_regex_functions(registry);
     register_character_functions(registry);
     register_formatting_functions(registry);
+    register_postgres_text_functions(registry);
     register_conversion_functions(registry);
 }
 
@@ -1354,6 +1355,44 @@ fn register_character_functions(registry: &mut FunctionRegistry) {
     );
 }
 
+fn format_value_as_string(v: &Value) -> String {
+    if v.is_null() {
+        "NULL".to_string()
+    } else if let Some(s) = v.as_str() {
+        s.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+fn format_value_as_identifier(v: &Value) -> String {
+    if v.is_null() {
+        "NULL".to_string()
+    } else {
+        let s = if let Some(s) = v.as_str() {
+            s.to_string()
+        } else {
+            v.to_string()
+        };
+        let escaped = s.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    }
+}
+
+fn format_value_as_literal(v: &Value) -> String {
+    if v.is_null() {
+        "NULL".to_string()
+    } else {
+        let s = if let Some(s) = v.as_str() {
+            s.to_string()
+        } else {
+            v.to_string()
+        };
+        let escaped = s.replace('\'', "''");
+        format!("'{}'", escaped)
+    }
+}
+
 fn register_formatting_functions(registry: &mut FunctionRegistry) {
     registry.register_scalar(
         "FORMAT".to_string(),
@@ -1393,88 +1432,97 @@ fn register_formatting_functions(registry: &mut FunctionRegistry) {
                             if next_ch == '%' {
                                 chars.next();
                                 result.push('%');
-                            } else {
-                                let mut spec = String::new();
-                                spec.push('%');
+                                continue;
+                            }
 
-                                while let Some(&c) = chars.peek() {
-                                    if c.is_ascii_digit()
-                                        || c == '.'
-                                        || c == '-'
-                                        || c == '+'
-                                        || c == ' '
-                                    {
-                                        spec.push(c);
-                                        chars.next();
-                                    } else {
-                                        break;
+                            let mut positional_arg: Option<usize> = None;
+                            let mut num_str = String::new();
+
+                            while let Some(&c) = chars.peek() {
+                                if c.is_ascii_digit() {
+                                    num_str.push(c);
+                                    chars.next();
+                                } else if c == '$' && !num_str.is_empty() {
+                                    chars.next();
+                                    positional_arg = num_str.parse::<usize>().ok();
+                                    num_str.clear();
+                                    break;
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            while let Some(&c) = chars.peek() {
+                                if c == '.'
+                                    || c == '-'
+                                    || c == '+'
+                                    || c == ' '
+                                    || c.is_ascii_digit()
+                                {
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            if let Some(fmt_type) = chars.next() {
+                                let actual_arg_idx = match positional_arg {
+                                    Some(pos) => pos,
+                                    None => {
+                                        let idx = arg_idx;
+                                        arg_idx += 1;
+                                        idx
                                     }
+                                };
+
+                                if actual_arg_idx >= args.len() || actual_arg_idx == 0 {
+                                    return Err(Error::invalid_query(
+                                        "FORMAT: not enough arguments for format string"
+                                            .to_string(),
+                                    ));
                                 }
 
-                                if let Some(fmt_type) = chars.next() {
-                                    if arg_idx >= args.len() {
-                                        return Err(Error::invalid_query(
-                                            "FORMAT: not enough arguments for format string"
-                                                .to_string(),
-                                        ));
+                                let arg = &args[actual_arg_idx];
+
+                                let formatted = match fmt_type {
+                                    's' => format_value_as_string(arg),
+                                    'I' => format_value_as_identifier(arg),
+                                    'L' => format_value_as_literal(arg),
+                                    'd' | 'i' => {
+                                        if arg.is_null() {
+                                            "NULL".to_string()
+                                        } else if let Some(i) = arg.as_i64() {
+                                            i.to_string()
+                                        } else {
+                                            return Err(Error::TypeMismatch {
+                                                expected: "INT64".to_string(),
+                                                actual: arg.data_type().to_string(),
+                                            });
+                                        }
                                     }
+                                    'f' => {
+                                        if arg.is_null() {
+                                            "NULL".to_string()
+                                        } else if let Some(f) = arg.as_f64() {
+                                            f.to_string()
+                                        } else {
+                                            return Err(Error::TypeMismatch {
+                                                expected: "FLOAT64".to_string(),
+                                                actual: arg.data_type().to_string(),
+                                            });
+                                        }
+                                    }
+                                    _ => {
+                                        if positional_arg.is_none() {
+                                            arg_idx -= 1;
+                                        }
+                                        result.push('%');
+                                        result.push(fmt_type);
+                                        continue;
+                                    }
+                                };
 
-                                    let arg = &args[arg_idx];
-                                    arg_idx += 1;
-
-                                    let formatted = match fmt_type {
-                                        's' => {
-                                            if arg.is_null() {
-                                                "NULL".to_string()
-                                            } else if let Some(s) = arg.as_str() {
-                                                s.to_string()
-                                            } else {
-                                                arg.to_string()
-                                            }
-                                        }
-                                        'd' | 'i' => {
-                                            if arg.is_null() {
-                                                "NULL".to_string()
-                                            } else if let Some(i) = arg.as_i64() {
-                                                i.to_string()
-                                            } else {
-                                                return Err(Error::TypeMismatch {
-                                                    expected: "INT64".to_string(),
-                                                    actual: arg.data_type().to_string(),
-                                                });
-                                            }
-                                        }
-                                        'f' => {
-                                            if arg.is_null() {
-                                                "NULL".to_string()
-                                            } else if let Some(f) = arg.as_f64() {
-                                                if let Some(dot_pos) = spec.rfind('.') {
-                                                    if let Ok(precision) =
-                                                        spec[dot_pos + 1..].parse::<usize>()
-                                                    {
-                                                        format!("{:.prec$}", f, prec = precision)
-                                                    } else {
-                                                        f.to_string()
-                                                    }
-                                                } else {
-                                                    f.to_string()
-                                                }
-                                            } else {
-                                                return Err(Error::TypeMismatch {
-                                                    expected: "FLOAT64".to_string(),
-                                                    actual: arg.data_type().to_string(),
-                                                });
-                                            }
-                                        }
-                                        _ => {
-                                            result.push('%');
-                                            result.push(fmt_type);
-                                            continue;
-                                        }
-                                    };
-
-                                    result.push_str(&formatted);
-                                }
+                                result.push_str(&formatted);
                             }
                         } else {
                             result.push(ch);
@@ -1557,6 +1605,350 @@ fn register_formatting_functions(registry: &mut FunctionRegistry) {
                         actual: args[0].data_type().to_string(),
                     })
                 }
+            },
+        }),
+    );
+}
+
+fn register_postgres_text_functions(registry: &mut FunctionRegistry) {
+    registry.register_scalar(
+        "BTRIM".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "BTRIM".to_string(),
+            arg_types: vec![DataType::String],
+            return_type: DataType::String,
+            variadic: true,
+            evaluator: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(Error::invalid_query(
+                        "BTRIM requires 1 or 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = match args[0].as_str() {
+                    Some(s) => s,
+                    None => {
+                        return Err(Error::TypeMismatch {
+                            expected: "STRING".to_string(),
+                            actual: args[0].data_type().to_string(),
+                        });
+                    }
+                };
+                let chars_to_trim = if args.len() == 2 {
+                    if args[1].is_null() {
+                        return Ok(Value::null());
+                    }
+                    match args[1].as_str() {
+                        Some(c) => c,
+                        None => {
+                            return Err(Error::TypeMismatch {
+                                expected: "STRING".to_string(),
+                                actual: args[1].data_type().to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    " "
+                };
+                let result = s.trim_matches(|c: char| chars_to_trim.contains(c));
+                Ok(Value::string(result.to_string()))
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "CONCAT_WS".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "CONCAT_WS".to_string(),
+            arg_types: vec![DataType::String],
+            return_type: DataType::String,
+            variadic: true,
+            evaluator: |args| {
+                if args.is_empty() {
+                    return Err(Error::invalid_query(
+                        "CONCAT_WS requires at least 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let separator = match args[0].as_str() {
+                    Some(s) => s,
+                    None => {
+                        return Err(Error::TypeMismatch {
+                            expected: "STRING".to_string(),
+                            actual: args[0].data_type().to_string(),
+                        });
+                    }
+                };
+                let parts: Vec<String> = args[1..]
+                    .iter()
+                    .filter(|arg| !arg.is_null())
+                    .map(|arg| {
+                        if let Some(s) = arg.as_str() {
+                            s.to_string()
+                        } else {
+                            arg.to_string()
+                        }
+                    })
+                    .collect();
+                Ok(Value::string(parts.join(separator)))
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "TO_HEX".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "TO_HEX".to_string(),
+            arg_types: vec![DataType::Int64],
+            return_type: DataType::String,
+            variadic: false,
+            evaluator: |args| {
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(n) = args[0].as_i64() {
+                    Ok(Value::string(format!("{:x}", n)))
+                } else {
+                    Err(Error::TypeMismatch {
+                        expected: "INT64".to_string(),
+                        actual: args[0].data_type().to_string(),
+                    })
+                }
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "PARSE_IDENT".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "PARSE_IDENT".to_string(),
+            arg_types: vec![DataType::String],
+            return_type: DataType::Array(Box::new(DataType::String)),
+            variadic: false,
+            evaluator: |args| {
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(s) = args[0].as_str() {
+                    let parts: Vec<Value> = s
+                        .split('.')
+                        .map(|part| {
+                            let trimmed = part.trim();
+                            let unquoted = if trimmed.starts_with('"')
+                                && trimmed.ends_with('"')
+                                && trimmed.len() >= 2
+                            {
+                                trimmed[1..trimmed.len() - 1].replace("\"\"", "\"")
+                            } else {
+                                trimmed.to_lowercase()
+                            };
+                            Value::string(unquoted)
+                        })
+                        .collect();
+                    Ok(Value::array(parts))
+                } else {
+                    Err(Error::TypeMismatch {
+                        expected: "STRING".to_string(),
+                        actual: args[0].data_type().to_string(),
+                    })
+                }
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "NORMALIZE".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "NORMALIZE".to_string(),
+            arg_types: vec![DataType::String, DataType::String],
+            return_type: DataType::String,
+            variadic: false,
+            evaluator: |args| {
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(s) = args[0].as_str() {
+                    Ok(Value::string(s.to_string()))
+                } else {
+                    Err(Error::TypeMismatch {
+                        expected: "STRING".to_string(),
+                        actual: args[0].data_type().to_string(),
+                    })
+                }
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "IS_NORMALIZED".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "IS_NORMALIZED".to_string(),
+            arg_types: vec![DataType::String, DataType::String],
+            return_type: DataType::Bool,
+            variadic: false,
+            evaluator: |args| {
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if args[0].as_str().is_some() {
+                    Ok(Value::bool_val(true))
+                } else {
+                    Err(Error::TypeMismatch {
+                        expected: "STRING".to_string(),
+                        actual: args[0].data_type().to_string(),
+                    })
+                }
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "REGEXP_COUNT".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "REGEXP_COUNT".to_string(),
+            arg_types: vec![DataType::String, DataType::String],
+            return_type: DataType::Int64,
+            variadic: false,
+            evaluator: |args| {
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                match (args[0].as_str(), args[1].as_str()) {
+                    (Some(string), Some(pattern)) => match Regex::new(pattern) {
+                        Ok(re) => {
+                            let count = re.find_iter(string).count();
+                            Ok(Value::int64(count as i64))
+                        }
+                        Err(e) => Err(Error::invalid_query(format!(
+                            "Invalid regex pattern: {}",
+                            e
+                        ))),
+                    },
+                    _ => Err(Error::TypeMismatch {
+                        expected: "STRING, STRING".to_string(),
+                        actual: format!("{}, {}", args[0].data_type(), args[1].data_type()),
+                    }),
+                }
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "REGEXP_INSTR".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "REGEXP_INSTR".to_string(),
+            arg_types: vec![DataType::String, DataType::String],
+            return_type: DataType::Int64,
+            variadic: false,
+            evaluator: |args| {
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                match (args[0].as_str(), args[1].as_str()) {
+                    (Some(string), Some(pattern)) => match Regex::new(pattern) {
+                        Ok(re) => {
+                            if let Some(mat) = re.find(string) {
+                                Ok(Value::int64((mat.start() + 1) as i64))
+                            } else {
+                                Ok(Value::int64(0))
+                            }
+                        }
+                        Err(e) => Err(Error::invalid_query(format!(
+                            "Invalid regex pattern: {}",
+                            e
+                        ))),
+                    },
+                    _ => Err(Error::TypeMismatch {
+                        expected: "STRING, STRING".to_string(),
+                        actual: format!("{}, {}", args[0].data_type(), args[1].data_type()),
+                    }),
+                }
+            },
+        }),
+    );
+
+    registry.register_scalar(
+        "OVERLAY".to_string(),
+        Rc::new(ScalarFunctionImpl {
+            name: "OVERLAY".to_string(),
+            arg_types: vec![DataType::String, DataType::String, DataType::Int64],
+            return_type: DataType::String,
+            variadic: true,
+            evaluator: |args| {
+                if args.len() < 3 || args.len() > 4 {
+                    return Err(Error::invalid_query(
+                        "OVERLAY requires 3 or 4 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() || args[2].is_null() {
+                    return Ok(Value::null());
+                }
+                let string = match args[0].as_str() {
+                    Some(s) => s,
+                    None => {
+                        return Err(Error::TypeMismatch {
+                            expected: "STRING".to_string(),
+                            actual: args[0].data_type().to_string(),
+                        });
+                    }
+                };
+                let replacement = match args[1].as_str() {
+                    Some(s) => s,
+                    None => {
+                        return Err(Error::TypeMismatch {
+                            expected: "STRING".to_string(),
+                            actual: args[1].data_type().to_string(),
+                        });
+                    }
+                };
+                let start = match args[2].as_i64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(Error::TypeMismatch {
+                            expected: "INT64".to_string(),
+                            actual: args[2].data_type().to_string(),
+                        });
+                    }
+                };
+                let length = if args.len() == 4 {
+                    if args[3].is_null() {
+                        return Ok(Value::null());
+                    }
+                    match args[3].as_i64() {
+                        Some(n) => n as usize,
+                        None => {
+                            return Err(Error::TypeMismatch {
+                                expected: "INT64".to_string(),
+                                actual: args[3].data_type().to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    replacement.chars().count()
+                };
+
+                let chars: Vec<char> = string.chars().collect();
+                let start_idx = (start - 1).max(0) as usize;
+
+                let mut result = String::new();
+                for (i, ch) in chars.iter().enumerate() {
+                    if i < start_idx {
+                        result.push(*ch);
+                    }
+                }
+                result.push_str(replacement);
+                let skip_end = start_idx + length;
+                for (i, ch) in chars.iter().enumerate() {
+                    if i >= skip_end {
+                        result.push(*ch);
+                    }
+                }
+
+                Ok(Value::string(result))
             },
         }),
     );
