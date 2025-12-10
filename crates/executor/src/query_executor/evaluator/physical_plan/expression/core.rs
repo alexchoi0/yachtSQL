@@ -982,6 +982,7 @@ impl ProjectionWithExprExec {
                 | FunctionName::Circle
                 | FunctionName::Line
                 | FunctionName::Lseg
+                | FunctionName::Path
                 | FunctionName::Polygon
                 | FunctionName::Area
                 | FunctionName::Center
