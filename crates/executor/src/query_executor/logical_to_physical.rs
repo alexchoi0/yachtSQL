@@ -343,21 +343,25 @@ impl LogicalToPhysicalPlanner {
                 let left_table = self.get_expr_table(left);
                 let right_table = self.get_expr_table(right);
 
-                let left_is_left_side =
-                    left_table.as_ref().is_some_and(|t| left_tables.contains(t));
-                let right_is_left_side = right_table
-                    .as_ref()
-                    .is_some_and(|t| left_tables.contains(t));
+                match (&left_table, &right_table) {
+                    (Some(lt), Some(rt)) => {
+                        let left_is_left_side = left_tables.contains(lt);
+                        let right_is_left_side = left_tables.contains(rt);
 
-                let left_resolved = self.resolve_custom_type_fields(left);
-                let right_resolved = self.resolve_custom_type_fields(right);
+                        if left_is_left_side == right_is_left_side {
+                            return vec![];
+                        }
 
-                if left_is_left_side && !right_is_left_side {
-                    vec![(left_resolved, right_resolved)]
-                } else if right_is_left_side && !left_is_left_side {
-                    vec![(right_resolved, left_resolved)]
-                } else {
-                    vec![(left_resolved, right_resolved)]
+                        let left_resolved = self.resolve_custom_type_fields(left);
+                        let right_resolved = self.resolve_custom_type_fields(right);
+
+                        if left_is_left_side {
+                            vec![(left_resolved, right_resolved)]
+                        } else {
+                            vec![(right_resolved, left_resolved)]
+                        }
+                    }
+                    _ => vec![],
                 }
             }
 
@@ -379,7 +383,7 @@ impl LogicalToPhysicalPlanner {
     fn has_filter_conditions(
         &self,
         expr: &yachtsql_ir::expr::Expr,
-        _left_tables: &std::collections::HashSet<String>,
+        left_tables: &std::collections::HashSet<String>,
     ) -> bool {
         use yachtsql_ir::expr::{BinaryOp, Expr};
 
@@ -392,10 +396,14 @@ impl LogicalToPhysicalPlanner {
                 let left_table = self.get_expr_table(left);
                 let right_table = self.get_expr_table(right);
 
-                !matches!(
-                    (&left_table, &right_table),
-                    (Some(_), Some(_)) | (None, None)
-                )
+                match (&left_table, &right_table) {
+                    (Some(lt), Some(rt)) => {
+                        let left_is_left_side = left_tables.contains(lt);
+                        let right_is_left_side = left_tables.contains(rt);
+                        left_is_left_side == right_is_left_side
+                    }
+                    _ => true,
+                }
             }
 
             Expr::BinaryOp {
@@ -403,8 +411,8 @@ impl LogicalToPhysicalPlanner {
                 op: BinaryOp::And,
                 right,
             } => {
-                self.has_filter_conditions(left, _left_tables)
-                    || self.has_filter_conditions(right, _left_tables)
+                self.has_filter_conditions(left, left_tables)
+                    || self.has_filter_conditions(right, left_tables)
             }
 
             Expr::BinaryOp { .. } => true,
