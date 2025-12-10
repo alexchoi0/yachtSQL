@@ -357,6 +357,7 @@ pub struct TableScanExec {
     projection: Option<Vec<usize>>,
     statistics: ExecutionStatistics,
     storage: Rc<RefCell<yachtsql_storage::Storage>>,
+    transaction_manager: Option<Rc<RefCell<yachtsql_storage::TransactionManager>>>,
     only: bool,
     final_modifier: bool,
 }
@@ -373,6 +374,7 @@ impl TableScanExec {
             projection: None,
             statistics: ExecutionStatistics::default(),
             storage,
+            transaction_manager: None,
             only: false,
             final_modifier: false,
         }
@@ -390,6 +392,7 @@ impl TableScanExec {
             projection: None,
             statistics: ExecutionStatistics::default(),
             storage,
+            transaction_manager: None,
             only,
             final_modifier: false,
         }
@@ -408,6 +411,27 @@ impl TableScanExec {
             projection: None,
             statistics: ExecutionStatistics::default(),
             storage,
+            transaction_manager: None,
+            only,
+            final_modifier,
+        }
+    }
+
+    pub fn new_with_transaction(
+        schema: Schema,
+        table_name: String,
+        storage: Rc<RefCell<yachtsql_storage::Storage>>,
+        transaction_manager: Rc<RefCell<yachtsql_storage::TransactionManager>>,
+        only: bool,
+        final_modifier: bool,
+    ) -> Self {
+        Self {
+            schema,
+            table_name,
+            projection: None,
+            statistics: ExecutionStatistics::default(),
+            storage,
+            transaction_manager: Some(transaction_manager),
             only,
             final_modifier,
         }
@@ -423,6 +447,7 @@ impl TableScanExec {
             projection: None,
             statistics: ExecutionStatistics::default(),
             storage,
+            transaction_manager: None,
             only: false,
             final_modifier: false,
         }
@@ -737,6 +762,18 @@ impl ExecutionPlan for TableScanExec {
 
         let mut all_rows = actual_table.get_all_rows();
 
+        if let Some(ref tm) = self.transaction_manager {
+            let manager = tm.borrow();
+            if let Some(txn) = manager.get_active_transaction() {
+                let table_full_name = format!("{}.{}", dataset_name, table_id);
+                if let Some(pending_changes) = txn.pending_changes() {
+                    if let Some(delta) = pending_changes.get_table_delta(&table_full_name) {
+                        all_rows.extend(delta.inserted_rows.clone());
+                    }
+                }
+            }
+        }
+
         if !self.only {
             let parent_col_count = self.schema.fields().len();
             let mut descendants_to_process: Vec<String> = table.schema().child_tables().to_vec();
@@ -790,14 +827,42 @@ impl ExecutionPlan for TableScanExec {
         let num_cols = self.schema.fields().len();
         let mut columns: Vec<Column> = Vec::with_capacity(num_cols);
 
+        let table_oid = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            self.table_name.hash(&mut hasher);
+            (hasher.finish() & 0xFFFFFFFF) as i64
+        };
+
         for col_idx in 0..num_cols {
             let field = &self.schema.fields()[col_idx];
             let mut column = Column::new(&field.data_type, num_rows);
 
-            for row in &all_rows {
-                let value = match row.get(col_idx) {
-                    Some(v) => v.clone(),
-                    None => yachtsql_core::types::Value::null(),
+            let is_system_column = matches!(
+                field.data_type,
+                yachtsql_core::types::DataType::Tid
+                    | yachtsql_core::types::DataType::Xid
+                    | yachtsql_core::types::DataType::Cid
+                    | yachtsql_core::types::DataType::Oid
+            );
+
+            for (row_idx, row) in all_rows.iter().enumerate() {
+                let value = if is_system_column {
+                    match field.name.as_str() {
+                        "ctid" => yachtsql_core::types::Value::int64((row_idx + 1) as i64),
+                        "xmin" => yachtsql_core::types::Value::int64(1),
+                        "xmax" => yachtsql_core::types::Value::int64(0),
+                        "cmin" => yachtsql_core::types::Value::int64(0),
+                        "cmax" => yachtsql_core::types::Value::int64(0),
+                        "tableoid" => yachtsql_core::types::Value::int64(table_oid),
+                        _ => yachtsql_core::types::Value::null(),
+                    }
+                } else {
+                    match row.get(col_idx) {
+                        Some(v) => v.clone(),
+                        None => yachtsql_core::types::Value::null(),
+                    }
                 };
                 column.push(value)?;
             }

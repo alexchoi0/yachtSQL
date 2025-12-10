@@ -430,7 +430,7 @@ fn test_select_for_update_skip_locked() {
         .unwrap();
 
     let result = executor
-        .execute_sql("SELECT * FROM for_upd_skip FOR UPDATE SKIP LOCKED ORDER BY id")
+        .execute_sql("SELECT * FROM for_upd_skip ORDER BY id FOR UPDATE SKIP LOCKED")
         .unwrap();
     assert_eq!(result.num_rows(), 2);
 }
