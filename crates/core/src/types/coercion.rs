@@ -166,6 +166,7 @@ impl CoercionRules {
             (DataType::String, DataType::Json) => true,
 
             (DataType::String, DataType::Time) => true,
+            (DataType::String, DataType::DateTime) => true,
             (DataType::String, DataType::Timestamp) => true,
             (DataType::String, DataType::TimestampTz) => true,
             (DataType::String, DataType::Date) => true,
@@ -515,6 +516,32 @@ impl CoercionRules {
                             ))
                         })?;
                     Ok(Value::timestamp(dt))
+                } else {
+                    Err(Error::type_coercion_error(
+                        &source_type,
+                        target_type,
+                        "value extraction failed",
+                    ))
+                }
+            }
+
+            (DataType::String, DataType::DateTime) => {
+                if let Some(s) = value.as_str() {
+                    use chrono::{DateTime, NaiveDateTime};
+
+                    let dt = DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .or_else(|_| {
+                            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                                .or_else(|_| {
+                                    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                                })
+                                .map(|ndt| chrono::Utc.from_utc_datetime(&ndt))
+                        })
+                        .map_err(|e| {
+                            Error::invalid_query(format!("Invalid DATETIME string '{}': {}", s, e))
+                        })?;
+                    Ok(Value::datetime(dt))
                 } else {
                     Err(Error::type_coercion_error(
                         &source_type,

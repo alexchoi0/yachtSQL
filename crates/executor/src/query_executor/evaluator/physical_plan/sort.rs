@@ -659,6 +659,9 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     if let (Some(x), Some(y)) = (a.as_timestamp(), b.as_timestamp()) {
         return Ok(x.cmp(&y));
     }
+    if let (Some(x), Some(y)) = (a.as_datetime(), b.as_datetime()) {
+        return Ok(x.cmp(&y));
+    }
     if let (Some(x), Some(y)) = (a.as_uuid(), b.as_uuid()) {
         return Ok(x.cmp(y));
     }
