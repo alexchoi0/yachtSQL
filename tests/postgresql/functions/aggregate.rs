@@ -1846,7 +1846,7 @@ fn test_correlation_with_order_by() {
 
     let result = executor
         .execute_sql(
-            "SELECT category, CORR(x, y) AS corr FROM correlation_data GROUP BY category ORDER BY CORR(x, y) DESC",
+            "SELECT category, CORR(x, y) AS corr FROM correlation_data GROUP BY category ORDER BY CORR(x, y) DESC, category",
         )
         .unwrap();
     assert_table_eq!(result, [["A", 1.0], ["B", 1.0], ["C", 1.0]]);
