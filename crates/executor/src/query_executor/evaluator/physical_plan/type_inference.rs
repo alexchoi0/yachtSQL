@@ -676,6 +676,16 @@ impl ProjectionWithExprExec {
 
             FunctionName::Custom(s) if s == "MODELEVALUATE" => Some(DataType::Float64),
 
+            FunctionName::Custom(s) if s == "ROUNDBANKERS" => Some(DataType::Float64),
+
+            FunctionName::Custom(s) if s == "ROUNDDOWN" => Some(DataType::Float64),
+
+            FunctionName::Custom(s)
+                if matches!(s.as_str(), "ROUNDTOEXP2" | "ROUNDDURATION" | "ROUNDAGE") =>
+            {
+                Some(DataType::Int64)
+            }
+
             FunctionName::Custom(s) if matches!(s.as_str(), "MATERIALIZE" | "IDENTITY") => {
                 if !args.is_empty() {
                     Self::infer_expr_type_with_schema(&args[0], schema)
@@ -933,8 +943,30 @@ impl ProjectionWithExprExec {
                         | "PARSEDATETIMEBESTEFFORTORNULL"
                 ) =>
             {
-                Some(DataType::Timestamp)
+                Some(DataType::DateTime)
             }
+
+            FunctionName::Custom(s)
+                if matches!(
+                    s.as_str(),
+                    "TUMBLE"
+                        | "TUMBLESTART"
+                        | "TUMBLEEND"
+                        | "HOP"
+                        | "HOPSTART"
+                        | "HOPEND"
+                        | "TIMESLOT"
+                        | "DATE_BIN"
+                ) =>
+            {
+                Some(DataType::DateTime)
+            }
+
+            FunctionName::Custom(s) if s == "TIMESLOTS" => {
+                Some(DataType::Array(Box::new(DataType::DateTime)))
+            }
+
+            FunctionName::Custom(s) if s == "WINDOWID" => Some(DataType::Int64),
 
             FunctionName::Custom(s)
                 if matches!(s.as_str(), "TODECIMAL32" | "TODECIMAL64" | "TODECIMAL128") =>
@@ -1982,7 +2014,7 @@ impl ProjectionWithExprExec {
                             "FLOAT32" | "FLOAT64" => Some(DataType::Float64),
                             "STRING" => Some(DataType::String),
                             "DATE" => Some(DataType::Date),
-                            "DATETIME" | "DATETIME64" => Some(DataType::Timestamp),
+                            "DATETIME" | "DATETIME64" => Some(DataType::DateTime),
                             _ => None,
                         };
                     }
@@ -2004,6 +2036,10 @@ impl ProjectionWithExprExec {
             FunctionName::AeadDecryptString | FunctionName::DeterministicDecryptString => {
                 Some(DataType::String)
             }
+
+            FunctionName::Encrypt | FunctionName::AesEncryptMysql => Some(DataType::Bytes),
+            FunctionName::Decrypt | FunctionName::AesDecryptMysql => Some(DataType::String),
+            FunctionName::Base64UrlEncode | FunctionName::Base64UrlDecode => Some(DataType::String),
 
             FunctionName::ToTsvector
             | FunctionName::ToTsquery
@@ -2344,6 +2380,12 @@ impl ProjectionWithExprExec {
 
         match expr {
             Expr::Column { name, table } => {
+                if let Some(table_name) = table {
+                    let qualified_name = format!("{}.{}", table_name, name);
+                    if let Some(field) = schema.field(&qualified_name) {
+                        return Some(field.data_type.clone());
+                    }
+                }
                 if schema.field(name).is_some() {
                     schema.field(name).map(|f| f.data_type.clone())
                 } else if let Some(table_name) = table {
