@@ -396,7 +396,6 @@ fn test_conversion_funnel() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_order_status_breakdown() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -423,7 +422,6 @@ fn test_order_status_breakdown() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_daily_sales_trend() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -555,7 +553,6 @@ fn test_average_basket_composition() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_customer_acquisition_by_month() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
