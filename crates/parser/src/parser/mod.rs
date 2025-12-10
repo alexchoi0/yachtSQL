@@ -574,7 +574,10 @@ impl Parser {
         let mut idx = 0;
 
         while idx < sql.len() {
-            if upper[idx..].starts_with("EXCLUDE") {
+            let is_exclude_keyword = upper[idx..].starts_with("EXCLUDE")
+                && (idx + 7 >= sql.len()
+                    || !sql[idx + 7..].starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+            if is_exclude_keyword {
                 idx += 7;
 
                 while idx < sql.len() && sql[idx..].starts_with(char::is_whitespace) {
