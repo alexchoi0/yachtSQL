@@ -454,6 +454,8 @@ impl ProjectionWithExprExec {
 
             Expr::ScalarSubquery { subquery } => Self::evaluate_scalar_subquery_expr(subquery),
 
+            Expr::ArraySubquery { subquery } => Self::evaluate_array_subquery_expr(subquery),
+
             Expr::Exists { plan, negated } => Self::evaluate_exists_subquery_expr(plan, *negated),
 
             Expr::InSubquery {
@@ -663,6 +665,8 @@ impl ProjectionWithExprExec {
                 | FunctionName::ArrayReplace
                 | FunctionName::ArraySort
                 | FunctionName::ArrayDistinct
+                | FunctionName::ArraySlice
+                | FunctionName::ArrayToString
                 | FunctionName::GenerateArray
                 | FunctionName::GenerateDateArray
                 | FunctionName::GenerateTimestampArray

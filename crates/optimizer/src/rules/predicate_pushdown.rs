@@ -158,6 +158,7 @@ impl PredicatePushdown {
                 Self::get_column_references(left)
             }
             Expr::ScalarSubquery { .. } => vec![],
+            Expr::ArraySubquery { .. } => vec![],
             Expr::ArraySlice { array, start, end } => {
                 let mut cols = Self::get_column_references(array);
                 if let Some(s) = start {

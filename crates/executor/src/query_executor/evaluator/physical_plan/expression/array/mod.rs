@@ -8,7 +8,9 @@ mod array_prepend;
 mod array_remove;
 mod array_replace;
 mod array_reverse;
+mod array_slice;
 mod array_sort;
+mod array_to_string;
 mod generate_array;
 mod generate_date_array;
 mod generate_timestamp_array;
@@ -40,6 +42,8 @@ impl ProjectionWithExprExec {
             "ARRAY_REPLACE" => Self::evaluate_array_replace(args, batch, row_idx),
             "ARRAY_SORT" => Self::evaluate_array_sort(args, batch, row_idx),
             "ARRAY_DISTINCT" => Self::evaluate_array_distinct(args, batch, row_idx),
+            "ARRAY_SLICE" => Self::evaluate_array_slice_func(args, batch, row_idx),
+            "ARRAY_TO_STRING" => Self::evaluate_array_to_string(args, batch, row_idx),
             "GENERATE_ARRAY" => Self::evaluate_generate_array(args, batch, row_idx),
             "GENERATE_DATE_ARRAY" => Self::evaluate_generate_date_array(args, batch, row_idx),
             "GENERATE_TIMESTAMP_ARRAY" => {

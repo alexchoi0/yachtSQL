@@ -186,6 +186,7 @@ impl CommonSubexpressionElimination {
                 format!("all:{:?}:{}", compare_op, Self::expr_signature(left))
             }
             Expr::ScalarSubquery { .. } => "scalarsubquery:unique".to_string(),
+            Expr::ArraySubquery { .. } => "arraysubquery:unique".to_string(),
             Expr::ArraySlice { array, start, end } => {
                 format!(
                     "arrayslice:{}[{}:{}]",
@@ -350,6 +351,7 @@ impl CommonSubexpressionElimination {
                 Self::count_subexpressions(left, counts);
             }
             Expr::ScalarSubquery { .. } => {}
+            Expr::ArraySubquery { .. } => {}
             Expr::ArraySlice { array, start, end } => {
                 Self::count_subexpressions(array, counts);
                 if let Some(s) = start {
@@ -420,6 +422,7 @@ impl CommonSubexpressionElimination {
             | Expr::AnyOp { .. }
             | Expr::AllOp { .. }
             | Expr::ScalarSubquery { .. }
+            | Expr::ArraySubquery { .. }
             | Expr::StructLiteral { .. }
             | Expr::StructFieldAccess { .. }
             | Expr::IsDistinctFrom { .. }

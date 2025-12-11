@@ -137,6 +137,7 @@ impl ProjectionPushdown {
                 Self::collect_column_references(left, refs);
             }
             Expr::ScalarSubquery { .. } => {}
+            Expr::ArraySubquery { .. } => {}
             Expr::ArraySlice { array, start, end } => {
                 Self::collect_column_references(array, refs);
                 if let Some(s) = start {

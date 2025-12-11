@@ -119,6 +119,9 @@ pub enum Expr {
     ScalarSubquery {
         subquery: Box<crate::plan::PlanNode>,
     },
+    ArraySubquery {
+        subquery: Box<crate::plan::PlanNode>,
+    },
     Grouping {
         column: String,
     },
@@ -479,7 +482,8 @@ impl Expr {
             | Expr::TupleInSubquery { .. }
             | Expr::AnyOp { .. }
             | Expr::AllOp { .. }
-            | Expr::ScalarSubquery { .. } => true,
+            | Expr::ScalarSubquery { .. }
+            | Expr::ArraySubquery { .. } => true,
 
             Expr::BinaryOp { left, right, .. } => {
                 left.contains_subquery() || right.contains_subquery()

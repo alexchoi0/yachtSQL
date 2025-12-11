@@ -189,10 +189,10 @@ impl LogicalPlanBuilder {
                             &arg_list.args[0]
                         {
                             let index = self.sql_expr_to_expr(idx_expr)?;
-                            let adjusted_index = if func_name.contains("ORDINAL") {
+                            let adjusted_index = if func_name.contains("OFFSET") {
                                 Expr::binary_op(
                                     index,
-                                    BinaryOp::Subtract,
+                                    BinaryOp::Add,
                                     Expr::literal(LiteralValue::Int64(1)),
                                 )
                             } else {
