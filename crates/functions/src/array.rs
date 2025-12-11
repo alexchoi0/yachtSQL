@@ -533,6 +533,53 @@ fn generate_array_elements(start: i64, end: i64, step: i64) -> Vec<Value> {
     result
 }
 
+pub fn array_to_string(
+    array: &Value,
+    delimiter: &Value,
+    null_text: Option<&Value>,
+) -> Result<Value> {
+    if array.is_null() {
+        return Ok(Value::null());
+    }
+
+    if delimiter.is_null() {
+        return Ok(Value::null());
+    }
+
+    let arr = array.as_array().ok_or_else(|| Error::TypeMismatch {
+        expected: "ARRAY".to_string(),
+        actual: array.data_type().to_string(),
+    })?;
+
+    let delim = delimiter.as_str().ok_or_else(|| Error::TypeMismatch {
+        expected: "STRING".to_string(),
+        actual: delimiter.data_type().to_string(),
+    })?;
+
+    let null_replacement = null_text.and_then(|v| v.as_str().map(|s| s.to_string()));
+
+    let mut parts: Vec<String> = Vec::new();
+    for elem in arr.iter() {
+        if elem.is_null() {
+            if let Some(ref replacement) = null_replacement {
+                parts.push(replacement.clone());
+            }
+        } else if let Some(s) = elem.as_str() {
+            parts.push(s.to_string());
+        } else if let Some(i) = elem.as_i64() {
+            parts.push(i.to_string());
+        } else if let Some(f) = elem.as_f64() {
+            parts.push(f.to_string());
+        } else if let Some(b) = elem.as_bool() {
+            parts.push(b.to_string());
+        } else {
+            parts.push(format!("{:?}", elem));
+        }
+    }
+
+    Ok(Value::string(parts.join(delim)))
+}
+
 pub fn generate_array(start: &Value, end: &Value, step: Option<&Value>) -> Result<Value> {
     let start_i64 = match extract_optional_i64(start, "start")? {
         Some(v) => v,

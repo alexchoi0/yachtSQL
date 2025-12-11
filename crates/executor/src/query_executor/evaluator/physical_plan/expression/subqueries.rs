@@ -19,6 +19,19 @@ impl ProjectionWithExprExec {
         executor.execute_scalar_subquery(plan)
     }
 
+    pub(super) fn evaluate_array_subquery_expr(plan: &PlanNode) -> Result<Value> {
+        let executor = SUBQUERY_EXECUTOR_CONTEXT
+            .with(|ctx| ctx.borrow().clone())
+            .ok_or_else(|| {
+                Error::InternalError(
+                    "Subquery executor context not available - subqueries must be executed through QueryExecutor".to_string()
+                )
+            })?;
+
+        let values = executor.execute_in_subquery(plan)?;
+        Ok(Value::array(values))
+    }
+
     pub(super) fn evaluate_exists_subquery_expr(plan: &PlanNode, negated: bool) -> Result<Value> {
         let executor = SUBQUERY_EXECUTOR_CONTEXT
             .with(|ctx| ctx.borrow().clone())

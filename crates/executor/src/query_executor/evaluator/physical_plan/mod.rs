@@ -1555,7 +1555,7 @@ impl UnnestExec {
         use yachtsql_storage::Column;
 
         let mut column = Column::new(&DataType::Int64, num_rows);
-        for position in 1..=num_rows {
+        for position in 0..num_rows {
             column.push(Value::int64(position as i64))?;
         }
         Ok(column)

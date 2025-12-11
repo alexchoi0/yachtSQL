@@ -116,6 +116,59 @@ impl SubqueryExecutorImpl {
                 Ok(Table::new(schema, columns)?)
             }
 
+            PlanNode::Unnest {
+                array_expr,
+                alias,
+                column_alias: _,
+                with_offset,
+                offset_alias: _,
+            } => {
+                use super::physical_plan::ProjectionWithExprExec;
+
+                let empty_batch = Table::empty(yachtsql_storage::Schema::new());
+                let array_val = ProjectionWithExprExec::evaluate_expr(array_expr, &empty_batch, 0)?;
+
+                if array_val.is_null() {
+                    let col_name = alias.clone().unwrap_or_else(|| "value".to_string());
+                    let field = yachtsql_storage::Field::nullable(col_name, DataType::Int64);
+                    let schema = yachtsql_storage::Schema::from_fields(vec![field]);
+                    return Ok(Table::empty(schema));
+                }
+
+                let arr = array_val.as_array().ok_or_else(|| Error::TypeMismatch {
+                    expected: "ARRAY".to_string(),
+                    actual: array_val.data_type().to_string(),
+                })?;
+
+                let num_elements = arr.len();
+                let element_type = arr
+                    .iter()
+                    .find(|v| !v.is_null())
+                    .map(|v| v.data_type())
+                    .unwrap_or(DataType::Int64);
+
+                let col_name = alias.clone().unwrap_or_else(|| "value".to_string());
+                let mut column = Column::new(&element_type, num_elements);
+                for element in arr.iter() {
+                    column.push(element.clone())?;
+                }
+
+                let mut fields = vec![yachtsql_storage::Field::nullable(col_name, element_type)];
+                let mut columns = vec![column];
+
+                if *with_offset {
+                    let mut offset_col = Column::new(&DataType::Int64, num_elements);
+                    for idx in 0..num_elements {
+                        offset_col.push(Value::int64(idx as i64))?;
+                    }
+                    fields.push(yachtsql_storage::Field::nullable("offset", DataType::Int64));
+                    columns.push(offset_col);
+                }
+
+                let schema = yachtsql_storage::Schema::from_fields(fields);
+                Ok(Table::new(schema, columns)?)
+            }
+
             PlanNode::Projection { expressions, input } => {
                 use super::physical_plan::ProjectionWithExprExec;
 
@@ -131,7 +184,7 @@ impl SubqueryExecutorImpl {
                         if let yachtsql_optimizer::expr::Expr::Column { name, .. } = expr {
                             name.clone()
                         } else {
-                            format!("col_{}", expr_idx)
+                            format!("expr_{}", expr_idx)
                         }
                     });
                     let mut values = Vec::new();

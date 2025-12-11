@@ -164,7 +164,13 @@ impl LogicalPlanBuilder {
                 let name = yachtsql_ir::FunctionName::parse(&name_str);
                 let (args, has_distinct, order_by_clauses) = match &function.args {
                     ast::FunctionArguments::None => (Vec::new(), false, None),
-                    ast::FunctionArguments::Subquery(_) => {
+                    ast::FunctionArguments::Subquery(subquery) => {
+                        if name_str.eq_ignore_ascii_case("ARRAY") {
+                            let plan = self.query_to_plan(subquery)?;
+                            return Ok(Expr::ArraySubquery {
+                                subquery: Box::new(plan.root().clone()),
+                            });
+                        }
                         return Err(Error::unsupported_feature(
                             "Subquery in function not supported".to_string(),
                         ));
@@ -469,6 +475,24 @@ impl LogicalPlanBuilder {
                 list,
                 negated,
             } => self.convert_in_list(expr, list, *negated),
+
+            ast::Expr::InUnnest {
+                expr,
+                array_expr,
+                negated,
+            } => {
+                let search_expr = self.sql_expr_to_expr(expr)?;
+                let array = self.sql_expr_to_expr(array_expr)?;
+                let contains = Expr::Function {
+                    name: yachtsql_ir::FunctionName::ArrayContains,
+                    args: vec![array, search_expr],
+                };
+                if *negated {
+                    Ok(Expr::unary_op(UnaryOp::Not, contains))
+                } else {
+                    Ok(contains)
+                }
+            }
 
             ast::Expr::Between {
                 expr,

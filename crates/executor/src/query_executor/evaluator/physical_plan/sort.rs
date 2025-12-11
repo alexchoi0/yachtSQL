@@ -243,6 +243,7 @@ impl SortExec {
                 Self::validate_expr_columns(right, schema)
             }
             Expr::ScalarSubquery { .. } => Ok(()),
+            Expr::ArraySubquery { .. } => Ok(()),
             Expr::Grouping { .. } => Ok(()),
             Expr::GroupingId { .. } => Ok(()),
             Expr::Excluded { .. } => Ok(()),

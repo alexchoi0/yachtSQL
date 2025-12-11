@@ -11,9 +11,9 @@ impl ProjectionWithExprExec {
         batch: &Table,
         row_idx: usize,
     ) -> Result<Value> {
-        if args.len() < 3 || args.len() > 4 {
+        if args.len() < 2 || args.len() > 4 {
             return Err(crate::error::Error::invalid_query(
-                "GENERATE_DATE_ARRAY requires arguments (start_date, end_date, INTERVAL step) or explicit value/unit"
+                "GENERATE_DATE_ARRAY requires arguments (start_date, end_date) or (start_date, end_date, INTERVAL step)"
                     .to_string(),
             ));
         }
@@ -25,7 +25,9 @@ impl ProjectionWithExprExec {
             return Ok(Value::null());
         }
 
-        let (interval_value, interval_unit) = if args.len() == 3 {
+        let (interval_value, interval_unit) = if args.len() == 2 {
+            (Value::int64(1), Value::string("DAY".to_string()))
+        } else if args.len() == 3 {
             match &args[2] {
                 Expr::Function {
                     name,
@@ -219,7 +221,7 @@ mod tests {
         );
 
         let err = ProjectionWithExprExec::evaluate_generate_date_array(
-            &[Expr::column("start"), Expr::column("end")],
+            &[Expr::column("start")],
             &batch,
             0,
         )
