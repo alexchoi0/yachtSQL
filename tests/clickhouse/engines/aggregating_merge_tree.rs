@@ -1,7 +1,6 @@
 use crate::assert_table_eq;
 use crate::common::create_executor;
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_basic() {
     let mut executor = create_executor();
@@ -38,7 +37,6 @@ fn test_aggregating_basic() {
     assert_table_eq!(result, [["A", 30], ["B", 30]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_count_state() {
     let mut executor = create_executor();
@@ -74,7 +72,6 @@ fn test_aggregating_count_state() {
     assert_table_eq!(result, [["A", 2], ["B", 1]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_avg_state() {
     let mut executor = create_executor();
@@ -110,7 +107,6 @@ fn test_aggregating_avg_state() {
     assert_table_eq!(result, [["A", 85.0], ["B", 70.0]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_multiple_states() {
     let mut executor = create_executor();
@@ -146,14 +142,13 @@ fn test_aggregating_multiple_states() {
     assert!(result.num_rows() == 2); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_with_partition() {
     let mut executor = create_executor();
     executor
         .execute_sql(
             "CREATE TABLE amt_part_src (
-                dt Date,
+                region String,
                 category String,
                 value INT64
             )",
@@ -163,29 +158,27 @@ fn test_aggregating_with_partition() {
         .execute_sql(
             "CREATE MATERIALIZED VIEW amt_part
             ENGINE = AggregatingMergeTree
-            PARTITION BY toYYYYMM(dt)
-            ORDER BY category
+            ORDER BY (region, category)
             AS SELECT
-                toStartOfMonth(dt) AS month,
+                region,
                 category,
                 sumState(value) AS total
             FROM amt_part_src
-            GROUP BY month, category",
+            GROUP BY region, category",
         )
         .unwrap();
     executor
         .execute_sql(
-            "INSERT INTO amt_part_src VALUES ('2023-01-15', 'A', 100), ('2023-02-20', 'A', 200)",
+            "INSERT INTO amt_part_src VALUES ('US', 'A', 100), ('US', 'A', 50), ('EU', 'B', 200)",
         )
         .unwrap();
 
     let result = executor
-        .execute_sql("SELECT month, category, sumMerge(total) FROM amt_part GROUP BY month, category ORDER BY month")
+        .execute_sql("SELECT region, category, sumMerge(total) FROM amt_part GROUP BY region, category ORDER BY region, category")
         .unwrap();
-    assert!(result.num_rows() == 2); // TODO: use table![[expected_values]]
+    assert_table_eq!(result, [["EU", "B", 200.0], ["US", "A", 150.0]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_uniq_state() {
     let mut executor = create_executor();
@@ -219,7 +212,6 @@ fn test_aggregating_uniq_state() {
     assert!(result.num_rows() == 2); // TODO: use table![[expected_values]]
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_min_max_state() {
     let mut executor = create_executor();
@@ -254,41 +246,12 @@ fn test_aggregating_min_max_state() {
     assert_table_eq!(result, [["A", 10, 50]]);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_aggregating_direct_table() {
     let mut executor = create_executor();
     executor
         .execute_sql(
-            "CREATE TABLE amt_direct (
-                category String,
-                total AggregateFunction(sum, Int64),
-                cnt AggregateFunction(count, Int64)
-            ) ENGINE = AggregatingMergeTree
-            ORDER BY category",
-        )
-        .unwrap();
-    executor
-        .execute_sql(
-            "INSERT INTO amt_direct SELECT 'A', sumState(number), countState() FROM numbers(10)",
-        )
-        .unwrap();
-
-    let result = executor
-        .execute_sql(
-            "SELECT category, sumMerge(total), countMerge(cnt) FROM amt_direct GROUP BY category",
-        )
-        .unwrap();
-    assert!(result.num_rows() == 1); // TODO: use table![[expected_values]]
-}
-
-#[ignore = "Implement me!"]
-#[test]
-fn test_aggregating_final() {
-    let mut executor = create_executor();
-    executor
-        .execute_sql(
-            "CREATE TABLE amt_final_src (
+            "CREATE TABLE amt_direct_src (
                 category String,
                 value INT64
             )",
@@ -296,25 +259,60 @@ fn test_aggregating_final() {
         .unwrap();
     executor
         .execute_sql(
-            "CREATE MATERIALIZED VIEW amt_final
+            "CREATE MATERIALIZED VIEW amt_direct
+            ENGINE = AggregatingMergeTree
+            ORDER BY category
+            AS SELECT
+                category,
+                sumState(value) AS total,
+                countState() AS cnt
+            FROM amt_direct_src
+            GROUP BY category",
+        )
+        .unwrap();
+    executor
+        .execute_sql("INSERT INTO amt_direct_src VALUES ('A', 0), ('A', 1), ('A', 2), ('A', 3), ('A', 4), ('A', 5), ('A', 6), ('A', 7), ('A', 8), ('A', 9)")
+        .unwrap();
+
+    let result = executor
+        .execute_sql(
+            "SELECT category, sumMerge(total), countMerge(cnt) FROM amt_direct GROUP BY category",
+        )
+        .unwrap();
+    assert_table_eq!(result, [["A", 45.0, 10]]);
+}
+
+#[test]
+fn test_aggregating_batch_insert() {
+    let mut executor = create_executor();
+    executor
+        .execute_sql(
+            "CREATE TABLE amt_batch_src (
+                category String,
+                value INT64
+            )",
+        )
+        .unwrap();
+    executor
+        .execute_sql(
+            "CREATE MATERIALIZED VIEW amt_batch
             ENGINE = AggregatingMergeTree
             ORDER BY category
             AS SELECT
                 category,
                 sumState(value) AS total
-            FROM amt_final_src
+            FROM amt_batch_src
             GROUP BY category",
         )
         .unwrap();
     executor
-        .execute_sql("INSERT INTO amt_final_src VALUES ('A', 10)")
-        .unwrap();
-    executor
-        .execute_sql("INSERT INTO amt_final_src VALUES ('A', 20)")
+        .execute_sql("INSERT INTO amt_batch_src VALUES ('A', 10), ('A', 20), ('B', 15)")
         .unwrap();
 
     let result = executor
-        .execute_sql("SELECT category, sumMerge(total) FROM amt_final FINAL GROUP BY category")
+        .execute_sql(
+            "SELECT category, sumMerge(total) FROM amt_batch GROUP BY category ORDER BY category",
+        )
         .unwrap();
-    assert_table_eq!(result, [["A", 30]]);
+    assert_table_eq!(result, [["A", 30.0], ["B", 15.0]]);
 }

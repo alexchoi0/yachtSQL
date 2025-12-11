@@ -60,6 +60,14 @@ use self::transaction::SessionTransactionController;
 use crate::Table;
 use crate::catalog_adapter::SnapshotCatalog;
 
+#[derive(Debug, Clone)]
+struct ClickHouseMvEngineInfo {
+    engine: String,
+    order_by: Vec<String>,
+    #[allow(dead_code)]
+    partition_by: Option<String>,
+}
+
 fn create_default_optimizer() -> yachtsql_optimizer::Optimizer {
     yachtsql_optimizer::Optimizer::new()
         .with_rule(Box::new(IndexSelectionRule::disabled()))
@@ -451,7 +459,9 @@ impl QueryExecutor {
                 CustomStatement::ClickHouseFunction { statement } => {
                     return self.execute_clickhouse_function(statement);
                 }
-                CustomStatement::ClickHouseMaterializedView { .. } => Self::empty_result(),
+                CustomStatement::ClickHouseMaterializedView { statement } => {
+                    return self.execute_clickhouse_materialized_view(statement);
+                }
                 CustomStatement::ClickHouseProjection { .. } => Self::empty_result(),
                 CustomStatement::ClickHouseAlterUser { .. } => Self::empty_result(),
                 CustomStatement::ClickHouseCreateUser { .. } => Self::empty_result(),
@@ -1477,6 +1487,172 @@ impl QueryExecutor {
         } else if statement_upper.starts_with("ALTER SETTINGS PROFILE") {
         }
         Self::empty_result()
+    }
+
+    fn execute_clickhouse_materialized_view(&mut self, statement: &str) -> Result<Table> {
+        debug_eprintln!(
+            "[executor::mod::execute_clickhouse_materialized_view] statement: {}",
+            statement
+        );
+
+        let statement_upper = statement.to_uppercase();
+        if !statement_upper.starts_with("CREATE") {
+            return Err(Error::unsupported_feature(
+                "Only CREATE MATERIALIZED VIEW is supported",
+            ));
+        }
+
+        let view_name = self.extract_mv_view_name(statement)?;
+        let engine_info = self.extract_mv_engine_info(statement)?;
+        let as_query = self.extract_mv_as_query(statement)?;
+        let source_table = self.extract_mv_source_table(&as_query)?;
+
+        debug_eprintln!(
+            "[executor::mod::execute_clickhouse_materialized_view] view_name: {}, engine: {:?}, source: {}",
+            view_name,
+            engine_info.engine,
+            source_table
+        );
+
+        let query_result = self.execute_sql(&as_query)?;
+        debug_eprintln!(
+            "[executor::mod::execute_clickhouse_materialized_view] SELECT succeeded, rows: {}",
+            query_result.num_rows()
+        );
+        let schema = query_result.schema().clone();
+        debug_eprintln!(
+            "[executor::mod::execute_clickhouse_materialized_view] schema: {:?}",
+            schema.fields().iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+
+        let (opt_dataset_id, table_id) = self.parse_table_name(&view_name);
+        let dataset_id = opt_dataset_id.unwrap_or_else(|| "default".to_string());
+        let engine = match engine_info.engine.to_uppercase().as_str() {
+            "AGGREGATINGMERGETREE" => yachtsql_storage::TableEngine::AggregatingMergeTree {
+                order_by: engine_info.order_by.clone(),
+            },
+            "MERGETREE" => yachtsql_storage::TableEngine::MergeTree {
+                order_by: engine_info.order_by.clone(),
+            },
+            "REPLACINGMERGETREE" => yachtsql_storage::TableEngine::ReplacingMergeTree {
+                order_by: engine_info.order_by.clone(),
+                version_column: None,
+            },
+            "SUMMINGMERGETREE" => yachtsql_storage::TableEngine::SummingMergeTree {
+                order_by: engine_info.order_by.clone(),
+                sum_columns: vec![],
+            },
+            _ => yachtsql_storage::TableEngine::Memory,
+        };
+
+        {
+            let mut storage = self.storage.borrow_mut();
+
+            if storage.get_dataset(&dataset_id).is_none() {
+                storage.create_dataset(dataset_id.clone())?;
+            }
+            let dataset = storage.get_dataset_mut(&dataset_id).ok_or_else(|| {
+                Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id))
+            })?;
+
+            dataset.create_table_with_engine(table_id.clone(), schema.clone(), engine)?;
+
+            dataset.register_materialized_view_trigger(&source_table, &table_id, as_query.clone());
+        }
+
+        let rows = query_result
+            .rows()
+            .map(|rows| rows.to_vec())
+            .unwrap_or_default();
+        if !rows.is_empty() {
+            let mut storage = self.storage.borrow_mut();
+            if let Some(dataset) = storage.get_dataset_mut(&dataset_id) {
+                if let Some(table) = dataset.get_table_mut(&table_id) {
+                    table.insert_rows(rows)?;
+                }
+            }
+        }
+
+        Self::empty_result()
+    }
+
+    fn extract_mv_view_name(&self, statement: &str) -> Result<String> {
+        use regex::Regex;
+        let re =
+            Regex::new(r"(?i)CREATE\s+MATERIALIZED\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)")
+                .map_err(|e| Error::InternalError(format!("Regex error: {}", e)))?;
+        if let Some(caps) = re.captures(statement) {
+            return Ok(caps[1].to_string());
+        }
+        Err(Error::InvalidQuery(
+            "Could not extract view name from statement".to_string(),
+        ))
+    }
+
+    fn extract_mv_engine_info(&self, statement: &str) -> Result<ClickHouseMvEngineInfo> {
+        use regex::Regex;
+
+        let engine_re = Regex::new(r"(?i)ENGINE\s*=\s*(\w+)")
+            .map_err(|e| Error::InternalError(format!("Regex error: {}", e)))?;
+        let engine = if let Some(caps) = engine_re.captures(statement) {
+            caps[1].to_string()
+        } else {
+            "Memory".to_string()
+        };
+
+        let order_by_re = Regex::new(r"(?i)ORDER\s+BY\s+\(([^)]+)\)|ORDER\s+BY\s+(\w+)")
+            .map_err(|e| Error::InternalError(format!("Regex error: {}", e)))?;
+        let order_by = if let Some(caps) = order_by_re.captures(statement) {
+            let cols = caps
+                .get(1)
+                .or(caps.get(2))
+                .map(|m| m.as_str())
+                .unwrap_or("");
+            cols.split(',').map(|s| s.trim().to_string()).collect()
+        } else {
+            vec![]
+        };
+
+        let partition_by_re = Regex::new(r"(?i)PARTITION\s+BY\s+([^\s]+(?:\([^)]*\))?)")
+            .map_err(|e| Error::InternalError(format!("Regex error: {}", e)))?;
+        let partition_by = partition_by_re
+            .captures(statement)
+            .map(|caps| caps[1].to_string());
+
+        Ok(ClickHouseMvEngineInfo {
+            engine,
+            order_by,
+            partition_by,
+        })
+    }
+
+    fn extract_mv_as_query(&self, statement: &str) -> Result<String> {
+        use regex::Regex;
+        let re = Regex::new(r"(?is)\bAS\s+(SELECT\b.*)")
+            .map_err(|e| Error::InternalError(format!("Regex error: {}", e)))?;
+        if let Some(caps) = re.captures(statement) {
+            let query = caps[1].trim().to_string();
+            debug_eprintln!(
+                "[executor::mod::extract_mv_as_query] extracted query: {}",
+                query
+            );
+            return Ok(query);
+        }
+        Err(Error::InvalidQuery(
+            "Could not extract AS query from materialized view".to_string(),
+        ))
+    }
+
+    fn extract_mv_source_table(&self, query: &str) -> Result<String> {
+        use regex::Regex;
+        let re = Regex::new(r"(?i)FROM\s+([^\s,()]+)")
+            .map_err(|e| Error::InternalError(format!("Regex error: {}", e)))?;
+        if let Some(caps) = re.captures(query) {
+            return Ok(caps[1].to_string());
+        }
+        Err(Error::InvalidQuery(
+            "Could not extract source table from query".to_string(),
+        ))
     }
 
     fn extract_object_name(statement: &str, prefix: &str) -> String {

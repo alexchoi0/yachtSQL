@@ -272,6 +272,8 @@ impl DmlInsertExecutor for QueryExecutor {
             }
         };
 
+        self.fire_materialized_view_triggers(&dataset_id, &table_id, &inserted_rows)?;
+
         if capture_returning {
             let returning_contexts: Vec<DmlRowContext> = inserted_rows
                 .iter()
@@ -1361,6 +1363,110 @@ impl QueryExecutor {
             }
         }
         Ok(Value::bytes(bytes))
+    }
+
+    fn fire_materialized_view_triggers(
+        &mut self,
+        dataset_id: &str,
+        table_id: &str,
+        _inserted_rows: &[Row],
+    ) -> Result<()> {
+        let triggers = {
+            let storage = self.storage.borrow();
+            let dataset = storage.get_dataset(dataset_id).ok_or_else(|| {
+                Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id))
+            })?;
+            dataset
+                .get_materialized_view_triggers(table_id)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        if triggers.is_empty() {
+            return Ok(());
+        }
+
+        debug_eprintln!(
+            "[executor::dml::insert] Firing {} materialized view triggers for table '{}'",
+            triggers.len(),
+            table_id
+        );
+
+        for trigger in &triggers {
+            debug_eprintln!(
+                "[executor::dml::insert] Executing trigger for view '{}' with query: {}",
+                trigger.view_name,
+                trigger.query
+            );
+
+            let query_result = self.execute_sql(&trigger.query)?;
+
+            let result_rows: Vec<Row> = query_result.rows().map(|r| r.to_vec()).unwrap_or_default();
+            debug_eprintln!(
+                "[executor::dml::insert] Query returned {} rows, schema: {:?}",
+                result_rows.len(),
+                query_result
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| &f.name)
+                    .collect::<Vec<_>>()
+            );
+            for (i, row) in result_rows.iter().enumerate() {
+                debug_eprintln!(
+                    "[executor::dml::insert] Result row {}: {:?}",
+                    i,
+                    row.values()
+                );
+            }
+
+            if !result_rows.is_empty() {
+                let view_schema = {
+                    let storage = self.storage.borrow();
+                    let dataset = storage.get_dataset(dataset_id).ok_or_else(|| {
+                        Error::DatasetNotFound(format!("Dataset '{}' not found", dataset_id))
+                    })?;
+                    let table = dataset.get_table(&trigger.view_name).ok_or_else(|| {
+                        Error::TableNotFound(format!(
+                            "Materialized view table '{}' not found",
+                            trigger.view_name
+                        ))
+                    })?;
+                    table.schema().clone()
+                };
+
+                let rows_to_insert: Vec<IndexMap<String, Value>> = result_rows
+                    .iter()
+                    .map(|row| {
+                        let mut row_map = IndexMap::new();
+                        for (idx, field) in view_schema.fields().iter().enumerate() {
+                            if idx < row.values().len() {
+                                row_map.insert(field.name.clone(), row.values()[idx].clone());
+                            }
+                        }
+                        row_map
+                    })
+                    .collect();
+
+                debug_eprintln!(
+                    "[executor::dml::insert] Inserting {} rows into view '{}'",
+                    rows_to_insert.len(),
+                    trigger.view_name
+                );
+                for (i, row) in rows_to_insert.iter().enumerate() {
+                    debug_eprintln!("[executor::dml::insert] Row {}: {:?}", i, row);
+                }
+
+                self.insert_rows_batch(
+                    dataset_id,
+                    &trigger.view_name,
+                    &view_schema,
+                    rows_to_insert,
+                )?;
+            }
+        }
+
+        Ok(())
     }
 }
 

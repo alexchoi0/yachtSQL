@@ -5316,6 +5316,53 @@ impl ProjectionWithExprExec {
                 Ok(Value::int64(0))
             }
 
+            "TOSTARTOFHOUR" => {
+                Self::validate_arg_count("TOSTARTOFHOUR", args, 1)?;
+                let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+                if val.is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(ts) = val.as_timestamp() {
+                    use chrono::Timelike;
+                    let truncated = ts
+                        .with_minute(0)
+                        .and_then(|t| t.with_second(0))
+                        .and_then(|t| t.with_nanosecond(0))
+                        .ok_or_else(|| {
+                            Error::invalid_query("Failed to truncate to start of hour")
+                        })?;
+                    return Ok(Value::timestamp(truncated));
+                }
+                Err(Error::type_mismatch(
+                    "TIMESTAMP",
+                    &val.data_type().to_string(),
+                ))
+            }
+
+            "TOSTARTOFMONTH" => {
+                Self::validate_arg_count("TOSTARTOFMONTH", args, 1)?;
+                let val = Self::evaluate_expr(&args[0], batch, row_idx)?;
+                if val.is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(d) = val.as_date() {
+                    use chrono::Datelike;
+                    return d.with_day(1).map(Value::date).ok_or_else(|| {
+                        Error::invalid_query("Failed to truncate to start of month")
+                    });
+                }
+                if let Some(ts) = val.as_timestamp() {
+                    use chrono::Datelike;
+                    return ts.date_naive().with_day(1).map(Value::date).ok_or_else(|| {
+                        Error::invalid_query("Failed to truncate to start of month")
+                    });
+                }
+                Err(Error::type_mismatch(
+                    "DATE or TIMESTAMP",
+                    &val.data_type().to_string(),
+                ))
+            }
+
             _ => Err(Error::unsupported_feature(format!(
                 "Unknown custom function: {}",
                 name

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
+use debug_print::debug_eprintln;
 use sqlparser::ast::{Expr as SqlExpr, Function, FunctionArguments};
 use yachtsql_core::error::{Error, Result};
 use yachtsql_core::types::Value;
@@ -546,7 +547,14 @@ impl AggregateSpec {
                         .fields()
                         .iter()
                         .position(|f| &f.name == &ident.value)
-                        .ok_or_else(|| Error::ColumnNotFound(ident.value.clone()))?;
+                        .ok_or_else(|| {
+                            debug_eprintln!(
+                                "[aggregator:549] ColumnNotFound: {} in schema: {:?}",
+                                ident.value,
+                                schema.fields().iter().map(|f| &f.name).collect::<Vec<_>>()
+                            );
+                            Error::ColumnNotFound(ident.value.clone())
+                        })?;
                     row.values()[col_idx].clone()
                 }
                 SqlExpr::CompoundIdentifier(parts) if parts.len() == 2 => {
