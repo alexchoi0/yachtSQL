@@ -22,7 +22,6 @@ fn setup_tables(executor: &mut QueryExecutor) {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_inner_join() {
     let mut executor = create_executor();
     setup_tables(&mut executor);
@@ -44,7 +43,6 @@ fn test_inner_join() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_left_join() {
     let mut executor = create_executor();
     setup_tables(&mut executor);
@@ -67,7 +65,6 @@ fn test_left_join() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_right_join() {
     let mut executor = create_executor();
     setup_tables(&mut executor);
@@ -134,7 +131,6 @@ fn test_cross_join() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_self_join() {
     let mut executor = create_executor();
 
@@ -160,7 +156,6 @@ fn test_self_join() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_join_with_multiple_conditions() {
     let mut executor = create_executor();
 
@@ -188,7 +183,6 @@ fn test_join_with_multiple_conditions() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_join_three_tables() {
     let mut executor = create_executor();
 
@@ -226,7 +220,6 @@ fn test_join_three_tables() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_natural_join() {
     let mut executor = create_executor();
 
@@ -252,7 +245,6 @@ fn test_natural_join() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_join_using() {
     let mut executor = create_executor();
 
@@ -278,7 +270,6 @@ fn test_join_using() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_join_with_where_clause() {
     let mut executor = create_executor();
     setup_tables(&mut executor);
