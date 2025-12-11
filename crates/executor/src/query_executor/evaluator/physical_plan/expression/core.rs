@@ -75,6 +75,13 @@ impl ProjectionWithExprExec {
             );
         }
 
+        if let Some(col_idx) = schema.field_index_qualified(name, Some(table_name)) {
+            return batch
+                .column(col_idx)
+                .ok_or_else(|| Error::column_not_found(format!("{}.{}", table_name, name)))?
+                .get(row_idx);
+        }
+
         if schema.field_index(name).is_some() {
             return Self::get_column_by_occurrence(batch, name, row_idx, occurrence_index);
         }
@@ -154,11 +161,23 @@ impl ProjectionWithExprExec {
                 let schema = batch.schema();
 
                 if let Some(col_idx) = schema.field_index_qualified(name, Some(table_name)) {
+                    debug_print::debug_eprintln!(
+                        "[executor::expr] Found {}.{} at index {} via field_index_qualified",
+                        table_name,
+                        name,
+                        col_idx
+                    );
                     return batch
                         .column(col_idx)
                         .ok_or_else(|| Error::column_not_found(format!("{}.{}", table_name, name)))?
                         .get(row_idx);
                 }
+
+                debug_print::debug_eprintln!(
+                    "[executor::expr] field_index_qualified({}, {}) returned None, falling back",
+                    name,
+                    table_name
+                );
 
                 if schema.field_index(name).is_some() {
                     return Self::evaluate_column(name, batch, row_idx);

@@ -250,7 +250,14 @@ impl LogicalToPhysicalPlanner {
                 }
             };
 
-            fields.push(Field::nullable(field_name, data_type));
+            let mut field = Field::nullable(field_name, data_type);
+            if let yachtsql_ir::expr::Expr::Column {
+                table: Some(tbl), ..
+            } = expr
+            {
+                field = field.with_source_table(tbl.clone());
+            }
+            fields.push(field);
         }
 
         Ok(Schema::from_fields(fields))
@@ -264,28 +271,6 @@ impl LogicalToPhysicalPlanner {
 
         match expr {
             Expr::Column { name, table } => {
-                if table.is_none() {
-                    let matching_fields: Vec<_> = schema
-                        .fields()
-                        .iter()
-                        .filter(|f| f.name.eq_ignore_ascii_case(name))
-                        .collect();
-
-                    if matching_fields.len() > 1 {
-                        let source_tables: std::collections::HashSet<_> = matching_fields
-                            .iter()
-                            .filter_map(|f| f.source_table.as_ref())
-                            .collect();
-
-                        if source_tables.len() > 1 {
-                            return Err(Error::InvalidQuery(format!(
-                                "Column reference '{}' is ambiguous - it exists in multiple tables. Use table.column syntax to disambiguate.",
-                                name
-                            )));
-                        }
-                    }
-                }
-
                 if schema.field(name).is_some() {
                     return Ok(());
                 }

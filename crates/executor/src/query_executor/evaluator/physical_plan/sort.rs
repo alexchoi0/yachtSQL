@@ -50,9 +50,10 @@ impl SortExec {
         debug_eprintln!("[executor::sort] schema fields:");
         for field in schema.fields() {
             debug_eprintln!(
-                "[executor::sort]   - {} : {:?}",
+                "[executor::sort]   - {} : {:?} (source_table={:?})",
                 field.name,
-                field.data_type
+                field.data_type,
+                field.source_table
             );
         }
 
@@ -562,8 +563,19 @@ impl ExecutionPlan for SortExec {
         for input_batch in input_batches {
             let num_rows = input_batch.num_rows();
 
+            debug_eprintln!(
+                "[executor::sort] input_batch schema: {:?}",
+                input_batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| format!("{} ({:?})", f.name, f.source_table))
+                    .collect::<Vec<_>>()
+            );
+
             for row_idx in 0..num_rows {
                 let sort_key = self.evaluate_sort_key(&input_batch, row_idx)?;
+                debug_eprintln!("[executor::sort] row {} sort_key={:?}", row_idx, sort_key);
 
                 let mut row_data = Vec::new();
                 for col in input_batch.expect_columns() {

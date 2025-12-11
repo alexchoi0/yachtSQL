@@ -147,18 +147,18 @@ impl LogicalPlanBuilder {
                     .iter()
                     .enumerate()
                     .map(|(idx, (expr, alias))| {
-                        let col_name = if let Some(alias_name) = alias {
-                            alias_name.clone()
+                        let (col_name, col_table) = if let Some(alias_name) = alias {
+                            (alias_name.clone(), None)
                         } else {
                             match expr {
-                                Expr::Column { name, .. } => name.clone(),
-                                _ => format!("expr_{}", idx),
+                                Expr::Column { name, table } => (name.clone(), table.clone()),
+                                _ => (format!("expr_{}", idx), None),
                             }
                         };
                         (
                             Expr::Column {
                                 name: col_name,
-                                table: None,
+                                table: col_table,
                             },
                             alias.clone(),
                         )
