@@ -236,7 +236,6 @@ fn test_subquery_with_limit() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_lateral_subquery() {
     let mut executor = create_executor();
     setup_tables(&mut executor);
@@ -639,7 +638,6 @@ fn test_subquery_in_case_expression() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_deeply_nested_subquery() {
     let mut executor = create_executor();
     setup_employees_departments(&mut executor);
