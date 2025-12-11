@@ -319,6 +319,12 @@ impl Storage {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MaterializedViewTrigger {
+    pub view_name: String,
+    pub query: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Dataset {
     tables: IndexMap<String, Table>,
@@ -331,6 +337,7 @@ pub struct Dataset {
     dictionaries: DictionaryRegistry,
     snapshots: SnapshotRegistry,
     table_layout: StorageLayout,
+    materialized_view_triggers: std::collections::HashMap<String, Vec<MaterializedViewTrigger>>,
 }
 
 impl Default for Dataset {
@@ -356,6 +363,7 @@ impl Dataset {
             dictionaries: DictionaryRegistry::new(),
             snapshots: SnapshotRegistry::new(),
             table_layout: layout,
+            materialized_view_triggers: std::collections::HashMap::new(),
         }
     }
 
@@ -363,6 +371,41 @@ impl Dataset {
         let table = Table::with_layout(schema, self.table_layout);
         self.tables.insert(table_id, table);
         Ok(())
+    }
+
+    pub fn create_table_with_engine(
+        &mut self,
+        table_id: String,
+        schema: Schema,
+        engine: TableEngine,
+    ) -> Result<()> {
+        let mut table = Table::with_layout(schema, self.table_layout);
+        table.set_engine(engine);
+        self.tables.insert(table_id, table);
+        Ok(())
+    }
+
+    pub fn register_materialized_view_trigger(
+        &mut self,
+        source_table: &str,
+        view_name: &str,
+        query: String,
+    ) {
+        let trigger = MaterializedViewTrigger {
+            view_name: view_name.to_string(),
+            query,
+        };
+        self.materialized_view_triggers
+            .entry(source_table.to_string())
+            .or_default()
+            .push(trigger);
+    }
+
+    pub fn get_materialized_view_triggers(
+        &self,
+        source_table: &str,
+    ) -> Option<&Vec<MaterializedViewTrigger>> {
+        self.materialized_view_triggers.get(source_table)
     }
 
     pub fn get_table(&self, table_id: &str) -> Option<&Table> {

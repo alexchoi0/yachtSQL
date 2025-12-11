@@ -3557,7 +3557,38 @@ impl FunctionName {
                 | Self::Entropy
                 | Self::MeanZscore
                 | Self::UniqUpdown
-        )
+        ) || self.is_state_merge_aggregate()
+    }
+
+    fn is_state_merge_aggregate(&self) -> bool {
+        if let Self::Custom(name) = self {
+            let upper = name.to_uppercase();
+            matches!(
+                upper.as_str(),
+                "SUMSTATE"
+                    | "SUMMERGE"
+                    | "AVGSTATE"
+                    | "AVGMERGE"
+                    | "COUNTSTATE"
+                    | "COUNTMERGE"
+                    | "MINSTATE"
+                    | "MINMERGE"
+                    | "MAXSTATE"
+                    | "MAXMERGE"
+                    | "UNIQSTATE"
+                    | "UNIQMERGE"
+                    | "ANYSTATE"
+                    | "ANYMERGE"
+                    | "ANYLASTSTATE"
+                    | "ANYLASTMERGE"
+                    | "GROUPARRAYSTATE"
+                    | "GROUPARRAYMERGE"
+                    | "GROUPUNIQARRAYSTATE"
+                    | "GROUPUNIQARRAYMERGE"
+            )
+        } else {
+            false
+        }
     }
 
     pub fn is_window(&self) -> bool {

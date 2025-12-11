@@ -2894,6 +2894,162 @@ impl AggregateExec {
                             Value::null()
                         }
                     }
+                    FunctionName::Custom(func_name) => {
+                        let upper_name = func_name.to_uppercase();
+                        match upper_name.as_str() {
+                            "SUMSTATE" | "SUMMERGE" => {
+                                let mut sum = 0.0f64;
+                                let mut has_value = false;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    if let Some(i) = val.as_i64() {
+                                        sum += i as f64;
+                                        has_value = true;
+                                    } else if let Some(f) = val.as_f64() {
+                                        sum += f;
+                                        has_value = true;
+                                    } else if let Some(n) = val.as_numeric() {
+                                        if let Some(f) = n.to_f64() {
+                                            sum += f;
+                                            has_value = true;
+                                        }
+                                    }
+                                }
+                                if has_value {
+                                    Value::float64(sum)
+                                } else {
+                                    Value::float64(0.0)
+                                }
+                            }
+                            "AVGSTATE" | "AVGMERGE" => {
+                                let mut sum = 0.0f64;
+                                let mut count = 0usize;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    if let Some(i) = val.as_i64() {
+                                        sum += i as f64;
+                                        count += 1;
+                                    } else if let Some(f) = val.as_f64() {
+                                        sum += f;
+                                        count += 1;
+                                    } else if let Some(n) = val.as_numeric() {
+                                        if let Some(f) = n.to_f64() {
+                                            sum += f;
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                if count > 0 {
+                                    Value::float64(sum / count as f64)
+                                } else {
+                                    Value::null()
+                                }
+                            }
+                            "COUNTSTATE" => {
+                                let count = values.iter().filter(|v| !v.is_null()).count();
+                                Value::int64(count as i64)
+                            }
+                            "COUNTMERGE" => {
+                                let mut sum = 0i64;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    if let Some(i) = val.as_i64() {
+                                        sum += i;
+                                    } else if let Some(f) = val.as_f64() {
+                                        sum += f as i64;
+                                    }
+                                }
+                                Value::int64(sum)
+                            }
+                            "MINSTATE" | "MINMERGE" => {
+                                let mut min_val: Option<f64> = None;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    let num = if let Some(i) = val.as_i64() {
+                                        Some(i as f64)
+                                    } else if let Some(f) = val.as_f64() {
+                                        Some(f)
+                                    } else {
+                                        val.as_numeric().and_then(|n| n.to_f64())
+                                    };
+                                    if let Some(n) = num {
+                                        min_val = Some(min_val.map_or(n, |m| m.min(n)));
+                                    }
+                                }
+                                min_val.map(Value::float64).unwrap_or(Value::null())
+                            }
+                            "MAXSTATE" | "MAXMERGE" => {
+                                let mut max_val: Option<f64> = None;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    let num = if let Some(i) = val.as_i64() {
+                                        Some(i as f64)
+                                    } else if let Some(f) = val.as_f64() {
+                                        Some(f)
+                                    } else {
+                                        val.as_numeric().and_then(|n| n.to_f64())
+                                    };
+                                    if let Some(n) = num {
+                                        max_val = Some(max_val.map_or(n, |m| m.max(n)));
+                                    }
+                                }
+                                max_val.map(Value::float64).unwrap_or(Value::null())
+                            }
+                            "UNIQSTATE" | "UNIQMERGE" => {
+                                let mut unique_values = std::collections::HashSet::new();
+                                for val in &values {
+                                    if !val.is_null() {
+                                        let key = format!("{:?}", val);
+                                        unique_values.insert(key);
+                                    }
+                                }
+                                Value::int64(unique_values.len() as i64)
+                            }
+                            "ANYSTATE" | "ANYMERGE" => values
+                                .iter()
+                                .find(|v| !v.is_null())
+                                .map(|v| (*v).clone())
+                                .unwrap_or(Value::null()),
+                            "ANYLASTSTATE" | "ANYLASTMERGE" => values
+                                .iter()
+                                .rev()
+                                .find(|v| !v.is_null())
+                                .map(|v| (*v).clone())
+                                .unwrap_or(Value::null()),
+                            "GROUPARRAYSTATE" | "GROUPARRAYMERGE" => {
+                                let arr: Vec<Value> = values
+                                    .iter()
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| (*v).clone())
+                                    .collect();
+                                Value::array(arr)
+                            }
+                            "GROUPUNIQARRAYSTATE" | "GROUPUNIQARRAYMERGE" => {
+                                let mut seen = std::collections::HashSet::new();
+                                let arr: Vec<Value> = values
+                                    .iter()
+                                    .filter(|v| !v.is_null())
+                                    .filter(|v| {
+                                        let key = format!("{:?}", v);
+                                        seen.insert(key)
+                                    })
+                                    .map(|v| (*v).clone())
+                                    .collect();
+                                Value::array(arr)
+                            }
+                            _ => Value::null(),
+                        }
+                    }
                     _ => Value::null(),
                 },
                 _ => Value::null(),
@@ -4846,6 +5002,162 @@ impl SortAggregateExec {
                             Value::float64(sum / count as f64)
                         } else {
                             Value::null()
+                        }
+                    }
+                    FunctionName::Custom(func_name) => {
+                        let upper_name = func_name.to_uppercase();
+                        match upper_name.as_str() {
+                            "SUMSTATE" | "SUMMERGE" => {
+                                let mut sum = 0.0f64;
+                                let mut has_value = false;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    if let Some(i) = val.as_i64() {
+                                        sum += i as f64;
+                                        has_value = true;
+                                    } else if let Some(f) = val.as_f64() {
+                                        sum += f;
+                                        has_value = true;
+                                    } else if let Some(n) = val.as_numeric() {
+                                        if let Some(f) = n.to_f64() {
+                                            sum += f;
+                                            has_value = true;
+                                        }
+                                    }
+                                }
+                                if has_value {
+                                    Value::float64(sum)
+                                } else {
+                                    Value::float64(0.0)
+                                }
+                            }
+                            "AVGSTATE" | "AVGMERGE" => {
+                                let mut sum = 0.0f64;
+                                let mut count = 0usize;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    if let Some(i) = val.as_i64() {
+                                        sum += i as f64;
+                                        count += 1;
+                                    } else if let Some(f) = val.as_f64() {
+                                        sum += f;
+                                        count += 1;
+                                    } else if let Some(n) = val.as_numeric() {
+                                        if let Some(f) = n.to_f64() {
+                                            sum += f;
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                if count > 0 {
+                                    Value::float64(sum / count as f64)
+                                } else {
+                                    Value::null()
+                                }
+                            }
+                            "COUNTSTATE" => {
+                                let count = values.iter().filter(|v| !v.is_null()).count();
+                                Value::int64(count as i64)
+                            }
+                            "COUNTMERGE" => {
+                                let mut sum = 0i64;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    if let Some(i) = val.as_i64() {
+                                        sum += i;
+                                    } else if let Some(f) = val.as_f64() {
+                                        sum += f as i64;
+                                    }
+                                }
+                                Value::int64(sum)
+                            }
+                            "MINSTATE" | "MINMERGE" => {
+                                let mut min_val: Option<f64> = None;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    let num = if let Some(i) = val.as_i64() {
+                                        Some(i as f64)
+                                    } else if let Some(f) = val.as_f64() {
+                                        Some(f)
+                                    } else {
+                                        val.as_numeric().and_then(|n| n.to_f64())
+                                    };
+                                    if let Some(n) = num {
+                                        min_val = Some(min_val.map_or(n, |m| m.min(n)));
+                                    }
+                                }
+                                min_val.map(Value::float64).unwrap_or(Value::null())
+                            }
+                            "MAXSTATE" | "MAXMERGE" => {
+                                let mut max_val: Option<f64> = None;
+                                for val in &values {
+                                    if val.is_null() {
+                                        continue;
+                                    }
+                                    let num = if let Some(i) = val.as_i64() {
+                                        Some(i as f64)
+                                    } else if let Some(f) = val.as_f64() {
+                                        Some(f)
+                                    } else {
+                                        val.as_numeric().and_then(|n| n.to_f64())
+                                    };
+                                    if let Some(n) = num {
+                                        max_val = Some(max_val.map_or(n, |m| m.max(n)));
+                                    }
+                                }
+                                max_val.map(Value::float64).unwrap_or(Value::null())
+                            }
+                            "UNIQSTATE" | "UNIQMERGE" => {
+                                let mut unique_values = std::collections::HashSet::new();
+                                for val in &values {
+                                    if !val.is_null() {
+                                        let key = format!("{:?}", val);
+                                        unique_values.insert(key);
+                                    }
+                                }
+                                Value::int64(unique_values.len() as i64)
+                            }
+                            "ANYSTATE" | "ANYMERGE" => values
+                                .iter()
+                                .find(|v| !v.is_null())
+                                .map(|v| (*v).clone())
+                                .unwrap_or(Value::null()),
+                            "ANYLASTSTATE" | "ANYLASTMERGE" => values
+                                .iter()
+                                .rev()
+                                .find(|v| !v.is_null())
+                                .map(|v| (*v).clone())
+                                .unwrap_or(Value::null()),
+                            "GROUPARRAYSTATE" | "GROUPARRAYMERGE" => {
+                                let arr: Vec<Value> = values
+                                    .iter()
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| (*v).clone())
+                                    .collect();
+                                Value::array(arr)
+                            }
+                            "GROUPUNIQARRAYSTATE" | "GROUPUNIQARRAYMERGE" => {
+                                let mut seen = std::collections::HashSet::new();
+                                let arr: Vec<Value> = values
+                                    .iter()
+                                    .filter(|v| !v.is_null())
+                                    .filter(|v| {
+                                        let key = format!("{:?}", v);
+                                        seen.insert(key)
+                                    })
+                                    .map(|v| (*v).clone())
+                                    .collect();
+                                Value::array(arr)
+                            }
+                            _ => Value::null(),
                         }
                     }
                     _ => Value::null(),
