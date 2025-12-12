@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use regex::Regex;
 use yachtsql_core::error::{Error, Result};
+use yachtsql_core::types::DataType;
 use yachtsql_functions::dialects::clickhouse::clickhouse_aggregate_functions;
 use yachtsql_functions::dialects::core_aggregate_functions;
 use yachtsql_ir::FunctionName;
@@ -970,6 +971,14 @@ impl LogicalToPhysicalPlanner {
                                 result.push((expr.clone(), alias.clone()));
                             }
                         }
+                        "UNTUPLE" => {
+                            if let Some(tuple_arg) = args.first() {
+                                let expanded = Self::expand_untuple(tuple_arg, schema);
+                                result.extend(expanded);
+                            } else {
+                                result.push((expr.clone(), alias.clone()));
+                            }
+                        }
                         _ => result.push((expr.clone(), alias.clone())),
                     }
                 }
@@ -1030,6 +1039,57 @@ impl LogicalToPhysicalPlanner {
                 _ => result.push((expr.clone(), alias.clone())),
             }
         }
+        result
+    }
+
+    fn expand_untuple(
+        tuple_arg: &Expr,
+        schema: &yachtsql_storage::Schema,
+    ) -> Vec<(Expr, Option<String>)> {
+        let mut result = Vec::new();
+
+        match tuple_arg {
+            Expr::Tuple(elements) => {
+                for (i, elem) in elements.iter().enumerate() {
+                    result.push((elem.clone(), Some(format!("{}", i + 1))));
+                }
+            }
+            Expr::Column { name, table } => {
+                if let Some(field) = schema.fields().iter().find(|f| &f.name == name) {
+                    if let DataType::Struct(fields) = &field.data_type {
+                        for (i, struct_field) in fields.iter().enumerate() {
+                            let tuple_element_expr = Expr::Function {
+                                name: FunctionName::TupleElement,
+                                args: vec![
+                                    tuple_arg.clone(),
+                                    Expr::Literal(LiteralValue::Int64((i + 1) as i64)),
+                                ],
+                            };
+                            result.push((tuple_element_expr, Some(struct_field.name.clone())));
+                        }
+                    }
+                }
+            }
+            _ => {
+                if let Some(tuple_type) =
+                    ProjectionWithExprExec::infer_expr_type_with_schema(tuple_arg, schema)
+                {
+                    if let DataType::Struct(fields) = tuple_type {
+                        for (i, struct_field) in fields.iter().enumerate() {
+                            let tuple_element_expr = Expr::Function {
+                                name: FunctionName::TupleElement,
+                                args: vec![
+                                    tuple_arg.clone(),
+                                    Expr::Literal(LiteralValue::Int64((i + 1) as i64)),
+                                ],
+                            };
+                            result.push((tuple_element_expr, Some(struct_field.name.clone())));
+                        }
+                    }
+                }
+            }
+        }
+
         result
     }
 
