@@ -970,6 +970,14 @@ impl LogicalToPhysicalPlanner {
                                 result.push((expr.clone(), alias.clone()));
                             }
                         }
+                        "UNTUPLE" => {
+                            if let Some(arg) = args.first() {
+                                let expanded = Self::expand_untuple(arg);
+                                result.extend(expanded);
+                            } else {
+                                result.push((expr.clone(), alias.clone()));
+                            }
+                        }
                         _ => result.push((expr.clone(), alias.clone())),
                     }
                 }
@@ -1031,6 +1039,45 @@ impl LogicalToPhysicalPlanner {
             }
         }
         result
+    }
+
+    fn expand_untuple(expr: &Expr) -> Vec<(Expr, Option<String>)> {
+        match expr {
+            Expr::Tuple(elements) => elements
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (e.clone(), Some(format!("_{}", i + 1))))
+                .collect(),
+            Expr::Function {
+                name: FunctionName::NamedTuple,
+                args,
+            } => {
+                let mut result = Vec::new();
+                let mut iter = args.iter();
+                while let (Some(name_expr), Some(value_expr)) = (iter.next(), iter.next()) {
+                    let alias = if let Expr::Literal(LiteralValue::String(name)) = name_expr {
+                        Some(name.clone())
+                    } else {
+                        None
+                    };
+                    result.push((value_expr.clone(), alias));
+                }
+                result
+            }
+            Expr::Column { name, table } => {
+                vec![(
+                    Expr::Function {
+                        name: FunctionName::Untuple,
+                        args: vec![Expr::Column {
+                            name: name.clone(),
+                            table: table.clone(),
+                        }],
+                    },
+                    None,
+                )]
+            }
+            _ => vec![(expr.clone(), None)],
+        }
     }
 
     fn expand_columns_regex(
@@ -1776,24 +1823,13 @@ impl LogicalToPhysicalPlanner {
                         );
                         input_schema.clone()
                     } else {
-                        eprintln!(
-                            "[logical_to_physical] Using final_input schema for validation: {:?}",
-                            final_input
-                                .schema()
-                                .fields()
-                                .iter()
-                                .map(|f| f.name.clone())
-                                .collect::<Vec<_>>()
-                        );
                         Rc::new(final_input.schema().clone())
                     };
-                eprintln!("[logical_to_physical] Calling infer_projection_schema...");
                 let output_schema = self.infer_projection_schema(
                     &resolved_expressions,
                     &validation_schema,
                     using_columns.as_deref(),
                 )?;
-                eprintln!("[logical_to_physical] infer_projection_schema succeeded");
 
                 Ok(Rc::new(
                     ProjectionWithExprExec::new(final_input, output_schema, resolved_expressions)
@@ -2444,7 +2480,28 @@ impl LogicalToPhysicalPlanner {
                 }
             }
 
-            Expr::Column { .. } => DataType::Unknown,
+            Expr::Column { name, table } => {
+                let storage = self.storage.borrow();
+                if let Some(table_name) = table {
+                    if let Some(table_ref) = storage.get_table(table_name) {
+                        if let Some(field) = table_ref.schema().field(name) {
+                            if let DataType::Array(inner) = &field.data_type {
+                                return inner.as_ref().clone();
+                            }
+                        }
+                    }
+                }
+                if let Some(dataset) = storage.get_dataset("default") {
+                    for (_, tbl) in dataset.tables() {
+                        if let Some(field) = tbl.schema().field(name) {
+                            if let DataType::Array(inner) = &field.data_type {
+                                return inner.as_ref().clone();
+                            }
+                        }
+                    }
+                }
+                DataType::Unknown
+            }
 
             Expr::Function { .. } => DataType::Unknown,
 

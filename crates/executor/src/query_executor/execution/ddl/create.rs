@@ -1110,6 +1110,8 @@ impl DdlExecutor for QueryExecutor {
                 })
             }
             SqlDataType::Interval { .. } => Ok(DataType::Interval),
+            SqlDataType::TsVector => Ok(DataType::TsVector),
+            SqlDataType::TsQuery => Ok(DataType::TsQuery),
             SqlDataType::GeometricType(kind) => {
                 use sqlparser::ast::GeometricTypeKind;
                 match kind {
