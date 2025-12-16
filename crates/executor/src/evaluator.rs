@@ -17,7 +17,7 @@ use geo_types::{
     Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
     Point, Polygon,
 };
-use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value as SqlValue};
+use sqlparser::ast::{BinaryOperator, CastKind, Expr, UnaryOperator, Value as SqlValue};
 use wkt::TryFromWkt;
 use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::Value;
@@ -560,8 +560,11 @@ impl<'a> Evaluator<'a> {
             } => self.evaluate_ilike(expr, pattern, *negated, record),
 
             Expr::Cast {
-                expr, data_type, ..
-            } => self.evaluate_cast(expr, data_type, record),
+                expr,
+                data_type,
+                kind,
+                ..
+            } => self.evaluate_cast(expr, data_type, kind, record),
 
             Expr::Tuple(exprs) => {
                 let mut values = Vec::with_capacity(exprs.len());
@@ -1249,12 +1252,15 @@ impl<'a> Evaluator<'a> {
         &self,
         expr: &Expr,
         target_type: &sqlparser::ast::DataType,
+        kind: &CastKind,
         record: &Record,
     ) -> Result<Value> {
         let val = self.evaluate(expr, record)?;
         if val.is_null() {
             return Ok(Value::null());
         }
+
+        let is_safe = matches!(kind, CastKind::SafeCast | CastKind::TryCast);
 
         match target_type {
             sqlparser::ast::DataType::Int64
@@ -1264,6 +1270,11 @@ impl<'a> Evaluator<'a> {
                     return Ok(Value::int64(i));
                 }
                 if let Some(f) = val.as_f64() {
+                    if is_safe {
+                        if f > i64::MAX as f64 || f < i64::MIN as f64 || !f.is_finite() {
+                            return Ok(Value::null());
+                        }
+                    }
                     return Ok(Value::int64(f as i64));
                 }
                 if let Some(s) = val.as_str() {
@@ -1273,6 +1284,9 @@ impl<'a> Evaluator<'a> {
                 }
                 if let Some(b) = val.as_bool() {
                     return Ok(Value::int64(if b { 1 } else { 0 }));
+                }
+                if is_safe {
+                    return Ok(Value::null());
                 }
                 Err(Error::TypeMismatch {
                     expected: "INT64".to_string(),
@@ -1291,6 +1305,9 @@ impl<'a> Evaluator<'a> {
                         return Ok(Value::float64(f));
                     }
                 }
+                if is_safe {
+                    return Ok(Value::null());
+                }
                 Err(Error::TypeMismatch {
                     expected: "FLOAT64".to_string(),
                     actual: val.data_type().to_string(),
@@ -1298,7 +1315,23 @@ impl<'a> Evaluator<'a> {
             }
             sqlparser::ast::DataType::String(_)
             | sqlparser::ast::DataType::Varchar(_)
-            | sqlparser::ast::DataType::Text => Ok(Value::string(val.to_string())),
+            | sqlparser::ast::DataType::Text => {
+                if let Some(b) = val.as_bytes() {
+                    match String::from_utf8(b.to_vec()) {
+                        Ok(s) => return Ok(Value::string(s)),
+                        Err(_) => {
+                            if is_safe {
+                                return Ok(Value::null());
+                            }
+                            return Err(Error::TypeMismatch {
+                                expected: "STRING".to_string(),
+                                actual: "invalid UTF-8 BYTES".to_string(),
+                            });
+                        }
+                    }
+                }
+                Ok(Value::string(val.to_string()))
+            }
             sqlparser::ast::DataType::Boolean | sqlparser::ast::DataType::Bool => {
                 if let Some(b) = val.as_bool() {
                     return Ok(Value::bool_val(b));
@@ -1315,6 +1348,9 @@ impl<'a> Evaluator<'a> {
                         return Ok(Value::bool_val(false));
                     }
                 }
+                if is_safe {
+                    return Ok(Value::null());
+                }
                 Err(Error::TypeMismatch {
                     expected: "BOOL".to_string(),
                     actual: val.data_type().to_string(),
@@ -1325,6 +1361,9 @@ impl<'a> Evaluator<'a> {
                     if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
                         return Ok(Value::date(date));
                     }
+                }
+                if is_safe {
+                    return Ok(Value::null());
                 }
                 Err(Error::TypeMismatch {
                     expected: "DATE".to_string(),
@@ -1347,6 +1386,9 @@ impl<'a> Evaluator<'a> {
                         ));
                     }
                 }
+                if is_safe {
+                    return Ok(Value::null());
+                }
                 Err(Error::TypeMismatch {
                     expected: "TIMESTAMP".to_string(),
                     actual: val.data_type().to_string(),
@@ -1360,6 +1402,9 @@ impl<'a> Evaluator<'a> {
                     if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f") {
                         return Ok(Value::time(time));
                     }
+                }
+                if is_safe {
+                    return Ok(Value::null());
                 }
                 Err(Error::TypeMismatch {
                     expected: "TIME".to_string(),
@@ -1384,8 +1429,37 @@ impl<'a> Evaluator<'a> {
                         return Ok(Value::float64(f));
                     }
                 }
+                if is_safe {
+                    return Ok(Value::null());
+                }
                 Err(Error::TypeMismatch {
                     expected: "NUMERIC".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::BigNumeric(_) => {
+                if let Some(i) = val.as_i64() {
+                    return Ok(Value::numeric(rust_decimal::Decimal::from(i)));
+                }
+                if let Some(f) = val.as_f64() {
+                    if let Some(dec) = rust_decimal::Decimal::from_f64_retain(f) {
+                        return Ok(Value::numeric(dec));
+                    }
+                    return Ok(Value::float64(f));
+                }
+                if let Some(s) = val.as_str() {
+                    if let Ok(dec) = rust_decimal::Decimal::from_str_exact(s) {
+                        return Ok(Value::numeric(dec));
+                    }
+                    if let Ok(f) = s.parse::<f64>() {
+                        return Ok(Value::float64(f));
+                    }
+                }
+                if is_safe {
+                    return Ok(Value::null());
+                }
+                Err(Error::TypeMismatch {
+                    expected: "BIGNUMERIC".to_string(),
                     actual: val.data_type().to_string(),
                 })
             }
@@ -1396,6 +1470,9 @@ impl<'a> Evaluator<'a> {
                 if let Some(s) = val.as_str() {
                     return Ok(Value::bytes(s.as_bytes().to_vec()));
                 }
+                if is_safe {
+                    return Ok(Value::null());
+                }
                 Err(Error::TypeMismatch {
                     expected: "BYTES".to_string(),
                     actual: val.data_type().to_string(),
@@ -1403,7 +1480,28 @@ impl<'a> Evaluator<'a> {
             }
             sqlparser::ast::DataType::Array(elem_def) => {
                 if let Some(arr) = val.as_array() {
+                    let elem_type = match elem_def {
+                        sqlparser::ast::ArrayElemTypeDef::AngleBracket(dt) => Some(dt.as_ref()),
+                        sqlparser::ast::ArrayElemTypeDef::SquareBracket(dt, _) => Some(dt.as_ref()),
+                        sqlparser::ast::ArrayElemTypeDef::Parenthesis(dt) => Some(dt.as_ref()),
+                        sqlparser::ast::ArrayElemTypeDef::None => None,
+                    };
+                    if let Some(target_elem_type) = elem_type {
+                        let mut result = Vec::with_capacity(arr.len());
+                        for item in arr {
+                            let cast_result = self.cast_value(item, target_elem_type, is_safe);
+                            match cast_result {
+                                Ok(v) => result.push(v),
+                                Err(_) if is_safe => return Ok(Value::null()),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        return Ok(Value::array(result));
+                    }
                     return Ok(Value::array(arr.to_vec()));
+                }
+                if is_safe {
+                    return Ok(Value::null());
                 }
                 Err(Error::TypeMismatch {
                     expected: "ARRAY".to_string(),
@@ -1417,10 +1515,73 @@ impl<'a> Evaluator<'a> {
                 }
                 Ok(Value::json(serde_json::Value::String(json_str)))
             }
-            _ => Err(Error::UnsupportedFeature(format!(
-                "CAST to {:?} not yet supported",
-                target_type
-            ))),
+            _ => {
+                if is_safe {
+                    return Ok(Value::null());
+                }
+                Err(Error::UnsupportedFeature(format!(
+                    "CAST to {:?} not yet supported",
+                    target_type
+                )))
+            }
+        }
+    }
+
+    fn cast_value(
+        &self,
+        val: &Value,
+        target_type: &sqlparser::ast::DataType,
+        is_safe: bool,
+    ) -> Result<Value> {
+        if val.is_null() {
+            return Ok(Value::null());
+        }
+
+        match target_type {
+            sqlparser::ast::DataType::String(_)
+            | sqlparser::ast::DataType::Varchar(_)
+            | sqlparser::ast::DataType::Text => Ok(Value::string(val.to_string())),
+            sqlparser::ast::DataType::Int64
+            | sqlparser::ast::DataType::BigInt(_)
+            | sqlparser::ast::DataType::Integer(_) => {
+                if let Some(i) = val.as_i64() {
+                    return Ok(Value::int64(i));
+                }
+                if let Some(f) = val.as_f64() {
+                    return Ok(Value::int64(f as i64));
+                }
+                if is_safe {
+                    return Ok(Value::null());
+                }
+                Err(Error::TypeMismatch {
+                    expected: "INT64".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::Float64 | sqlparser::ast::DataType::Double(_) => {
+                if let Some(f) = val.as_f64() {
+                    return Ok(Value::float64(f));
+                }
+                if let Some(i) = val.as_i64() {
+                    return Ok(Value::float64(i as f64));
+                }
+                if is_safe {
+                    return Ok(Value::null());
+                }
+                Err(Error::TypeMismatch {
+                    expected: "FLOAT64".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            _ => {
+                if is_safe {
+                    return Ok(Value::null());
+                }
+                Err(Error::UnsupportedFeature(format!(
+                    "Array element CAST to {:?} not yet supported",
+                    target_type
+                )))
+            }
         }
     }
 
@@ -2127,7 +2288,10 @@ impl<'a> Evaluator<'a> {
                         return Ok(Value::null());
                     }
                     match (args[0].as_i64(), args[1].as_i64()) {
-                        (Some(a), Some(b)) => Ok(Value::int64(a.wrapping_add(b))),
+                        (Some(a), Some(b)) => match a.checked_add(b) {
+                            Some(result) => Ok(Value::int64(result)),
+                            None => Ok(Value::null()),
+                        },
                         _ => match (args[0].as_f64(), args[1].as_f64()) {
                             (Some(a), Some(b)) => Ok(Value::float64(a + b)),
                             _ => Ok(Value::null()),
@@ -2139,9 +2303,24 @@ impl<'a> Evaluator<'a> {
                         return Ok(Value::null());
                     }
                     match (args[0].as_i64(), args[1].as_i64()) {
-                        (Some(a), Some(b)) => Ok(Value::int64(a.wrapping_sub(b))),
+                        (Some(a), Some(b)) => match a.checked_sub(b) {
+                            Some(result) => Ok(Value::int64(result)),
+                            None => Ok(Value::null()),
+                        },
                         _ => match (args[0].as_f64(), args[1].as_f64()) {
-                            (Some(a), Some(b)) => Ok(Value::float64(a - b)),
+                            (Some(a), Some(b)) => {
+                                if a <= i64::MIN as f64 && b > 0.0 {
+                                    return Ok(Value::null());
+                                }
+                                if a >= (i64::MAX as f64) + 1.0 && b < 0.0 {
+                                    return Ok(Value::null());
+                                }
+                                let result = a - b;
+                                if result >= (i64::MAX as f64) + 1.0 || result < i64::MIN as f64 {
+                                    return Ok(Value::null());
+                                }
+                                Ok(Value::float64(result))
+                            }
                             _ => Ok(Value::null()),
                         },
                     }
@@ -2151,7 +2330,10 @@ impl<'a> Evaluator<'a> {
                         return Ok(Value::null());
                     }
                     match (args[0].as_i64(), args[1].as_i64()) {
-                        (Some(a), Some(b)) => Ok(Value::int64(a.wrapping_mul(b))),
+                        (Some(a), Some(b)) => match a.checked_mul(b) {
+                            Some(result) => Ok(Value::int64(result)),
+                            None => Ok(Value::null()),
+                        },
                         _ => match (args[0].as_f64(), args[1].as_f64()) {
                             (Some(a), Some(b)) => Ok(Value::float64(a * b)),
                             _ => Ok(Value::null()),
@@ -2163,10 +2345,17 @@ impl<'a> Evaluator<'a> {
                         return Ok(Value::null());
                     }
                     if let Some(i) = args[0].as_i64() {
-                        return Ok(Value::int64(i.wrapping_neg()));
+                        return match i.checked_neg() {
+                            Some(result) => Ok(Value::int64(result)),
+                            None => Ok(Value::null()),
+                        };
                     }
                     if let Some(f) = args[0].as_f64() {
-                        return Ok(Value::float64(-f));
+                        let result = -f;
+                        if result >= (i64::MAX as f64) + 1.0 || result < i64::MIN as f64 {
+                            return Ok(Value::null());
+                        }
+                        return Ok(Value::float64(result));
                     }
                     Ok(Value::null())
                 }
@@ -4377,19 +4566,50 @@ impl<'a> Evaluator<'a> {
                 let result = !geom1.intersects(&geom2);
                 Ok(Value::bool_val(result))
             }
-            "NET.IP_FROM_STRING" | "NET.SAFE_IP_FROM_STRING" => {
+            "NET.IP_FROM_STRING" => {
                 if args.is_empty() || args[0].is_null() {
                     return Ok(Value::null());
                 }
                 let ip_str = args[0].as_str().unwrap_or_default();
-                Ok(Value::bytes(ip_str.as_bytes().to_vec()))
+                if let Ok(ipv4) = ip_str.parse::<std::net::Ipv4Addr>() {
+                    return Ok(Value::bytes(ipv4.octets().to_vec()));
+                }
+                if let Ok(ipv6) = ip_str.parse::<std::net::Ipv6Addr>() {
+                    return Ok(Value::bytes(ipv6.octets().to_vec()));
+                }
+                Err(Error::InvalidQuery(format!(
+                    "Invalid IP address: {}",
+                    ip_str
+                )))
+            }
+            "NET.SAFE_IP_FROM_STRING" => {
+                if args.is_empty() || args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let ip_str = args[0].as_str().unwrap_or_default();
+                if let Ok(ipv4) = ip_str.parse::<std::net::Ipv4Addr>() {
+                    return Ok(Value::bytes(ipv4.octets().to_vec()));
+                }
+                if let Ok(ipv6) = ip_str.parse::<std::net::Ipv6Addr>() {
+                    return Ok(Value::bytes(ipv6.octets().to_vec()));
+                }
+                Ok(Value::null())
             }
             "NET.IP_TO_STRING" => {
                 if args.is_empty() || args[0].is_null() {
                     return Ok(Value::null());
                 }
                 if let Some(b) = args[0].as_bytes() {
-                    return Ok(Value::string(String::from_utf8_lossy(b).to_string()));
+                    if b.len() == 4 {
+                        let ipv4 = std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+                        return Ok(Value::string(ipv4.to_string()));
+                    }
+                    if b.len() == 16 {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(b);
+                        let ipv6 = std::net::Ipv6Addr::from(octets);
+                        return Ok(Value::string(ipv6.to_string()));
+                    }
                 }
                 Ok(Value::null())
             }
@@ -4407,13 +4627,241 @@ impl<'a> Evaluator<'a> {
                 if args.is_empty() || args[0].is_null() {
                     return Ok(Value::null());
                 }
-                Ok(Value::int64(0))
+                if let Some(b) = args[0].as_bytes() {
+                    if b.len() == 4 {
+                        let val = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+                        return Ok(Value::int64(val as i64));
+                    }
+                }
+                Ok(Value::null())
             }
-            "NET.HOST" | "NET.REG_DOMAIN" | "NET.PUBLIC_SUFFIX" => {
+            "NET.IP_NET_MASK" => {
+                if args.len() != 2 || args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let ip_version = args[0].as_i64().unwrap_or(0);
+                let prefix_len = args[1].as_i64().unwrap_or(0) as u32;
+                match ip_version {
+                    4 => {
+                        if prefix_len > 32 {
+                            return Ok(Value::null());
+                        }
+                        let mask = if prefix_len == 0 {
+                            0u32
+                        } else {
+                            !0u32 << (32 - prefix_len)
+                        };
+                        Ok(Value::bytes(mask.to_be_bytes().to_vec()))
+                    }
+                    6 => {
+                        if prefix_len > 128 {
+                            return Ok(Value::null());
+                        }
+                        let mut mask = [0u8; 16];
+                        let full_bytes = (prefix_len / 8) as usize;
+                        let remaining_bits = prefix_len % 8;
+                        for b in mask.iter_mut().take(full_bytes) {
+                            *b = 0xff;
+                        }
+                        if full_bytes < 16 && remaining_bits > 0 {
+                            mask[full_bytes] = 0xff << (8 - remaining_bits);
+                        }
+                        Ok(Value::bytes(mask.to_vec()))
+                    }
+                    _ => Ok(Value::null()),
+                }
+            }
+            "NET.IP_TRUNC" => {
+                if args.len() != 2 || args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let prefix_len = args[1].as_i64().unwrap_or(0) as u32;
+                if let Some(ip_bytes) = args[0].as_bytes() {
+                    if ip_bytes.len() == 4 {
+                        if prefix_len > 32 {
+                            return Ok(Value::null());
+                        }
+                        let ip = u32::from_be_bytes([
+                            ip_bytes[0],
+                            ip_bytes[1],
+                            ip_bytes[2],
+                            ip_bytes[3],
+                        ]);
+                        let mask = if prefix_len == 0 {
+                            0u32
+                        } else {
+                            !0u32 << (32 - prefix_len)
+                        };
+                        let truncated = ip & mask;
+                        return Ok(Value::bytes(truncated.to_be_bytes().to_vec()));
+                    }
+                    if ip_bytes.len() == 16 {
+                        if prefix_len > 128 {
+                            return Ok(Value::null());
+                        }
+                        let mut result = [0u8; 16];
+                        let full_bytes = (prefix_len / 8) as usize;
+                        let remaining_bits = prefix_len % 8;
+                        for (i, b) in result.iter_mut().enumerate().take(full_bytes) {
+                            *b = ip_bytes[i];
+                        }
+                        if full_bytes < 16 && remaining_bits > 0 {
+                            let mask = 0xff << (8 - remaining_bits);
+                            result[full_bytes] = ip_bytes[full_bytes] & mask;
+                        }
+                        return Ok(Value::bytes(result.to_vec()));
+                    }
+                }
+                Ok(Value::null())
+            }
+            "NET.HOST" => {
                 if args.is_empty() || args[0].is_null() {
                     return Ok(Value::null());
                 }
-                Ok(args[0].clone())
+                let url_str = args[0].as_str().unwrap_or_default();
+                if let Ok(url) = url::Url::parse(url_str) {
+                    if let Some(host) = url.host_str() {
+                        return Ok(Value::string(host.to_string()));
+                    }
+                }
+                Ok(Value::null())
+            }
+            "NET.PUBLIC_SUFFIX" => {
+                if args.is_empty() || args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let domain = args[0].as_str().unwrap_or_default();
+                let parts: Vec<&str> = domain.split('.').collect();
+                if parts.len() >= 2 {
+                    let suffix = if parts.len() >= 3 {
+                        let last_two =
+                            format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+                        let common_multi =
+                            ["co.uk", "com.au", "co.nz", "co.jp", "com.br", "org.uk"];
+                        if common_multi.contains(&last_two.as_str()) {
+                            last_two
+                        } else {
+                            parts[parts.len() - 1].to_string()
+                        }
+                    } else {
+                        parts[parts.len() - 1].to_string()
+                    };
+                    return Ok(Value::string(suffix));
+                }
+                Ok(Value::string(String::new()))
+            }
+            "NET.REG_DOMAIN" => {
+                if args.is_empty() || args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let domain = args[0].as_str().unwrap_or_default();
+                let parts: Vec<&str> = domain.split('.').collect();
+                if parts.len() >= 2 {
+                    let common_multi = ["co.uk", "com.au", "co.nz", "co.jp", "com.br", "org.uk"];
+                    let reg_domain = if parts.len() >= 3 {
+                        let last_two =
+                            format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+                        if common_multi.contains(&last_two.as_str()) {
+                            if parts.len() >= 3 {
+                                format!(
+                                    "{}.{}.{}",
+                                    parts[parts.len() - 3],
+                                    parts[parts.len() - 2],
+                                    parts[parts.len() - 1]
+                                )
+                            } else {
+                                last_two
+                            }
+                        } else {
+                            format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1])
+                        }
+                    } else {
+                        domain.to_string()
+                    };
+                    return Ok(Value::string(reg_domain));
+                }
+                Ok(Value::string(String::new()))
+            }
+            "NET.IP_IN_NET" => {
+                if args.len() != 2 || args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let cidr_str = args[1].as_str().unwrap_or_default();
+                let cidr_parts: Vec<&str> = cidr_str.split('/').collect();
+                if cidr_parts.len() != 2 {
+                    return Ok(Value::null());
+                }
+                let prefix_len: u32 = cidr_parts[1].parse().unwrap_or(0);
+                if let Some(ip_bytes) = args[0].as_bytes() {
+                    if ip_bytes.len() == 4 {
+                        if let Ok(network_ip) = cidr_parts[0].parse::<std::net::Ipv4Addr>() {
+                            let ip = u32::from_be_bytes([
+                                ip_bytes[0],
+                                ip_bytes[1],
+                                ip_bytes[2],
+                                ip_bytes[3],
+                            ]);
+                            let network = u32::from_be_bytes(network_ip.octets());
+                            let mask = if prefix_len == 0 {
+                                0u32
+                            } else {
+                                !0u32 << (32 - prefix_len)
+                            };
+                            return Ok(Value::bool_val((ip & mask) == (network & mask)));
+                        }
+                    }
+                }
+                Ok(Value::bool_val(false))
+            }
+            "NET.MAKE_NET" => {
+                if args.len() != 2 || args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let prefix_len = args[1].as_i64().unwrap_or(0);
+                if let Some(ip_bytes) = args[0].as_bytes() {
+                    if ip_bytes.len() == 4 {
+                        let ip = std::net::Ipv4Addr::new(
+                            ip_bytes[0],
+                            ip_bytes[1],
+                            ip_bytes[2],
+                            ip_bytes[3],
+                        );
+                        return Ok(Value::string(format!("{}/{}", ip, prefix_len)));
+                    }
+                    if ip_bytes.len() == 16 {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(ip_bytes);
+                        let ip = std::net::Ipv6Addr::from(octets);
+                        return Ok(Value::string(format!("{}/{}", ip, prefix_len)));
+                    }
+                }
+                Ok(Value::null())
+            }
+            "NET.IP_IS_PRIVATE" => {
+                if args.is_empty() || args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(ip_bytes) = args[0].as_bytes() {
+                    if ip_bytes.len() == 4 {
+                        let ipv4 = std::net::Ipv4Addr::new(
+                            ip_bytes[0],
+                            ip_bytes[1],
+                            ip_bytes[2],
+                            ip_bytes[3],
+                        );
+                        let is_private =
+                            ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local();
+                        return Ok(Value::bool_val(is_private));
+                    }
+                    if ip_bytes.len() == 16 {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(ip_bytes);
+                        let ipv6 = std::net::Ipv6Addr::from(octets);
+                        let is_private = ipv6.is_loopback();
+                        return Ok(Value::bool_val(is_private));
+                    }
+                }
+                Ok(Value::bool_val(false))
             }
             "RANGE" => Ok(Value::string("RANGE".to_string())),
             "JSON_ARRAY" => {
@@ -5386,6 +5834,95 @@ impl<'a> Evaluator<'a> {
                     ));
                 }
                 Ok(args[0].clone())
+            }
+            "ARRAYENUMERATE" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "arrayEnumerate requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(arr) = args[0].as_array() {
+                    let indices: Vec<Value> =
+                        (1..=arr.len()).map(|i| Value::int64(i as i64)).collect();
+                    return Ok(Value::array(indices));
+                }
+                Err(Error::TypeMismatch {
+                    expected: "ARRAY".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })
+            }
+            "MAPKEYS" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "mapKeys requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(struct_val) = args[0].as_struct() {
+                    let keys: Vec<Value> = struct_val
+                        .iter()
+                        .map(|(k, _)| Value::string(k.clone()))
+                        .collect();
+                    return Ok(Value::array(keys));
+                }
+                Err(Error::TypeMismatch {
+                    expected: "MAP".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })
+            }
+            "MAPVALUES" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "mapValues requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(struct_val) = args[0].as_struct() {
+                    let values: Vec<Value> = struct_val.iter().map(|(_, v)| v.clone()).collect();
+                    return Ok(Value::array(values));
+                }
+                Err(Error::TypeMismatch {
+                    expected: "MAP".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })
+            }
+            "MAP" => {
+                if !args.len().is_multiple_of(2) {
+                    return Err(Error::InvalidQuery(
+                        "map() requires an even number of arguments (key-value pairs)".to_string(),
+                    ));
+                }
+                let mut pairs: Vec<(String, Value)> = Vec::new();
+                let mut i = 0;
+                while i < args.len() {
+                    let key = args[i].as_str().ok_or_else(|| Error::TypeMismatch {
+                        expected: "STRING".to_string(),
+                        actual: args[i].data_type().to_string(),
+                    })?;
+                    pairs.push((key.to_string(), args[i + 1].clone()));
+                    i += 2;
+                }
+                Ok(Value::struct_val(pairs))
+            }
+            "NUMBERS" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "numbers requires 1 argument".to_string(),
+                    ));
+                }
+                let n = args[0].as_i64().ok_or_else(|| Error::TypeMismatch {
+                    expected: "INT64".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let values: Vec<Value> = (0..n).map(Value::int64).collect();
+                Ok(Value::array(values))
             }
             _ => Err(Error::UnsupportedFeature(format!(
                 "Function not yet supported: {}",

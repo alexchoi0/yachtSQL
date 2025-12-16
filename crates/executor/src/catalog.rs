@@ -99,6 +99,20 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn replace_table(&mut self, name: &str, table: Table) -> Result<()> {
+        let key = name.to_uppercase();
+        if !self.tables.contains_key(&key) {
+            return Err(Error::TableNotFound(name.to_string()));
+        }
+        self.tables.insert(key, table);
+        Ok(())
+    }
+
+    pub fn create_or_replace_table(&mut self, name: &str, table: Table) {
+        let key = name.to_uppercase();
+        self.tables.insert(key, table);
+    }
+
     pub fn create_function(&mut self, func: UserFunction, or_replace: bool) -> Result<()> {
         let key = func.name.to_uppercase();
         if self.functions.contains_key(&key) && !or_replace {
