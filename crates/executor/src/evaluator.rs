@@ -776,8 +776,14 @@ impl<'a> Evaluator<'a> {
             }
 
             Expr::Interval(interval) => {
-                let num = self.evaluate(&interval.value, record)?;
-                let amount = num.as_i64().unwrap_or(0);
+                let val = self.evaluate(&interval.value, record)?;
+
+                if let Some(s) = val.as_str() {
+                    let interval_val = self.parse_interval_string(s)?;
+                    return Ok(Value::interval(interval_val));
+                }
+
+                let amount = val.as_i64().unwrap_or(0);
                 let unit = interval
                     .leading_field
                     .as_ref()
@@ -868,8 +874,40 @@ impl<'a> Evaluator<'a> {
                     return Ok(Value::int64(result));
                 }
 
+                if let Some(interval) = val.as_interval() {
+                    use yachtsql_common::types::IntervalValue;
+                    let result = match field_str.to_uppercase().as_str() {
+                        "YEAR" => (interval.months / 12) as i64,
+                        "MONTH" => (interval.months % 12) as i64,
+                        "DAY" => interval.days as i64,
+                        "HOUR" => {
+                            let total_micros = interval.nanos / IntervalValue::NANOS_PER_MICRO;
+                            total_micros / IntervalValue::MICROS_PER_HOUR
+                        }
+                        "MINUTE" => {
+                            let total_micros = interval.nanos / IntervalValue::NANOS_PER_MICRO;
+                            let remaining_after_hours =
+                                total_micros % IntervalValue::MICROS_PER_HOUR;
+                            remaining_after_hours / IntervalValue::MICROS_PER_MINUTE
+                        }
+                        "SECOND" => {
+                            let total_micros = interval.nanos / IntervalValue::NANOS_PER_MICRO;
+                            let remaining_after_minutes =
+                                total_micros % IntervalValue::MICROS_PER_MINUTE;
+                            remaining_after_minutes / IntervalValue::MICROS_PER_SECOND
+                        }
+                        _ => {
+                            return Err(Error::UnsupportedFeature(format!(
+                                "EXTRACT {} not supported for INTERVAL",
+                                field_str
+                            )));
+                        }
+                    };
+                    return Ok(Value::int64(result));
+                }
+
                 Err(Error::TypeMismatch {
-                    expected: "DATE, TIME, or TIMESTAMP".to_string(),
+                    expected: "DATE, TIME, TIMESTAMP, or INTERVAL".to_string(),
                     actual: val.data_type().to_string(),
                 })
             }
@@ -1683,9 +1721,9 @@ impl<'a> Evaluator<'a> {
                 })?;
                 Ok(Value::bool_val(l || r))
             }
-            BinaryOperator::Plus => self.numeric_op(left, right, |a, b| a + b, |a, b| a + b),
-            BinaryOperator::Minus => self.numeric_op(left, right, |a, b| a - b, |a, b| a - b),
-            BinaryOperator::Multiply => self.numeric_op(left, right, |a, b| a * b, |a, b| a * b),
+            BinaryOperator::Plus => self.add_op(left, right),
+            BinaryOperator::Minus => self.sub_op(left, right),
+            BinaryOperator::Multiply => self.mul_op(left, right),
             BinaryOperator::Divide => {
                 if let Some(r) = right.as_i64() {
                     if r == 0 {
@@ -1770,6 +1808,30 @@ impl<'a> Evaluator<'a> {
         if let (Some(l), Some(r)) = (left.as_bytes(), right.as_bytes()) {
             return Ok(Value::bool_val(pred(l.cmp(r))));
         }
+        if let (Some(l), Some(r)) = (left.as_interval(), right.as_interval()) {
+            use yachtsql_common::types::IntervalValue;
+            let l_total_nanos = (l.months as i64)
+                * 30
+                * 24
+                * IntervalValue::MICROS_PER_HOUR
+                * IntervalValue::NANOS_PER_MICRO
+                + (l.days as i64)
+                    * 24
+                    * IntervalValue::MICROS_PER_HOUR
+                    * IntervalValue::NANOS_PER_MICRO
+                + l.nanos;
+            let r_total_nanos = (r.months as i64)
+                * 30
+                * 24
+                * IntervalValue::MICROS_PER_HOUR
+                * IntervalValue::NANOS_PER_MICRO
+                + (r.days as i64)
+                    * 24
+                    * IntervalValue::MICROS_PER_HOUR
+                    * IntervalValue::NANOS_PER_MICRO
+                + r.nanos;
+            return Ok(Value::bool_val(pred(l_total_nanos.cmp(&r_total_nanos))));
+        }
         Err(Error::TypeMismatch {
             expected: "comparable types".to_string(),
             actual: format!("{:?} vs {:?}", left.data_type(), right.data_type()),
@@ -1793,6 +1855,169 @@ impl<'a> Evaluator<'a> {
             expected: "numeric types".to_string(),
             actual: format!("{:?} vs {:?}", left.data_type(), right.data_type()),
         })
+    }
+
+    fn add_op(&self, left: &Value, right: &Value) -> Result<Value> {
+        use chrono::{Duration, Months};
+        use yachtsql_common::types::IntervalValue;
+
+        if let Some(date) = left.as_date() {
+            if let Some(interval) = right.as_interval() {
+                let result = if interval.months != 0 {
+                    date.checked_add_months(Months::new(interval.months as u32))
+                        .ok_or_else(|| {
+                            Error::InvalidQuery("Date overflow when adding interval".to_string())
+                        })?
+                } else {
+                    date
+                };
+                let result = result
+                    .checked_add_signed(Duration::days(interval.days as i64))
+                    .ok_or_else(|| {
+                        Error::InvalidQuery("Date overflow when adding interval".to_string())
+                    })?;
+                return Ok(Value::date(result));
+            }
+        }
+
+        if let Some(ts) = left.as_timestamp() {
+            if let Some(interval) = right.as_interval() {
+                let result = if interval.months != 0 {
+                    let date = ts.date_naive();
+                    let new_date = date
+                        .checked_add_months(Months::new(interval.months as u32))
+                        .ok_or_else(|| {
+                            Error::InvalidQuery(
+                                "Timestamp overflow when adding interval".to_string(),
+                            )
+                        })?;
+                    ts.with_day(1)
+                        .unwrap()
+                        .with_month(new_date.month())
+                        .unwrap()
+                        .with_day(
+                            new_date.day().min(
+                                chrono::NaiveDate::from_ymd_opt(
+                                    new_date.year(),
+                                    new_date.month(),
+                                    1,
+                                )
+                                .unwrap()
+                                .with_month(new_date.month() % 12 + 1)
+                                .map(|d| d.pred_opt().unwrap().day())
+                                .unwrap_or(28),
+                            ),
+                        )
+                        .unwrap_or(ts)
+                } else {
+                    ts
+                };
+                let result = result + Duration::days(interval.days as i64);
+                let nanos_to_add = interval.nanos;
+                let result = result + Duration::nanoseconds(nanos_to_add);
+                return Ok(Value::timestamp(result));
+            }
+        }
+
+        if let (Some(i1), Some(i2)) = (left.as_interval(), right.as_interval()) {
+            return Ok(Value::interval(IntervalValue {
+                months: i1.months + i2.months,
+                days: i1.days + i2.days,
+                nanos: i1.nanos + i2.nanos,
+            }));
+        }
+
+        self.numeric_op(left, right, |a, b| a + b, |a, b| a + b)
+    }
+
+    fn sub_op(&self, left: &Value, right: &Value) -> Result<Value> {
+        use chrono::{Duration, Months};
+        use yachtsql_common::types::IntervalValue;
+
+        if let Some(date) = left.as_date() {
+            if let Some(interval) = right.as_interval() {
+                let result = if interval.months != 0 {
+                    date.checked_sub_months(Months::new(interval.months as u32))
+                        .ok_or_else(|| {
+                            Error::InvalidQuery(
+                                "Date overflow when subtracting interval".to_string(),
+                            )
+                        })?
+                } else {
+                    date
+                };
+                let result = result
+                    .checked_sub_signed(Duration::days(interval.days as i64))
+                    .ok_or_else(|| {
+                        Error::InvalidQuery("Date overflow when subtracting interval".to_string())
+                    })?;
+                return Ok(Value::date(result));
+            }
+        }
+
+        if let Some(ts) = left.as_timestamp() {
+            if let Some(interval) = right.as_interval() {
+                let result = if interval.months != 0 {
+                    let date = ts.date_naive();
+                    let new_date = date
+                        .checked_sub_months(Months::new(interval.months as u32))
+                        .ok_or_else(|| {
+                            Error::InvalidQuery(
+                                "Timestamp overflow when subtracting interval".to_string(),
+                            )
+                        })?;
+                    ts.with_day(1)
+                        .unwrap()
+                        .with_month(new_date.month())
+                        .unwrap()
+                        .with_year(new_date.year())
+                        .unwrap()
+                        .with_day(new_date.day())
+                        .unwrap_or(ts)
+                } else {
+                    ts
+                };
+                let result = result - Duration::days(interval.days as i64);
+                let result = result - Duration::nanoseconds(interval.nanos);
+                return Ok(Value::timestamp(result));
+            }
+        }
+
+        if let (Some(i1), Some(i2)) = (left.as_interval(), right.as_interval()) {
+            return Ok(Value::interval(IntervalValue {
+                months: i1.months - i2.months,
+                days: i1.days - i2.days,
+                nanos: i1.nanos - i2.nanos,
+            }));
+        }
+
+        self.numeric_op(left, right, |a, b| a - b, |a, b| a - b)
+    }
+
+    fn mul_op(&self, left: &Value, right: &Value) -> Result<Value> {
+        use yachtsql_common::types::IntervalValue;
+
+        if let Some(interval) = left.as_interval() {
+            if let Some(scalar) = right.as_i64() {
+                return Ok(Value::interval(IntervalValue {
+                    months: interval.months * scalar as i32,
+                    days: interval.days * scalar as i32,
+                    nanos: interval.nanos * scalar,
+                }));
+            }
+        }
+
+        if let Some(scalar) = left.as_i64() {
+            if let Some(interval) = right.as_interval() {
+                return Ok(Value::interval(IntervalValue {
+                    months: interval.months * scalar as i32,
+                    days: interval.days * scalar as i32,
+                    nanos: interval.nanos * scalar,
+                }));
+            }
+        }
+
+        self.numeric_op(left, right, |a, b| a * b, |a, b| a * b)
     }
 
     fn evaluate_unary_op(&self, op: &UnaryOperator, val: &Value) -> Result<Value> {
@@ -1848,6 +2073,9 @@ impl<'a> Evaluator<'a> {
         let name = func.name.to_string().to_uppercase();
         if let Some(udf_result) = self.try_evaluate_udf(&name, func, record)? {
             return Ok(udf_result);
+        }
+        if name == "MAKE_INTERVAL" {
+            return self.evaluate_make_interval(func, record);
         }
         let args = self.extract_function_args(func, record)?;
         self.evaluate_function_impl(&name, args, func)
@@ -5924,6 +6152,80 @@ impl<'a> Evaluator<'a> {
                 let values: Vec<Value> = (0..n).map(Value::int64).collect();
                 Ok(Value::array(values))
             }
+            "JUSTIFY_DAYS" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "JUSTIFY_DAYS requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let interval = args[0].as_interval().ok_or_else(|| Error::TypeMismatch {
+                    expected: "INTERVAL".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let extra_months = interval.days / 30;
+                let remaining_days = interval.days % 30;
+                Ok(Value::interval(yachtsql_common::types::IntervalValue {
+                    months: interval.months + extra_months,
+                    days: remaining_days,
+                    nanos: interval.nanos,
+                }))
+            }
+            "JUSTIFY_HOURS" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "JUSTIFY_HOURS requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let interval = args[0].as_interval().ok_or_else(|| Error::TypeMismatch {
+                    expected: "INTERVAL".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                use yachtsql_common::types::IntervalValue;
+                let total_micros = interval.nanos / IntervalValue::NANOS_PER_MICRO;
+                let total_hours = total_micros / IntervalValue::MICROS_PER_HOUR;
+                let extra_days = total_hours / 24;
+                let remaining_micros =
+                    total_micros - extra_days * 24 * IntervalValue::MICROS_PER_HOUR;
+                Ok(Value::interval(IntervalValue {
+                    months: interval.months,
+                    days: interval.days + extra_days as i32,
+                    nanos: remaining_micros * IntervalValue::NANOS_PER_MICRO,
+                }))
+            }
+            "JUSTIFY_INTERVAL" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "JUSTIFY_INTERVAL requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let interval = args[0].as_interval().ok_or_else(|| Error::TypeMismatch {
+                    expected: "INTERVAL".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                use yachtsql_common::types::IntervalValue;
+                let total_micros = interval.nanos / IntervalValue::NANOS_PER_MICRO;
+                let total_hours = total_micros / IntervalValue::MICROS_PER_HOUR;
+                let extra_days_from_hours = total_hours / 24;
+                let remaining_micros =
+                    total_micros - extra_days_from_hours * 24 * IntervalValue::MICROS_PER_HOUR;
+                let total_days = interval.days + extra_days_from_hours as i32;
+                let extra_months = total_days / 30;
+                let remaining_days = total_days % 30;
+                Ok(Value::interval(IntervalValue {
+                    months: interval.months + extra_months,
+                    days: remaining_days,
+                    nanos: remaining_micros * IntervalValue::NANOS_PER_MICRO,
+                }))
+            }
             _ => Err(Error::UnsupportedFeature(format!(
                 "Function not yet supported: {}",
                 name
@@ -6267,6 +6569,125 @@ impl<'a> Evaluator<'a> {
             }
             Err(e) => Err(e),
         }
+    }
+
+    fn parse_interval_string(&self, s: &str) -> Result<yachtsql_common::types::IntervalValue> {
+        use yachtsql_common::types::IntervalValue;
+
+        let mut months: i32 = 0;
+        let mut days: i32 = 0;
+        let mut nanos: i64 = 0;
+
+        let s = s.to_lowercase();
+        let re = regex::Regex::new(r"(-?\d+)\s*(year|month|day|hour|minute|second)s?")
+            .map_err(|e| Error::InvalidQuery(format!("Invalid interval regex: {}", e)))?;
+
+        for cap in re.captures_iter(&s) {
+            let value: i64 = cap[1]
+                .parse()
+                .map_err(|_| Error::InvalidQuery("Invalid interval number".to_string()))?;
+            let unit = &cap[2];
+            match unit {
+                "year" => months += value as i32 * 12,
+                "month" => months += value as i32,
+                "day" => days += value as i32,
+                "hour" => {
+                    nanos += value * IntervalValue::MICROS_PER_HOUR * IntervalValue::NANOS_PER_MICRO
+                }
+                "minute" => {
+                    nanos +=
+                        value * IntervalValue::MICROS_PER_MINUTE * IntervalValue::NANOS_PER_MICRO
+                }
+                "second" => {
+                    nanos +=
+                        value * IntervalValue::MICROS_PER_SECOND * IntervalValue::NANOS_PER_MICRO
+                }
+                _ => {}
+            }
+        }
+
+        Ok(IntervalValue {
+            months,
+            days,
+            nanos,
+        })
+    }
+
+    fn evaluate_make_interval(
+        &self,
+        func: &sqlparser::ast::Function,
+        record: &Record,
+    ) -> Result<Value> {
+        use yachtsql_common::types::IntervalValue;
+
+        let mut year: i64 = 0;
+        let mut month: i64 = 0;
+        let mut day: i64 = 0;
+        let mut hour: i64 = 0;
+        let mut minute: i64 = 0;
+        let mut second: i64 = 0;
+
+        if let sqlparser::ast::FunctionArguments::List(arg_list) = &func.args {
+            for arg in &arg_list.args {
+                match arg {
+                    sqlparser::ast::FunctionArg::Named { name, arg, .. } => {
+                        let num = match arg {
+                            sqlparser::ast::FunctionArgExpr::Expr(expr) => {
+                                self.evaluate(expr, record)?.as_i64().unwrap_or(0)
+                            }
+                            _ => 0,
+                        };
+                        match name.value.to_uppercase().as_str() {
+                            "YEAR" => year = num,
+                            "MONTH" => month = num,
+                            "DAY" => day = num,
+                            "HOUR" => hour = num,
+                            "MINUTE" => minute = num,
+                            "SECOND" => second = num,
+                            _ => {}
+                        }
+                    }
+                    sqlparser::ast::FunctionArg::ExprNamed { name, arg, .. } => {
+                        let name_str = match name {
+                            Expr::Identifier(ident) => ident.value.to_uppercase(),
+                            _ => continue,
+                        };
+                        let num = match arg {
+                            sqlparser::ast::FunctionArgExpr::Expr(expr) => {
+                                self.evaluate(expr, record)?.as_i64().unwrap_or(0)
+                            }
+                            _ => 0,
+                        };
+                        match name_str.as_str() {
+                            "YEAR" => year = num,
+                            "MONTH" => month = num,
+                            "DAY" => day = num,
+                            "HOUR" => hour = num,
+                            "MINUTE" => minute = num,
+                            "SECOND" => second = num,
+                            _ => {}
+                        }
+                    }
+                    sqlparser::ast::FunctionArg::Unnamed(
+                        sqlparser::ast::FunctionArgExpr::Expr(_),
+                    ) => {}
+                    _ => {}
+                }
+            }
+        }
+
+        let months = (year * 12 + month) as i32;
+        let days = day as i32;
+        let nanos = (hour * IntervalValue::MICROS_PER_HOUR
+            + minute * IntervalValue::MICROS_PER_MINUTE
+            + second * IntervalValue::MICROS_PER_SECOND)
+            * IntervalValue::NANOS_PER_MICRO;
+
+        Ok(Value::interval(IntervalValue {
+            months,
+            days,
+            nanos,
+        }))
     }
 
     fn compare_for_ordering(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
