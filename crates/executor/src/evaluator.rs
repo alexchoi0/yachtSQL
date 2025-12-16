@@ -983,11 +983,34 @@ impl<'a> Evaluator<'a> {
                 if args[0].is_null() {
                     return Ok(Value::null());
                 }
+                if let Some(bytes) = args[0].as_bytes() {
+                    return Ok(Value::int64(bytes.len() as i64));
+                }
                 let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
-                    expected: "STRING".to_string(),
+                    expected: "STRING or BYTES".to_string(),
                     actual: args[0].data_type().to_string(),
                 })?;
                 Ok(Value::int64(s.chars().count() as i64))
+            }
+            "BYTE_LENGTH" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "BYTE_LENGTH requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(bytes) = args[0].as_bytes() {
+                    return Ok(Value::int64(bytes.len() as i64));
+                }
+                if let Some(s) = args[0].as_str() {
+                    return Ok(Value::int64(s.len() as i64));
+                }
+                Err(Error::TypeMismatch {
+                    expected: "STRING or BYTES".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })
             }
             "TRIM" => {
                 if args.len() != 1 {
@@ -1029,13 +1052,24 @@ impl<'a> Evaluator<'a> {
                 Ok(Value::string(s.trim_end().to_string()))
             }
             "CONCAT" => {
-                let mut result = String::new();
-                for val in &args {
-                    if !val.is_null() {
-                        result.push_str(&val.to_string());
+                let all_bytes = args.iter().all(|v| v.is_null() || v.as_bytes().is_some());
+                if all_bytes && args.iter().any(|v| v.as_bytes().is_some()) {
+                    let mut result = Vec::new();
+                    for val in &args {
+                        if let Some(b) = val.as_bytes() {
+                            result.extend(b);
+                        }
                     }
+                    Ok(Value::bytes(result))
+                } else {
+                    let mut result = String::new();
+                    for val in &args {
+                        if !val.is_null() {
+                            result.push_str(&val.to_string());
+                        }
+                    }
+                    Ok(Value::string(result))
                 }
-                Ok(Value::string(result))
             }
             "SUBSTR" | "SUBSTRING" => {
                 if args.len() < 2 || args.len() > 3 {
@@ -1046,17 +1080,34 @@ impl<'a> Evaluator<'a> {
                 if args[0].is_null() {
                     return Ok(Value::null());
                 }
-                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
-                    expected: "STRING".to_string(),
-                    actual: args[0].data_type().to_string(),
-                })?;
                 let start = args[1].as_i64().ok_or_else(|| Error::TypeMismatch {
                     expected: "INT64".to_string(),
                     actual: args[1].data_type().to_string(),
-                })? as usize;
-                let start = if start > 0 { start - 1 } else { 0 };
+                })?;
+                let start_idx = if start > 0 { (start - 1) as usize } else { 0 };
+
+                if let Some(bytes) = args[0].as_bytes() {
+                    if start_idx >= bytes.len() {
+                        return Ok(Value::bytes(Vec::new()));
+                    }
+                    let result = if args.len() == 3 {
+                        let len = args[2].as_i64().ok_or_else(|| Error::TypeMismatch {
+                            expected: "INT64".to_string(),
+                            actual: args[2].data_type().to_string(),
+                        })? as usize;
+                        bytes[start_idx..].iter().take(len).cloned().collect()
+                    } else {
+                        bytes[start_idx..].to_vec()
+                    };
+                    return Ok(Value::bytes(result));
+                }
+
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING or BYTES".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
                 let chars: Vec<char> = s.chars().collect();
-                if start >= chars.len() {
+                if start_idx >= chars.len() {
                     return Ok(Value::string(String::new()));
                 }
                 let result = if args.len() == 3 {
@@ -1064,9 +1115,9 @@ impl<'a> Evaluator<'a> {
                         expected: "INT64".to_string(),
                         actual: args[2].data_type().to_string(),
                     })? as usize;
-                    chars[start..].iter().take(len).collect()
+                    chars[start_idx..].iter().take(len).collect()
                 } else {
-                    chars[start..].iter().collect()
+                    chars[start_idx..].iter().collect()
                 };
                 Ok(Value::string(result))
             }
@@ -1345,26 +1396,6 @@ impl<'a> Evaluator<'a> {
                 let digest = md5::compute(&input);
                 Ok(Value::bytes(digest.to_vec()))
             }
-            "BYTE_LENGTH" => {
-                if args.len() != 1 {
-                    return Err(Error::InvalidQuery(
-                        "BYTE_LENGTH requires 1 argument".to_string(),
-                    ));
-                }
-                if args[0].is_null() {
-                    return Ok(Value::null());
-                }
-                if let Some(s) = args[0].as_str() {
-                    return Ok(Value::int64(s.len() as i64));
-                }
-                if let Some(b) = args[0].as_bytes() {
-                    return Ok(Value::int64(b.len() as i64));
-                }
-                Err(Error::TypeMismatch {
-                    expected: "STRING or BYTES".to_string(),
-                    actual: args[0].data_type().to_string(),
-                })
-            }
             "INT64" | "INT" => {
                 if args.len() != 1 {
                     return Err(Error::InvalidQuery("INT64 requires 1 argument".to_string()));
@@ -1461,6 +1492,75 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 Ok(Value::null())
+            }
+            "FROM_BASE64" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "FROM_BASE64 requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(s) {
+                    Ok(bytes) => Ok(Value::bytes(bytes)),
+                    Err(_) => Ok(Value::null()),
+                }
+            }
+            "TO_BASE64" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "TO_BASE64 requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let bytes = args[0].as_bytes().ok_or_else(|| Error::TypeMismatch {
+                    expected: "BYTES".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                Ok(Value::string(encoded))
+            }
+            "FROM_HEX" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "FROM_HEX requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                match hex::decode(s) {
+                    Ok(bytes) => Ok(Value::bytes(bytes)),
+                    Err(_) => Ok(Value::null()),
+                }
+            }
+            "TO_HEX" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "TO_HEX requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let bytes = args[0].as_bytes().ok_or_else(|| Error::TypeMismatch {
+                    expected: "BYTES".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                Ok(Value::string(hex::encode(bytes)))
             }
             "REGEXP_CONTAINS" => {
                 if args.len() != 2 {
@@ -1620,11 +1720,15 @@ impl<'a> Evaluator<'a> {
                 if args[0].is_null() {
                     return Ok(Value::null());
                 }
+                let n = args[1].as_i64().unwrap_or(0) as usize;
+                if let Some(bytes) = args[0].as_bytes() {
+                    let result: Vec<u8> = bytes.iter().take(n).cloned().collect();
+                    return Ok(Value::bytes(result));
+                }
                 let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
-                    expected: "STRING".to_string(),
+                    expected: "STRING or BYTES".to_string(),
                     actual: args[0].data_type().to_string(),
                 })?;
-                let n = args[1].as_i64().unwrap_or(0) as usize;
                 let result: String = s.chars().take(n).collect();
                 Ok(Value::string(result))
             }
@@ -1637,11 +1741,16 @@ impl<'a> Evaluator<'a> {
                 if args[0].is_null() {
                     return Ok(Value::null());
                 }
+                let n = args[1].as_i64().unwrap_or(0) as usize;
+                if let Some(bytes) = args[0].as_bytes() {
+                    let start = bytes.len().saturating_sub(n);
+                    let result: Vec<u8> = bytes[start..].to_vec();
+                    return Ok(Value::bytes(result));
+                }
                 let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
-                    expected: "STRING".to_string(),
+                    expected: "STRING or BYTES".to_string(),
                     actual: args[0].data_type().to_string(),
                 })?;
-                let n = args[1].as_i64().unwrap_or(0) as usize;
                 let chars: Vec<char> = s.chars().collect();
                 let start = chars.len().saturating_sub(n);
                 let result: String = chars[start..].iter().collect();
@@ -1656,8 +1765,12 @@ impl<'a> Evaluator<'a> {
                 if args[0].is_null() {
                     return Ok(Value::null());
                 }
+                if let Some(bytes) = args[0].as_bytes() {
+                    let result: Vec<u8> = bytes.iter().rev().cloned().collect();
+                    return Ok(Value::bytes(result));
+                }
                 let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
-                    expected: "STRING".to_string(),
+                    expected: "STRING or BYTES".to_string(),
                     actual: args[0].data_type().to_string(),
                 })?;
                 Ok(Value::string(s.chars().rev().collect()))
@@ -1944,39 +2057,6 @@ impl<'a> Evaluator<'a> {
                     result = result.replace(&format!("%{}", i + 1), &arg.to_string());
                 }
                 Ok(Value::string(result))
-            }
-            "TO_HEX" => {
-                if args.len() != 1 {
-                    return Err(Error::InvalidQuery(
-                        "TO_HEX requires 1 argument".to_string(),
-                    ));
-                }
-                if args[0].is_null() {
-                    return Ok(Value::null());
-                }
-                if let Some(b) = args[0].as_bytes() {
-                    return Ok(Value::string(hex::encode(b)));
-                }
-                if let Some(i) = args[0].as_i64() {
-                    return Ok(Value::string(format!("{:x}", i)));
-                }
-                Ok(Value::null())
-            }
-            "FROM_HEX" => {
-                if args.len() != 1 {
-                    return Err(Error::InvalidQuery(
-                        "FROM_HEX requires 1 argument".to_string(),
-                    ));
-                }
-                if args[0].is_null() {
-                    return Ok(Value::null());
-                }
-                if let Some(s) = args[0].as_str() {
-                    if let Ok(bytes) = hex::decode(s) {
-                        return Ok(Value::bytes(bytes));
-                    }
-                }
-                Ok(Value::null())
             }
             "TO_JSON" | "TO_JSON_STRING" => {
                 if args.len() != 1 {

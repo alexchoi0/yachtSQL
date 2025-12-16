@@ -100,15 +100,23 @@ impl QueryExecutor {
         order_by: &Option<OrderBy>,
         limit_clause: &Option<LimitClause>,
     ) -> Result<Table> {
-        let (schema, mut rows) = if select.from.is_empty() {
-            self.evaluate_select_without_from(select)?
+        let (pre_projection_schema, mut rows, do_projection) = if select.from.is_empty() {
+            let (schema, rows) = self.evaluate_select_without_from(select)?;
+            (schema, rows, false)
         } else {
-            self.evaluate_select_with_from(select)?
+            self.evaluate_select_with_from_for_ordering(select, order_by)?
         };
 
         if let Some(order_by) = order_by {
-            self.sort_rows(&schema, &mut rows, order_by)?;
+            self.sort_rows(&pre_projection_schema, &mut rows, order_by)?;
         }
+
+        let (schema, rows) = if do_projection {
+            self.project_rows(&pre_projection_schema, &rows, &select.projection)?
+        } else {
+            (pre_projection_schema, rows)
+        };
+        let mut rows = rows;
 
         if let Some(limit_clause) = limit_clause {
             match limit_clause {
@@ -228,6 +236,121 @@ impl QueryExecutor {
             self.project_rows(&input_schema, &filtered_rows, &select.projection)?;
 
         Ok((output_schema, output_rows))
+    }
+
+    fn evaluate_select_with_from_for_ordering(
+        &self,
+        select: &Select,
+        order_by: &Option<OrderBy>,
+    ) -> Result<(Schema, Vec<Row>, bool)> {
+        let (input_schema, input_rows) = self.get_from_data(&select.from)?;
+        let evaluator = Evaluator::new(&input_schema);
+
+        let mut filtered_rows: Vec<Row> = if let Some(selection) = &select.selection {
+            input_rows
+                .iter()
+                .filter(|row| evaluator.evaluate_to_bool(selection, row).unwrap_or(false))
+                .cloned()
+                .collect()
+        } else {
+            input_rows.clone()
+        };
+
+        let has_aggregates = self.has_aggregate_functions(&select.projection);
+        let has_group_by = !matches!(select.group_by, ast::GroupByExpr::Expressions(ref v, _) if v.is_empty())
+            && !matches!(select.group_by, ast::GroupByExpr::All(_));
+
+        if has_aggregates || has_group_by {
+            let (schema, rows) =
+                self.execute_aggregate_query(&input_schema, &filtered_rows, select)?;
+            return Ok((schema, rows, false));
+        }
+
+        if select.distinct.is_some() {
+            let mut seen = std::collections::HashSet::new();
+            filtered_rows.retain(|row| {
+                let key = format!("{:?}", row.values());
+                seen.insert(key)
+            });
+        }
+
+        let needs_deferred_projection = order_by.as_ref().is_some_and(|ob| {
+            self.order_by_references_non_projected_columns(&input_schema, &select.projection, ob)
+        });
+
+        if needs_deferred_projection {
+            Ok((input_schema, filtered_rows, true))
+        } else {
+            let (output_schema, output_rows) =
+                self.project_rows(&input_schema, &filtered_rows, &select.projection)?;
+            Ok((output_schema, output_rows, false))
+        }
+    }
+
+    fn order_by_references_non_projected_columns(
+        &self,
+        input_schema: &Schema,
+        projection: &[SelectItem],
+        order_by: &OrderBy,
+    ) -> bool {
+        let projected_columns: std::collections::HashSet<String> = projection
+            .iter()
+            .filter_map(|item| match item {
+                SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                    Some(ident.value.to_uppercase())
+                }
+                SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
+                    parts.last().map(|p| p.value.to_uppercase())
+                }
+                SelectItem::ExprWithAlias { alias, .. } => Some(alias.value.to_uppercase()),
+                SelectItem::Wildcard(_) => None,
+                _ => None,
+            })
+            .collect();
+
+        let has_wildcard = projection
+            .iter()
+            .any(|item| matches!(item, SelectItem::Wildcard(_)));
+        if has_wildcard {
+            return false;
+        }
+
+        let exprs = match &order_by.kind {
+            OrderByKind::Expressions(exprs) => exprs,
+            OrderByKind::All(_) => return false,
+        };
+
+        for order_expr in exprs {
+            match &order_expr.expr {
+                Expr::Identifier(ident) => {
+                    let col_name = ident.value.to_uppercase();
+                    if !projected_columns.contains(&col_name) {
+                        if input_schema
+                            .fields()
+                            .iter()
+                            .any(|f| f.name.to_uppercase() == col_name)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                Expr::CompoundIdentifier(parts) => {
+                    if let Some(last) = parts.last() {
+                        let col_name = last.value.to_uppercase();
+                        if !projected_columns.contains(&col_name) {
+                            if input_schema.fields().iter().any(|f| {
+                                f.name.to_uppercase() == col_name
+                                    || f.name.to_uppercase().ends_with(&format!(".{}", col_name))
+                            }) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn get_from_data(&self, from: &[TableWithJoins]) -> Result<(Schema, Vec<Row>)> {
@@ -1284,6 +1407,18 @@ impl QueryExecutor {
         if let (Some(as_), Some(bs)) = (a.as_str(), b.as_str()) {
             return as_.cmp(bs);
         }
+        if let (Some(ad), Some(bd)) = (a.as_date(), b.as_date()) {
+            return ad.cmp(&bd);
+        }
+        if let (Some(at), Some(bt)) = (a.as_timestamp(), b.as_timestamp()) {
+            return at.cmp(&bt);
+        }
+        if let (Some(at), Some(bt)) = (a.as_time(), b.as_time()) {
+            return at.cmp(&bt);
+        }
+        if let (Some(an), Some(bn)) = (a.as_numeric(), b.as_numeric()) {
+            return an.cmp(&bn);
+        }
         std::cmp::Ordering::Equal
     }
 
@@ -1414,6 +1549,18 @@ impl QueryExecutor {
         }
         if let (Some(a_b), Some(b_b)) = (a.as_bool(), b.as_bool()) {
             return a_b.cmp(&b_b);
+        }
+        if let (Some(a_d), Some(b_d)) = (a.as_date(), b.as_date()) {
+            return a_d.cmp(&b_d);
+        }
+        if let (Some(a_t), Some(b_t)) = (a.as_timestamp(), b.as_timestamp()) {
+            return a_t.cmp(&b_t);
+        }
+        if let (Some(a_t), Some(b_t)) = (a.as_time(), b.as_time()) {
+            return a_t.cmp(&b_t);
+        }
+        if let (Some(a_n), Some(b_n)) = (a.as_numeric(), b.as_numeric()) {
+            return a_n.cmp(&b_n);
         }
 
         std::cmp::Ordering::Equal
@@ -1572,7 +1719,9 @@ impl QueryExecutor {
                     let mut row_values = vec![Value::null(); schema.field_count()];
                     for (expr_idx, &col_idx) in column_indices.iter().enumerate() {
                         let val = self.evaluate_literal_expr(&row_exprs[expr_idx])?;
-                        row_values[col_idx] = val;
+                        let target_type = &schema.fields()[col_idx].data_type;
+                        let coerced = self.coerce_value_to_type(val, target_type)?;
+                        row_values[col_idx] = coerced;
                     }
 
                     let table_data = self.catalog.get_table_mut(&table_name).unwrap();
@@ -1881,6 +2030,106 @@ impl QueryExecutor {
                 "SQL value type not yet supported: {:?}",
                 val
             ))),
+        }
+    }
+
+    fn coerce_value_to_type(&self, value: Value, target_type: &DataType) -> Result<Value> {
+        if value.is_null() {
+            return Ok(value);
+        }
+
+        if value.data_type() == *target_type {
+            return Ok(value);
+        }
+
+        match target_type {
+            DataType::Date => {
+                if let Some(s) = value.as_str() {
+                    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                        return Ok(Value::date(date));
+                    }
+                }
+                Ok(value)
+            }
+            DataType::Timestamp => {
+                if let Some(s) = value.as_str() {
+                    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(s) {
+                        return Ok(Value::timestamp(ts.with_timezone(&chrono::Utc)));
+                    }
+                    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                        return Ok(Value::timestamp(dt.and_utc()));
+                    }
+                    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                        return Ok(Value::timestamp(dt.and_utc()));
+                    }
+                }
+                Ok(value)
+            }
+            DataType::Time => {
+                if let Some(s) = value.as_str() {
+                    if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S") {
+                        return Ok(Value::time(time));
+                    }
+                }
+                Ok(value)
+            }
+            DataType::Int64 => {
+                if let Some(s) = value.as_str() {
+                    if let Ok(i) = s.parse::<i64>() {
+                        return Ok(Value::int64(i));
+                    }
+                }
+                if let Some(f) = value.as_f64() {
+                    return Ok(Value::int64(f as i64));
+                }
+                Ok(value)
+            }
+            DataType::Float64 => {
+                if let Some(s) = value.as_str() {
+                    if let Ok(f) = s.parse::<f64>() {
+                        return Ok(Value::float64(f));
+                    }
+                }
+                if let Some(i) = value.as_i64() {
+                    return Ok(Value::float64(i as f64));
+                }
+                Ok(value)
+            }
+            DataType::Bool => {
+                if let Some(s) = value.as_str() {
+                    let lower = s.to_lowercase();
+                    if lower == "true" {
+                        return Ok(Value::bool_val(true));
+                    }
+                    if lower == "false" {
+                        return Ok(Value::bool_val(false));
+                    }
+                }
+                Ok(value)
+            }
+            DataType::Numeric(_) => {
+                if let Some(s) = value.as_str() {
+                    if let Ok(d) = s.parse::<rust_decimal::Decimal>() {
+                        return Ok(Value::numeric(d));
+                    }
+                }
+                if let Some(i) = value.as_i64() {
+                    return Ok(Value::numeric(rust_decimal::Decimal::from(i)));
+                }
+                if let Some(f) = value.as_f64() {
+                    if let Some(d) = rust_decimal::Decimal::from_f64_retain(f) {
+                        return Ok(Value::numeric(d));
+                    }
+                }
+                Ok(value)
+            }
+            DataType::Bytes => {
+                if let Some(s) = value.as_str() {
+                    return Ok(Value::bytes(s.as_bytes().to_vec()));
+                }
+                Ok(value)
+            }
+            _ => Ok(value),
         }
     }
 
