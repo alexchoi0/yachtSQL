@@ -1,8 +1,9 @@
 //! In-memory catalog for storing table metadata and data.
 
 use std::collections::HashMap;
+
 use yachtsql_core::error::{Error, Result};
-use yachtsql_storage::{Schema, Row};
+use yachtsql_storage::{Row, Schema};
 
 #[derive(Debug, Clone)]
 pub struct TableData {
@@ -34,7 +35,10 @@ impl Catalog {
     pub fn create_table(&mut self, name: &str, schema: Schema) -> Result<()> {
         let key = name.to_uppercase();
         if self.tables.contains_key(&key) {
-            return Err(Error::invalid_query(format!("Table already exists: {}", name)));
+            return Err(Error::invalid_query(format!(
+                "Table already exists: {}",
+                name
+            )));
         }
         self.tables.insert(key, TableData::new(schema));
         Ok(())

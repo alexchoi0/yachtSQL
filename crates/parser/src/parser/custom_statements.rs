@@ -1020,6 +1020,7 @@ impl CustomStatementParser {
         }))
     }
 
+    #[allow(dead_code)]
     fn parse_object_name(s: &str) -> Result<sqlparser::ast::ObjectName> {
         use sqlparser::ast::{Ident, ObjectName};
 

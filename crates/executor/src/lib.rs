@@ -4,15 +4,14 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
-mod error;
-mod table;
-mod executor;
 mod catalog;
+mod error;
 mod evaluator;
+mod executor;
+mod table;
 
-pub use error::{Error, Result};
-pub use table::{Table, StorageFormat};
-pub use executor::QueryExecutor;
 pub use catalog::Catalog;
-
+pub use error::{Error, Result};
+pub use executor::QueryExecutor;
+pub use table::{StorageFormat, Table};
 pub use yachtsql_parser::DialectType;

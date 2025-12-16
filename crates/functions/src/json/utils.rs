@@ -101,11 +101,13 @@ pub(crate) fn strip_keyword_case<'a>(input: &'a str, keyword: &str) -> Option<&'
     }
 }
 
+#[allow(dead_code)]
 pub(crate) enum JsonbPathElement {
     Key(String),
     Index(usize),
 }
 
+#[allow(dead_code)]
 pub(crate) fn parse_jsonb_path(path: &str) -> Result<Vec<JsonbPathElement>> {
     if !(path.starts_with('{') && path.ends_with('}')) {
         return Err(Error::InvalidOperation(format!(
@@ -172,6 +174,7 @@ pub(crate) fn parse_jsonb_path(path: &str) -> Result<Vec<JsonbPathElement>> {
     Ok(tokens)
 }
 
+#[allow(dead_code)]
 pub(crate) fn unescape_path_component(component: &str) -> String {
     let mut result = String::with_capacity(component.len());
     let mut chars = component.chars();

@@ -1,17 +1,23 @@
 //! Query executor - parses and executes SQL statements.
 
+#![allow(clippy::wildcard_enum_match_arm)]
+#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::ptr_arg)]
+
 use std::collections::HashMap;
-use yachtsql_core::error::{Error, Result};
-use yachtsql_core::types::{DataType, Value, StructField};
-use yachtsql_parser::DialectType;
-use yachtsql_storage::{Column, Field, Row, Schema};
+
 use sqlparser::ast::{
-    self, Expr, Ident, ObjectName, Query, Select, SelectItem, SetExpr, Statement,
-    TableFactor, TableWithJoins, OrderByExpr, Value as SqlValue, LimitClause, OrderBy,
-    OrderByKind,
+    self, Expr, Ident, LimitClause, ObjectName, OrderBy, OrderByExpr, OrderByKind, Query, Select,
+    SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::BigQueryDialect;
 use sqlparser::parser::Parser;
+use yachtsql_core::error::{Error, Result};
+use yachtsql_core::types::{DataType, StructField, Value};
+use yachtsql_parser::DialectType;
+use yachtsql_storage::{Column, Field, Row, Schema};
 
 use crate::catalog::{Catalog, TableData};
 use crate::evaluator::Evaluator;
@@ -39,8 +45,8 @@ impl QueryExecutor {
 
     pub fn execute_sql(&mut self, sql: &str) -> Result<Table> {
         let dialect = BigQueryDialect {};
-        let statements = Parser::parse_sql(&dialect, sql)
-            .map_err(|e| Error::ParseError(e.to_string()))?;
+        let statements =
+            Parser::parse_sql(&dialect, sql).map_err(|e| Error::ParseError(e.to_string()))?;
 
         if statements.is_empty() {
             return Err(Error::ParseError("Empty SQL statement".to_string()));
@@ -53,17 +59,21 @@ impl QueryExecutor {
         match stmt {
             Statement::Query(query) => self.execute_query(query),
             Statement::CreateTable(create) => self.execute_create_table(create),
-            Statement::Drop { object_type, names, if_exists, .. } => {
-                self.execute_drop(object_type, names, *if_exists)
-            }
+            Statement::Drop {
+                object_type,
+                names,
+                if_exists,
+                ..
+            } => self.execute_drop(object_type, names, *if_exists),
             Statement::Insert(insert) => self.execute_insert(insert),
-            Statement::Update { table, assignments, selection, .. } => {
-                self.execute_update(table, assignments, selection.as_ref())
-            }
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                ..
+            } => self.execute_update(table, assignments, selection.as_ref()),
             Statement::Delete(delete) => self.execute_delete(delete),
-            Statement::Truncate { table_names, .. } => {
-                self.execute_truncate(table_names)
-            }
+            Statement::Truncate { table_names, .. } => self.execute_truncate(table_names),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Statement type not yet supported: {:?}",
                 stmt
@@ -73,7 +83,9 @@ impl QueryExecutor {
 
     fn execute_query(&self, query: &Query) -> Result<Table> {
         match query.body.as_ref() {
-            SetExpr::Select(select) => self.execute_select(select, &query.order_by, &query.limit_clause),
+            SetExpr::Select(select) => {
+                self.execute_select(select, &query.order_by, &query.limit_clause)
+            }
             SetExpr::Values(values) => self.execute_values(values),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Query type not yet supported: {:?}",
@@ -162,13 +174,17 @@ impl QueryExecutor {
                     result_values.push(val.clone());
                     field_names.push(alias.value.clone());
                 }
-                _ => return Err(Error::UnsupportedFeature(
-                    "Unsupported projection item".to_string(),
-                )),
+                _ => {
+                    return Err(Error::UnsupportedFeature(
+                        "Unsupported projection item".to_string(),
+                    ));
+                }
             }
         }
 
-        let fields: Vec<Field> = result_values.iter().zip(field_names.iter())
+        let fields: Vec<Field> = result_values
+            .iter()
+            .zip(field_names.iter())
             .map(|(val, name)| Field::nullable(name.clone(), val.data_type()))
             .collect();
 
@@ -179,22 +195,26 @@ impl QueryExecutor {
     }
 
     fn evaluate_select_with_from(&self, select: &Select) -> Result<(Schema, Vec<Row>)> {
-        let table_name = self.extract_table_name(&select.from)?;
-        let table_data = self.catalog.get_table(&table_name)
-            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
-
-        let input_schema = &table_data.schema;
-        let input_rows = &table_data.rows;
-        let evaluator = Evaluator::new(input_schema);
+        let (input_schema, input_rows) = self.get_from_data(&select.from)?;
+        let evaluator = Evaluator::new(&input_schema);
 
         let mut filtered_rows: Vec<Row> = if let Some(selection) = &select.selection {
-            input_rows.iter()
+            input_rows
+                .iter()
                 .filter(|row| evaluator.evaluate_to_bool(selection, row).unwrap_or(false))
                 .cloned()
                 .collect()
         } else {
             input_rows.clone()
         };
+
+        let has_aggregates = self.has_aggregate_functions(&select.projection);
+        let has_group_by = !matches!(select.group_by, ast::GroupByExpr::Expressions(ref v, _) if v.is_empty())
+            && !matches!(select.group_by, ast::GroupByExpr::All(_));
+
+        if has_aggregates || has_group_by {
+            return self.execute_aggregate_query(&input_schema, &filtered_rows, select);
+        }
 
         if select.distinct.is_some() {
             let mut seen = std::collections::HashSet::new();
@@ -204,13 +224,1067 @@ impl QueryExecutor {
             });
         }
 
-        let (output_schema, output_rows) = self.project_rows(
-            input_schema,
-            &filtered_rows,
-            &select.projection,
-        )?;
+        let (output_schema, output_rows) =
+            self.project_rows(&input_schema, &filtered_rows, &select.projection)?;
 
         Ok((output_schema, output_rows))
+    }
+
+    fn get_from_data(&self, from: &[TableWithJoins]) -> Result<(Schema, Vec<Row>)> {
+        if from.is_empty() {
+            return Err(Error::InvalidQuery("FROM clause is empty".to_string()));
+        }
+
+        let first_table = &from[0];
+        let (mut schema, mut rows) = self.get_table_factor_data(&first_table.relation)?;
+
+        for join in &first_table.joins {
+            let (right_schema, right_rows) = self.get_table_factor_data(&join.relation)?;
+            (schema, rows) = self.execute_join(
+                &schema,
+                &rows,
+                &right_schema,
+                &right_rows,
+                &join.join_operator,
+            )?;
+        }
+
+        for additional_from in from.iter().skip(1) {
+            let (right_schema, right_rows) =
+                self.get_table_factor_data(&additional_from.relation)?;
+            (schema, rows) = self.execute_cross_join(&schema, &rows, &right_schema, &right_rows)?;
+
+            for join in &additional_from.joins {
+                let (join_right_schema, join_right_rows) =
+                    self.get_table_factor_data(&join.relation)?;
+                (schema, rows) = self.execute_join(
+                    &schema,
+                    &rows,
+                    &join_right_schema,
+                    &join_right_rows,
+                    &join.join_operator,
+                )?;
+            }
+        }
+
+        Ok((schema, rows))
+    }
+
+    fn get_table_factor_data(&self, table_factor: &TableFactor) -> Result<(Schema, Vec<Row>)> {
+        match table_factor {
+            TableFactor::Table { name, alias, .. } => {
+                let table_name = name.to_string();
+                let table_data = self
+                    .catalog
+                    .get_table(&table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+
+                let schema = if let Some(alias) = alias {
+                    let prefix = &alias.name.value;
+                    Schema::from_fields(
+                        table_data
+                            .schema
+                            .fields()
+                            .iter()
+                            .map(|f| {
+                                Field::nullable(
+                                    format!("{}.{}", prefix, f.name),
+                                    f.data_type.clone(),
+                                )
+                            })
+                            .collect(),
+                    )
+                } else {
+                    table_data.schema.clone()
+                };
+
+                Ok((schema, table_data.rows.clone()))
+            }
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => {
+                let (mut schema, mut rows) =
+                    self.get_table_factor_data(&table_with_joins.relation)?;
+                for join in &table_with_joins.joins {
+                    let (right_schema, right_rows) = self.get_table_factor_data(&join.relation)?;
+                    (schema, rows) = self.execute_join(
+                        &schema,
+                        &rows,
+                        &right_schema,
+                        &right_rows,
+                        &join.join_operator,
+                    )?;
+                }
+                Ok((schema, rows))
+            }
+            TableFactor::Derived {
+                subquery, alias, ..
+            } => {
+                let result = self.execute_query(subquery)?;
+                let rows = result.rows()?;
+                let schema = if let Some(alias) = alias {
+                    Schema::from_fields(
+                        result
+                            .schema()
+                            .fields()
+                            .iter()
+                            .map(|f| {
+                                Field::nullable(
+                                    format!("{}.{}", alias.name.value, f.name),
+                                    f.data_type.clone(),
+                                )
+                            })
+                            .collect(),
+                    )
+                } else {
+                    result.schema().clone()
+                };
+                Ok((schema, rows))
+            }
+            _ => Err(Error::UnsupportedFeature(format!(
+                "Table factor not yet supported: {:?}",
+                table_factor
+            ))),
+        }
+    }
+
+    fn execute_join(
+        &self,
+        left_schema: &Schema,
+        left_rows: &[Row],
+        right_schema: &Schema,
+        right_rows: &[Row],
+        join_op: &ast::JoinOperator,
+    ) -> Result<(Schema, Vec<Row>)> {
+        let combined_schema = Schema::from_fields(
+            left_schema
+                .fields()
+                .iter()
+                .chain(right_schema.fields().iter())
+                .cloned()
+                .collect(),
+        );
+
+        match join_op {
+            ast::JoinOperator::Inner(constraint) => self.execute_inner_join(
+                &combined_schema,
+                left_schema,
+                left_rows,
+                right_schema,
+                right_rows,
+                constraint,
+            ),
+            ast::JoinOperator::LeftOuter(constraint) => self.execute_left_join(
+                &combined_schema,
+                left_schema,
+                left_rows,
+                right_schema,
+                right_rows,
+                constraint,
+            ),
+            ast::JoinOperator::RightOuter(constraint) => self.execute_right_join(
+                &combined_schema,
+                left_schema,
+                left_rows,
+                right_schema,
+                right_rows,
+                constraint,
+            ),
+            ast::JoinOperator::FullOuter(constraint) => self.execute_full_join(
+                &combined_schema,
+                left_schema,
+                left_rows,
+                right_schema,
+                right_rows,
+                constraint,
+            ),
+            ast::JoinOperator::CrossJoin(_) => {
+                self.execute_cross_join(left_schema, left_rows, right_schema, right_rows)
+            }
+            _ => Err(Error::UnsupportedFeature(format!(
+                "Join type not yet supported: {:?}",
+                join_op
+            ))),
+        }
+    }
+
+    fn execute_inner_join(
+        &self,
+        combined_schema: &Schema,
+        left_schema: &Schema,
+        left_rows: &[Row],
+        right_schema: &Schema,
+        right_rows: &[Row],
+        constraint: &ast::JoinConstraint,
+    ) -> Result<(Schema, Vec<Row>)> {
+        let evaluator = Evaluator::new(combined_schema);
+        let mut result_rows = Vec::new();
+
+        for left_row in left_rows {
+            for right_row in right_rows {
+                let combined_values: Vec<Value> = left_row
+                    .values()
+                    .iter()
+                    .chain(right_row.values().iter())
+                    .cloned()
+                    .collect();
+                let combined_row = Row::from_values(combined_values);
+
+                let matches = match constraint {
+                    ast::JoinConstraint::On(expr) => {
+                        evaluator.evaluate_to_bool(expr, &combined_row)?
+                    }
+                    ast::JoinConstraint::None => true,
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Join constraint not supported".to_string(),
+                        ));
+                    }
+                };
+
+                if matches {
+                    result_rows.push(combined_row);
+                }
+            }
+        }
+
+        Ok((combined_schema.clone(), result_rows))
+    }
+
+    fn execute_left_join(
+        &self,
+        combined_schema: &Schema,
+        left_schema: &Schema,
+        left_rows: &[Row],
+        right_schema: &Schema,
+        right_rows: &[Row],
+        constraint: &ast::JoinConstraint,
+    ) -> Result<(Schema, Vec<Row>)> {
+        let evaluator = Evaluator::new(combined_schema);
+        let mut result_rows = Vec::new();
+        let null_right: Vec<Value> = (0..right_schema.field_count())
+            .map(|_| Value::null())
+            .collect();
+
+        for left_row in left_rows {
+            let mut found_match = false;
+            for right_row in right_rows {
+                let combined_values: Vec<Value> = left_row
+                    .values()
+                    .iter()
+                    .chain(right_row.values().iter())
+                    .cloned()
+                    .collect();
+                let combined_row = Row::from_values(combined_values);
+
+                let matches = match constraint {
+                    ast::JoinConstraint::On(expr) => {
+                        evaluator.evaluate_to_bool(expr, &combined_row)?
+                    }
+                    ast::JoinConstraint::None => true,
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Join constraint not supported".to_string(),
+                        ));
+                    }
+                };
+
+                if matches {
+                    result_rows.push(combined_row);
+                    found_match = true;
+                }
+            }
+            if !found_match {
+                let combined_values: Vec<Value> = left_row
+                    .values()
+                    .iter()
+                    .chain(null_right.iter())
+                    .cloned()
+                    .collect();
+                result_rows.push(Row::from_values(combined_values));
+            }
+        }
+
+        Ok((combined_schema.clone(), result_rows))
+    }
+
+    fn execute_right_join(
+        &self,
+        combined_schema: &Schema,
+        left_schema: &Schema,
+        left_rows: &[Row],
+        right_schema: &Schema,
+        right_rows: &[Row],
+        constraint: &ast::JoinConstraint,
+    ) -> Result<(Schema, Vec<Row>)> {
+        let evaluator = Evaluator::new(combined_schema);
+        let mut result_rows = Vec::new();
+        let null_left: Vec<Value> = (0..left_schema.field_count())
+            .map(|_| Value::null())
+            .collect();
+
+        for right_row in right_rows {
+            let mut found_match = false;
+            for left_row in left_rows {
+                let combined_values: Vec<Value> = left_row
+                    .values()
+                    .iter()
+                    .chain(right_row.values().iter())
+                    .cloned()
+                    .collect();
+                let combined_row = Row::from_values(combined_values);
+
+                let matches = match constraint {
+                    ast::JoinConstraint::On(expr) => {
+                        evaluator.evaluate_to_bool(expr, &combined_row)?
+                    }
+                    ast::JoinConstraint::None => true,
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Join constraint not supported".to_string(),
+                        ));
+                    }
+                };
+
+                if matches {
+                    result_rows.push(combined_row);
+                    found_match = true;
+                }
+            }
+            if !found_match {
+                let combined_values: Vec<Value> = null_left
+                    .iter()
+                    .chain(right_row.values().iter())
+                    .cloned()
+                    .collect();
+                result_rows.push(Row::from_values(combined_values));
+            }
+        }
+
+        Ok((combined_schema.clone(), result_rows))
+    }
+
+    fn execute_full_join(
+        &self,
+        combined_schema: &Schema,
+        left_schema: &Schema,
+        left_rows: &[Row],
+        right_schema: &Schema,
+        right_rows: &[Row],
+        constraint: &ast::JoinConstraint,
+    ) -> Result<(Schema, Vec<Row>)> {
+        let evaluator = Evaluator::new(combined_schema);
+        let mut result_rows = Vec::new();
+        let null_left: Vec<Value> = (0..left_schema.field_count())
+            .map(|_| Value::null())
+            .collect();
+        let null_right: Vec<Value> = (0..right_schema.field_count())
+            .map(|_| Value::null())
+            .collect();
+        let mut right_matched: Vec<bool> = vec![false; right_rows.len()];
+
+        for left_row in left_rows {
+            let mut found_match = false;
+            for (right_idx, right_row) in right_rows.iter().enumerate() {
+                let combined_values: Vec<Value> = left_row
+                    .values()
+                    .iter()
+                    .chain(right_row.values().iter())
+                    .cloned()
+                    .collect();
+                let combined_row = Row::from_values(combined_values);
+
+                let matches = match constraint {
+                    ast::JoinConstraint::On(expr) => {
+                        evaluator.evaluate_to_bool(expr, &combined_row)?
+                    }
+                    ast::JoinConstraint::None => true,
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Join constraint not supported".to_string(),
+                        ));
+                    }
+                };
+
+                if matches {
+                    result_rows.push(combined_row);
+                    found_match = true;
+                    right_matched[right_idx] = true;
+                }
+            }
+            if !found_match {
+                let combined_values: Vec<Value> = left_row
+                    .values()
+                    .iter()
+                    .chain(null_right.iter())
+                    .cloned()
+                    .collect();
+                result_rows.push(Row::from_values(combined_values));
+            }
+        }
+
+        for (right_idx, right_row) in right_rows.iter().enumerate() {
+            if !right_matched[right_idx] {
+                let combined_values: Vec<Value> = null_left
+                    .iter()
+                    .chain(right_row.values().iter())
+                    .cloned()
+                    .collect();
+                result_rows.push(Row::from_values(combined_values));
+            }
+        }
+
+        Ok((combined_schema.clone(), result_rows))
+    }
+
+    fn execute_cross_join(
+        &self,
+        left_schema: &Schema,
+        left_rows: &[Row],
+        right_schema: &Schema,
+        right_rows: &[Row],
+    ) -> Result<(Schema, Vec<Row>)> {
+        let combined_schema = Schema::from_fields(
+            left_schema
+                .fields()
+                .iter()
+                .chain(right_schema.fields().iter())
+                .cloned()
+                .collect(),
+        );
+
+        let mut result_rows = Vec::new();
+        for left_row in left_rows {
+            for right_row in right_rows {
+                let combined_values: Vec<Value> = left_row
+                    .values()
+                    .iter()
+                    .chain(right_row.values().iter())
+                    .cloned()
+                    .collect();
+                result_rows.push(Row::from_values(combined_values));
+            }
+        }
+
+        Ok((combined_schema, result_rows))
+    }
+
+    fn has_aggregate_functions(&self, projection: &[SelectItem]) -> bool {
+        for item in projection {
+            match item {
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                    if self.expr_has_aggregate(expr) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn expr_has_aggregate(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Function(func) => {
+                let name = func.name.to_string().to_uppercase();
+                matches!(
+                    name.as_str(),
+                    "COUNT"
+                        | "SUM"
+                        | "AVG"
+                        | "MIN"
+                        | "MAX"
+                        | "ARRAY_AGG"
+                        | "STRING_AGG"
+                        | "GROUP_CONCAT"
+                        | "STDDEV"
+                        | "STDDEV_POP"
+                        | "STDDEV_SAMP"
+                        | "VARIANCE"
+                        | "VAR_POP"
+                        | "VAR_SAMP"
+                        | "BIT_AND"
+                        | "BIT_OR"
+                        | "BIT_XOR"
+                        | "BOOL_AND"
+                        | "BOOL_OR"
+                        | "EVERY"
+                        | "ANY_VALUE"
+                )
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                self.expr_has_aggregate(left) || self.expr_has_aggregate(right)
+            }
+            Expr::UnaryOp { expr, .. } => self.expr_has_aggregate(expr),
+            Expr::Nested(inner) => self.expr_has_aggregate(inner),
+            Expr::Case {
+                conditions,
+                else_result,
+                ..
+            } => {
+                conditions.iter().any(|c| {
+                    self.expr_has_aggregate(&c.condition) || self.expr_has_aggregate(&c.result)
+                }) || else_result
+                    .as_ref()
+                    .map(|e| self.expr_has_aggregate(e))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    fn execute_aggregate_query(
+        &self,
+        input_schema: &Schema,
+        rows: &[Row],
+        select: &Select,
+    ) -> Result<(Schema, Vec<Row>)> {
+        let evaluator = Evaluator::new(input_schema);
+
+        let group_by_is_empty =
+            matches!(&select.group_by, ast::GroupByExpr::Expressions(v, _) if v.is_empty());
+        let groups: Vec<(Vec<Value>, Vec<&Row>)> = if group_by_is_empty {
+            vec![(vec![], rows.iter().collect())]
+        } else {
+            let mut group_map: HashMap<String, (Vec<Value>, Vec<&Row>)> = HashMap::new();
+
+            for row in rows {
+                let mut group_key_values = Vec::new();
+                for group_expr in self.extract_group_by_exprs(&select.group_by) {
+                    let val = evaluator.evaluate(&group_expr, row)?;
+                    group_key_values.push(val);
+                }
+                let key = format!("{:?}", group_key_values);
+                group_map
+                    .entry(key)
+                    .or_insert_with(|| (group_key_values.clone(), Vec::new()))
+                    .1
+                    .push(row);
+            }
+            group_map.into_values().collect()
+        };
+
+        if let Some(having) = &select.having {
+            let _ = having;
+        }
+
+        let mut result_rows = Vec::new();
+        let mut output_fields: Option<Vec<Field>> = None;
+
+        for (group_key, group_rows) in &groups {
+            let mut row_values = Vec::new();
+            let mut field_names = Vec::new();
+
+            for (idx, item) in select.projection.iter().enumerate() {
+                match item {
+                    SelectItem::UnnamedExpr(expr) => {
+                        let val = self.evaluate_aggregate_expr(
+                            expr,
+                            input_schema,
+                            group_rows,
+                            group_key,
+                            &select.group_by,
+                        )?;
+                        field_names.push(self.expr_to_alias(expr, idx));
+                        row_values.push(val);
+                    }
+                    SelectItem::ExprWithAlias { expr, alias } => {
+                        let val = self.evaluate_aggregate_expr(
+                            expr,
+                            input_schema,
+                            group_rows,
+                            group_key,
+                            &select.group_by,
+                        )?;
+                        field_names.push(alias.value.clone());
+                        row_values.push(val);
+                    }
+                    SelectItem::Wildcard(_) => {
+                        for (i, val) in group_key.iter().enumerate() {
+                            row_values.push(val.clone());
+                            field_names.push(format!("_col{}", i));
+                        }
+                    }
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Unsupported projection in aggregate".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            if output_fields.is_none() {
+                output_fields = Some(
+                    row_values
+                        .iter()
+                        .zip(field_names.iter())
+                        .map(|(val, name)| Field::nullable(name.clone(), val.data_type()))
+                        .collect(),
+                );
+            }
+
+            result_rows.push(Row::from_values(row_values));
+        }
+
+        let schema = Schema::from_fields(output_fields.unwrap_or_default());
+
+        if let Some(having) = &select.having {
+            let having_evaluator = Evaluator::new(&schema);
+            result_rows.retain(|row| {
+                having_evaluator
+                    .evaluate_to_bool(having, row)
+                    .unwrap_or(false)
+            });
+        }
+
+        Ok((schema, result_rows))
+    }
+
+    fn extract_group_by_exprs(&self, group_by: &ast::GroupByExpr) -> Vec<Expr> {
+        match group_by {
+            ast::GroupByExpr::Expressions(exprs, _) => exprs.clone(),
+            ast::GroupByExpr::All(_) => vec![],
+        }
+    }
+
+    fn evaluate_aggregate_expr(
+        &self,
+        expr: &Expr,
+        input_schema: &Schema,
+        group_rows: &[&Row],
+        group_key: &[Value],
+        group_by: &ast::GroupByExpr,
+    ) -> Result<Value> {
+        let evaluator = Evaluator::new(input_schema);
+
+        match expr {
+            Expr::Function(func) => {
+                let name = func.name.to_string().to_uppercase();
+                if self.is_aggregate_function(&name) {
+                    return self.compute_aggregate(&name, func, input_schema, group_rows);
+                }
+                if let Some(row) = group_rows.first() {
+                    evaluator.evaluate(expr, row)
+                } else {
+                    Ok(Value::null())
+                }
+            }
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+                let group_exprs = self.extract_group_by_exprs(group_by);
+                for (i, ge) in group_exprs.iter().enumerate() {
+                    if self.exprs_equal(expr, ge) {
+                        if i < group_key.len() {
+                            return Ok(group_key[i].clone());
+                        }
+                    }
+                }
+                if let Some(row) = group_rows.first() {
+                    evaluator.evaluate(expr, row)
+                } else {
+                    Ok(Value::null())
+                }
+            }
+            Expr::BinaryOp { left, op, right } => {
+                let left_val = self.evaluate_aggregate_expr(
+                    left,
+                    input_schema,
+                    group_rows,
+                    group_key,
+                    group_by,
+                )?;
+                let right_val = self.evaluate_aggregate_expr(
+                    right,
+                    input_schema,
+                    group_rows,
+                    group_key,
+                    group_by,
+                )?;
+                evaluator.evaluate_binary_op_values(&left_val, op, &right_val)
+            }
+            Expr::Case {
+                operand,
+                conditions,
+                else_result,
+                ..
+            } => {
+                match operand {
+                    Some(op_expr) => {
+                        let op_val = self.evaluate_aggregate_expr(
+                            op_expr,
+                            input_schema,
+                            group_rows,
+                            group_key,
+                            group_by,
+                        )?;
+                        for cond in conditions {
+                            let when_val = self.evaluate_aggregate_expr(
+                                &cond.condition,
+                                input_schema,
+                                group_rows,
+                                group_key,
+                                group_by,
+                            )?;
+                            if op_val == when_val {
+                                return self.evaluate_aggregate_expr(
+                                    &cond.result,
+                                    input_schema,
+                                    group_rows,
+                                    group_key,
+                                    group_by,
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        for cond in conditions {
+                            let cond_val = self.evaluate_aggregate_expr(
+                                &cond.condition,
+                                input_schema,
+                                group_rows,
+                                group_key,
+                                group_by,
+                            )?;
+                            if let Some(true) = cond_val.as_bool() {
+                                return self.evaluate_aggregate_expr(
+                                    &cond.result,
+                                    input_schema,
+                                    group_rows,
+                                    group_key,
+                                    group_by,
+                                );
+                            }
+                        }
+                    }
+                }
+                match else_result {
+                    Some(else_expr) => self.evaluate_aggregate_expr(
+                        else_expr,
+                        input_schema,
+                        group_rows,
+                        group_key,
+                        group_by,
+                    ),
+                    None => Ok(Value::null()),
+                }
+            }
+            _ => {
+                if let Some(row) = group_rows.first() {
+                    evaluator.evaluate(expr, row)
+                } else {
+                    Ok(Value::null())
+                }
+            }
+        }
+    }
+
+    fn is_aggregate_function(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "COUNT"
+                | "SUM"
+                | "AVG"
+                | "MIN"
+                | "MAX"
+                | "ARRAY_AGG"
+                | "STRING_AGG"
+                | "GROUP_CONCAT"
+                | "STDDEV"
+                | "STDDEV_POP"
+                | "STDDEV_SAMP"
+                | "VARIANCE"
+                | "VAR_POP"
+                | "VAR_SAMP"
+                | "BIT_AND"
+                | "BIT_OR"
+                | "BIT_XOR"
+                | "BOOL_AND"
+                | "BOOL_OR"
+                | "EVERY"
+                | "ANY_VALUE"
+        )
+    }
+
+    fn compute_aggregate(
+        &self,
+        name: &str,
+        func: &ast::Function,
+        input_schema: &Schema,
+        group_rows: &[&Row],
+    ) -> Result<Value> {
+        let evaluator = Evaluator::new(input_schema);
+
+        let is_distinct = matches!(&func.args, ast::FunctionArguments::List(list) if list.duplicate_treatment == Some(ast::DuplicateTreatment::Distinct));
+
+        let arg_expr = self.extract_first_function_arg(func)?;
+
+        match name {
+            "COUNT" => {
+                if arg_expr.is_none() {
+                    return Ok(Value::int64(group_rows.len() as i64));
+                }
+                let expr = arg_expr.unwrap();
+                if matches!(expr, Expr::Wildcard(_)) {
+                    return Ok(Value::int64(group_rows.len() as i64));
+                }
+                let mut count = 0i64;
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for row in group_rows {
+                    let val = evaluator.evaluate(&expr, row)?;
+                    if !val.is_null() {
+                        if is_distinct {
+                            let key = format!("{:?}", val);
+                            if seen.insert(key) {
+                                count += 1;
+                            }
+                        } else {
+                            count += 1;
+                        }
+                    }
+                }
+                Ok(Value::int64(count))
+            }
+            "SUM" => {
+                let expr = arg_expr
+                    .ok_or_else(|| Error::InvalidQuery("SUM requires an argument".to_string()))?;
+                let mut sum_int: Option<i64> = None;
+                let mut sum_float: Option<f64> = None;
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+                for row in group_rows {
+                    let val = evaluator.evaluate(&expr, row)?;
+                    if val.is_null() {
+                        continue;
+                    }
+                    if is_distinct {
+                        let key = format!("{:?}", val);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                    }
+                    if let Some(i) = val.as_i64() {
+                        sum_int = Some(sum_int.unwrap_or(0) + i);
+                    } else if let Some(f) = val.as_f64() {
+                        sum_float = Some(sum_float.unwrap_or(0.0) + f);
+                    }
+                }
+
+                if let Some(s) = sum_float {
+                    Ok(Value::float64(s + sum_int.unwrap_or(0) as f64))
+                } else if let Some(s) = sum_int {
+                    Ok(Value::int64(s))
+                } else {
+                    Ok(Value::null())
+                }
+            }
+            "AVG" => {
+                let expr = arg_expr
+                    .ok_or_else(|| Error::InvalidQuery("AVG requires an argument".to_string()))?;
+                let mut sum: f64 = 0.0;
+                let mut count: i64 = 0;
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+                for row in group_rows {
+                    let val = evaluator.evaluate(&expr, row)?;
+                    if val.is_null() {
+                        continue;
+                    }
+                    if is_distinct {
+                        let key = format!("{:?}", val);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                    }
+                    if let Some(i) = val.as_i64() {
+                        sum += i as f64;
+                        count += 1;
+                    } else if let Some(f) = val.as_f64() {
+                        sum += f;
+                        count += 1;
+                    }
+                }
+
+                if count > 0 {
+                    Ok(Value::float64(sum / count as f64))
+                } else {
+                    Ok(Value::null())
+                }
+            }
+            "MIN" => {
+                let expr = arg_expr
+                    .ok_or_else(|| Error::InvalidQuery("MIN requires an argument".to_string()))?;
+                let mut min: Option<Value> = None;
+
+                for row in group_rows {
+                    let val = evaluator.evaluate(&expr, row)?;
+                    if val.is_null() {
+                        continue;
+                    }
+                    match &min {
+                        None => min = Some(val),
+                        Some(m) => {
+                            if self.compare_values_for_ordering(&val, m) == std::cmp::Ordering::Less
+                            {
+                                min = Some(val);
+                            }
+                        }
+                    }
+                }
+
+                Ok(min.unwrap_or_else(Value::null))
+            }
+            "MAX" => {
+                let expr = arg_expr
+                    .ok_or_else(|| Error::InvalidQuery("MAX requires an argument".to_string()))?;
+                let mut max: Option<Value> = None;
+
+                for row in group_rows {
+                    let val = evaluator.evaluate(&expr, row)?;
+                    if val.is_null() {
+                        continue;
+                    }
+                    match &max {
+                        None => max = Some(val),
+                        Some(m) => {
+                            if self.compare_values_for_ordering(&val, m)
+                                == std::cmp::Ordering::Greater
+                            {
+                                max = Some(val);
+                            }
+                        }
+                    }
+                }
+
+                Ok(max.unwrap_or_else(Value::null))
+            }
+            "ARRAY_AGG" => {
+                let expr = arg_expr.ok_or_else(|| {
+                    Error::InvalidQuery("ARRAY_AGG requires an argument".to_string())
+                })?;
+                let mut values = Vec::new();
+
+                for row in group_rows {
+                    let val = evaluator.evaluate(&expr, row)?;
+                    values.push(val);
+                }
+
+                Ok(Value::array(values))
+            }
+            "STRING_AGG" | "GROUP_CONCAT" => {
+                let expr = arg_expr.ok_or_else(|| {
+                    Error::InvalidQuery("STRING_AGG requires an argument".to_string())
+                })?;
+                let separator = self
+                    .extract_second_function_arg(func)
+                    .and_then(|e| {
+                        if let Some(row) = group_rows.first() {
+                            evaluator
+                                .evaluate(&e, row)
+                                .ok()
+                                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| ",".to_string());
+
+                let mut parts = Vec::new();
+                for row in group_rows {
+                    let val = evaluator.evaluate(&expr, row)?;
+                    if !val.is_null() {
+                        parts.push(val.to_string());
+                    }
+                }
+
+                Ok(Value::string(parts.join(&separator)))
+            }
+            "ANY_VALUE" => {
+                let expr = arg_expr.ok_or_else(|| {
+                    Error::InvalidQuery("ANY_VALUE requires an argument".to_string())
+                })?;
+                if let Some(row) = group_rows.first() {
+                    evaluator.evaluate(&expr, row)
+                } else {
+                    Ok(Value::null())
+                }
+            }
+            _ => Err(Error::UnsupportedFeature(format!(
+                "Aggregate function {} not yet supported",
+                name
+            ))),
+        }
+    }
+
+    fn extract_first_function_arg(&self, func: &ast::Function) -> Result<Option<Expr>> {
+        if let ast::FunctionArguments::List(arg_list) = &func.args {
+            if let Some(arg) = arg_list.args.first() {
+                match arg {
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr)) => {
+                        return Ok(Some(expr.clone()));
+                    }
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => {
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn extract_second_function_arg(&self, func: &ast::Function) -> Option<Expr> {
+        if let ast::FunctionArguments::List(arg_list) = &func.args {
+            if let Some(arg) = arg_list.args.get(1) {
+                if let ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr)) = arg {
+                    return Some(expr.clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn exprs_equal(&self, a: &Expr, b: &Expr) -> bool {
+        match (a, b) {
+            (Expr::Identifier(a_id), Expr::Identifier(b_id)) => {
+                a_id.value.to_uppercase() == b_id.value.to_uppercase()
+            }
+            (Expr::CompoundIdentifier(a_parts), Expr::CompoundIdentifier(b_parts)) => {
+                a_parts.len() == b_parts.len()
+                    && a_parts
+                        .iter()
+                        .zip(b_parts.iter())
+                        .all(|(a, b)| a.value.to_uppercase() == b.value.to_uppercase())
+            }
+            (Expr::Identifier(a_id), Expr::CompoundIdentifier(b_parts)) => {
+                b_parts.last().map(|p| p.value.to_uppercase()) == Some(a_id.value.to_uppercase())
+            }
+            (Expr::CompoundIdentifier(a_parts), Expr::Identifier(b_id)) => {
+                a_parts.last().map(|p| p.value.to_uppercase()) == Some(b_id.value.to_uppercase())
+            }
+            _ => false,
+        }
+    }
+
+    fn compare_values_for_ordering(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+        if a.is_null() && b.is_null() {
+            return std::cmp::Ordering::Equal;
+        }
+        if a.is_null() {
+            return std::cmp::Ordering::Greater;
+        }
+        if b.is_null() {
+            return std::cmp::Ordering::Less;
+        }
+
+        if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+            return ai.cmp(&bi);
+        }
+        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+            return af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal);
+        }
+        if let (Some(as_), Some(bs)) = (a.as_str(), b.as_str()) {
+            return as_.cmp(bs);
+        }
+        std::cmp::Ordering::Equal
     }
 
     fn project_rows(
@@ -222,12 +1296,10 @@ impl QueryExecutor {
         let evaluator = Evaluator::new(input_schema);
 
         let mut all_cols: Vec<(String, DataType)> = Vec::new();
-        let mut has_star = false;
 
         for (idx, item) in projection.iter().enumerate() {
             match item {
                 SelectItem::Wildcard(_) => {
-                    has_star = true;
                     for field in input_schema.fields() {
                         all_cols.push((field.name.clone(), field.data_type.clone()));
                     }
@@ -236,7 +1308,9 @@ impl QueryExecutor {
                     let sample_row = rows.first().cloned().unwrap_or_else(|| {
                         Row::from_values(vec![Value::null(); input_schema.field_count()])
                     });
-                    let val = evaluator.evaluate(expr, &sample_row).unwrap_or(Value::null());
+                    let val = evaluator
+                        .evaluate(expr, &sample_row)
+                        .unwrap_or(Value::null());
                     let name = self.expr_to_alias(expr, idx);
                     all_cols.push((name, val.data_type()));
                 }
@@ -244,16 +1318,21 @@ impl QueryExecutor {
                     let sample_row = rows.first().cloned().unwrap_or_else(|| {
                         Row::from_values(vec![Value::null(); input_schema.field_count()])
                     });
-                    let val = evaluator.evaluate(expr, &sample_row).unwrap_or(Value::null());
+                    let val = evaluator
+                        .evaluate(expr, &sample_row)
+                        .unwrap_or(Value::null());
                     all_cols.push((alias.value.clone(), val.data_type()));
                 }
-                _ => return Err(Error::UnsupportedFeature(
-                    "Unsupported projection item".to_string(),
-                )),
+                _ => {
+                    return Err(Error::UnsupportedFeature(
+                        "Unsupported projection item".to_string(),
+                    ));
+                }
             }
         }
 
-        let fields: Vec<Field> = all_cols.iter()
+        let fields: Vec<Field> = all_cols
+            .iter()
             .map(|(name, dt)| Field::nullable(name.clone(), dt.clone()))
             .collect();
         let output_schema = Schema::from_fields(fields);
@@ -289,8 +1368,12 @@ impl QueryExecutor {
 
         rows.sort_by(|a, b| {
             for order_expr in exprs {
-                let a_val = evaluator.evaluate(&order_expr.expr, a).unwrap_or(Value::null());
-                let b_val = evaluator.evaluate(&order_expr.expr, b).unwrap_or(Value::null());
+                let a_val = evaluator
+                    .evaluate(&order_expr.expr, a)
+                    .unwrap_or(Value::null());
+                let b_val = evaluator
+                    .evaluate(&order_expr.expr, b)
+                    .unwrap_or(Value::null());
 
                 let ordering = self.compare_values(&a_val, &b_val);
                 let ordering = if order_expr.options.asc.unwrap_or(true) {
@@ -361,10 +1444,15 @@ impl QueryExecutor {
 
         let fields: Vec<Field> = (0..num_cols)
             .map(|i| {
-                let dt = all_rows.iter()
+                let dt = all_rows
+                    .iter()
                     .find_map(|row| {
                         let dt = row[i].data_type();
-                        if dt != DataType::Unknown { Some(dt) } else { None }
+                        if dt != DataType::Unknown {
+                            Some(dt)
+                        } else {
+                            None
+                        }
                     })
                     .unwrap_or(DataType::String);
                 Field::nullable(format!("column{}", i + 1), dt)
@@ -372,9 +1460,7 @@ impl QueryExecutor {
             .collect();
 
         let schema = Schema::from_fields(fields);
-        let rows: Vec<Row> = all_rows.into_iter()
-            .map(Row::from_values)
-            .collect();
+        let rows: Vec<Row> = all_rows.into_iter().map(Row::from_values).collect();
 
         Table::from_rows(schema, rows)
     }
@@ -385,19 +1471,25 @@ impl QueryExecutor {
         if create.or_replace {
             let _ = self.catalog.drop_table(&table_name);
         } else if self.catalog.table_exists(&table_name) && !create.if_not_exists {
-            return Err(Error::invalid_query(format!("Table already exists: {}", table_name)));
+            return Err(Error::invalid_query(format!(
+                "Table already exists: {}",
+                table_name
+            )));
         }
 
         if self.catalog.table_exists(&table_name) {
             return Ok(Table::empty(Schema::new()));
         }
 
-        let fields: Vec<Field> = create.columns.iter()
+        let fields: Vec<Field> = create
+            .columns
+            .iter()
             .map(|col| {
                 let data_type = self.sql_type_to_data_type(&col.data_type)?;
-                let nullable = !col.options.iter().any(|opt| {
-                    matches!(opt.option, ast::ColumnOption::NotNull)
-                });
+                let nullable = !col
+                    .options
+                    .iter()
+                    .any(|opt| matches!(opt.option, ast::ColumnOption::NotNull));
                 if nullable {
                     Ok(Field::nullable(col.name.value.clone(), data_type))
                 } else {
@@ -438,7 +1530,9 @@ impl QueryExecutor {
 
     fn execute_insert(&mut self, insert: &ast::Insert) -> Result<Table> {
         let table_name = insert.table.to_string();
-        let table_data = self.catalog.get_table_mut(&table_name)
+        let table_data = self
+            .catalog
+            .get_table_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
         let schema = table_data.schema.clone();
@@ -446,16 +1540,22 @@ impl QueryExecutor {
         let column_indices: Vec<usize> = if insert.columns.is_empty() {
             (0..schema.field_count()).collect()
         } else {
-            insert.columns.iter()
+            insert
+                .columns
+                .iter()
                 .map(|col| {
-                    schema.fields().iter()
+                    schema
+                        .fields()
+                        .iter()
                         .position(|f| f.name.to_uppercase() == col.value.to_uppercase())
                         .ok_or_else(|| Error::ColumnNotFound(col.value.clone()))
                 })
                 .collect::<Result<Vec<_>>>()?
         };
 
-        let source = insert.source.as_ref()
+        let source = insert
+            .source
+            .as_ref()
             .ok_or_else(|| Error::InvalidQuery("INSERT requires VALUES or SELECT".to_string()))?;
 
         match source.body.as_ref() {
@@ -499,9 +1599,11 @@ impl QueryExecutor {
                     table_data.rows.push(Row::from_values(row_values));
                 }
             }
-            _ => return Err(Error::UnsupportedFeature(
-                "INSERT source type not supported".to_string(),
-            )),
+            _ => {
+                return Err(Error::UnsupportedFeature(
+                    "INSERT source type not supported".to_string(),
+                ));
+            }
         }
 
         Ok(Table::empty(Schema::new()))
@@ -514,21 +1616,28 @@ impl QueryExecutor {
         selection: Option<&Expr>,
     ) -> Result<Table> {
         let table_name = self.extract_single_table_name(table)?;
-        let table_data = self.catalog.get_table_mut(&table_name)
+        let table_data = self
+            .catalog
+            .get_table_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
         let schema = table_data.schema.clone();
         let evaluator = Evaluator::new(&schema);
 
-        let assignment_indices: Vec<(usize, &Expr)> = assignments.iter()
+        let assignment_indices: Vec<(usize, &Expr)> = assignments
+            .iter()
             .map(|a| {
                 let col_name = match &a.target {
                     ast::AssignmentTarget::ColumnName(obj_name) => obj_name.to_string(),
                     ast::AssignmentTarget::Tuple(_) => {
-                        return Err(Error::UnsupportedFeature("Tuple assignment not supported".to_string()));
+                        return Err(Error::UnsupportedFeature(
+                            "Tuple assignment not supported".to_string(),
+                        ));
                     }
                 };
-                let idx = schema.fields().iter()
+                let idx = schema
+                    .fields()
+                    .iter()
                     .position(|f| f.name.to_uppercase() == col_name.to_uppercase())
                     .ok_or_else(|| Error::ColumnNotFound(col_name.clone()))?;
                 Ok((idx, &a.value))
@@ -556,7 +1665,9 @@ impl QueryExecutor {
 
     fn execute_delete(&mut self, delete: &ast::Delete) -> Result<Table> {
         let table_name = self.extract_delete_table_name(delete)?;
-        let table_data = self.catalog.get_table_mut(&table_name)
+        let table_data = self
+            .catalog
+            .get_table_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
         let schema = table_data.schema.clone();
@@ -564,9 +1675,9 @@ impl QueryExecutor {
 
         match &delete.selection {
             Some(selection) => {
-                table_data.rows.retain(|row| {
-                    !evaluator.evaluate_to_bool(selection, row).unwrap_or(false)
-                });
+                table_data
+                    .rows
+                    .retain(|row| !evaluator.evaluate_to_bool(selection, row).unwrap_or(false));
             }
             None => {
                 table_data.rows.clear();
@@ -612,7 +1723,9 @@ impl QueryExecutor {
 
     fn extract_delete_table_name(&self, delete: &ast::Delete) -> Result<String> {
         let tables = match &delete.from {
-            ast::FromTable::WithFromKeyword(tables) | ast::FromTable::WithoutKeyword(tables) => tables,
+            ast::FromTable::WithFromKeyword(tables) | ast::FromTable::WithoutKeyword(tables) => {
+                tables
+            }
         };
         if let Some(from) = tables.first() {
             match &from.relation {
@@ -622,16 +1735,19 @@ impl QueryExecutor {
                 )),
             }
         } else {
-            Err(Error::InvalidQuery("DELETE requires FROM clause".to_string()))
+            Err(Error::InvalidQuery(
+                "DELETE requires FROM clause".to_string(),
+            ))
         }
     }
 
     fn expr_to_alias(&self, expr: &Expr, idx: usize) -> String {
         match expr {
             Expr::Identifier(ident) => ident.value.clone(),
-            Expr::CompoundIdentifier(parts) => {
-                parts.last().map(|i| i.value.clone()).unwrap_or_else(|| format!("_col{}", idx))
-            }
+            Expr::CompoundIdentifier(parts) => parts
+                .last()
+                .map(|i| i.value.clone())
+                .unwrap_or_else(|| format!("_col{}", idx)),
             _ => format!("_col{}", idx),
         }
     }
@@ -639,7 +1755,10 @@ impl QueryExecutor {
     fn evaluate_literal_expr(&self, expr: &Expr) -> Result<Value> {
         match expr {
             Expr::Value(val) => self.sql_value_to_value(&val.value),
-            Expr::UnaryOp { op: ast::UnaryOperator::Minus, expr } => {
+            Expr::UnaryOp {
+                op: ast::UnaryOperator::Minus,
+                expr,
+            } => {
                 let val = self.evaluate_literal_expr(expr)?;
                 if let Some(i) = val.as_i64() {
                     return Ok(Value::int64(-i));
@@ -647,11 +1766,11 @@ impl QueryExecutor {
                 if let Some(f) = val.as_f64() {
                     return Ok(Value::float64(-f));
                 }
-                Err(Error::InvalidQuery("Cannot negate non-numeric value".to_string()))
+                Err(Error::InvalidQuery(
+                    "Cannot negate non-numeric value".to_string(),
+                ))
             }
-            Expr::Identifier(ident) if ident.value.to_uppercase() == "NULL" => {
-                Ok(Value::null())
-            }
+            Expr::Identifier(ident) if ident.value.to_uppercase() == "NULL" => Ok(Value::null()),
             Expr::Array(arr) => {
                 let mut values = Vec::with_capacity(arr.elem.len());
                 for elem in &arr.elem {
@@ -667,10 +1786,72 @@ impl QueryExecutor {
                 }
                 Ok(Value::array(values))
             }
+            Expr::TypedString(ts) => self.evaluate_typed_string_literal(&ts.data_type, &ts.value),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Expression not supported in this context: {:?}",
                 expr
             ))),
+        }
+    }
+
+    fn evaluate_typed_string_literal(
+        &self,
+        data_type: &ast::DataType,
+        value: &ast::ValueWithSpan,
+    ) -> Result<Value> {
+        let s = match &value.value {
+            SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => s.as_str(),
+            _ => {
+                return Err(Error::InvalidQuery(
+                    "TypedString value must be a string".to_string(),
+                ));
+            }
+        };
+        match data_type {
+            ast::DataType::Date => {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    Ok(Value::date(date))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            ast::DataType::Time(_, _) => {
+                if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S") {
+                    Ok(Value::time(time))
+                } else if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f") {
+                    Ok(Value::time(time))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            ast::DataType::Timestamp(_, _) | ast::DataType::Datetime(_) => {
+                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(s) {
+                    Ok(Value::timestamp(ts.with_timezone(&chrono::Utc)))
+                } else if let Ok(ndt) =
+                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                {
+                    Ok(Value::timestamp(
+                        chrono::DateTime::from_naive_utc_and_offset(ndt, chrono::Utc),
+                    ))
+                } else if let Ok(ndt) =
+                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                {
+                    Ok(Value::timestamp(
+                        chrono::DateTime::from_naive_utc_and_offset(ndt, chrono::Utc),
+                    ))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            ast::DataType::JSON => {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(s) {
+                    Ok(Value::json(json_val))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            ast::DataType::Bytes(_) => Ok(Value::bytes(s.as_bytes().to_vec())),
+            _ => Ok(Value::string(s.to_string())),
         }
     }
 
@@ -687,6 +1868,12 @@ impl QueryExecutor {
             }
             SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
                 Ok(Value::string(s.clone()))
+            }
+            SqlValue::SingleQuotedByteStringLiteral(s)
+            | SqlValue::DoubleQuotedByteStringLiteral(s) => Ok(Value::bytes(s.as_bytes().to_vec())),
+            SqlValue::HexStringLiteral(s) => {
+                let bytes = hex::decode(s).unwrap_or_default();
+                Ok(Value::bytes(bytes))
             }
             SqlValue::Boolean(b) => Ok(Value::bool_val(*b)),
             SqlValue::Null => Ok(Value::null()),
@@ -716,29 +1903,31 @@ impl QueryExecutor {
             ast::DataType::Time(_, _) => Ok(DataType::Time),
             ast::DataType::Timestamp(_, _) => Ok(DataType::Timestamp),
             ast::DataType::Datetime(_) => Ok(DataType::Timestamp),
-            ast::DataType::Numeric(_) | ast::DataType::Decimal(_) => {
-                Ok(DataType::Numeric(None))
-            }
+            ast::DataType::Numeric(_) | ast::DataType::Decimal(_) => Ok(DataType::Numeric(None)),
             ast::DataType::JSON => Ok(DataType::Json),
             ast::DataType::Array(inner) => {
                 let element_type = match inner {
                     ast::ArrayElemTypeDef::None => DataType::Unknown,
                     ast::ArrayElemTypeDef::AngleBracket(dt)
                     | ast::ArrayElemTypeDef::SquareBracket(dt, _)
-                    | ast::ArrayElemTypeDef::Parenthesis(dt) => {
-                        self.sql_type_to_data_type(dt)?
-                    }
+                    | ast::ArrayElemTypeDef::Parenthesis(dt) => self.sql_type_to_data_type(dt)?,
                 };
                 Ok(DataType::Array(Box::new(element_type)))
             }
             ast::DataType::Struct(fields, _) => {
-                let struct_fields: Vec<StructField> = fields.iter()
+                let struct_fields: Vec<StructField> = fields
+                    .iter()
                     .map(|f| {
                         let dt = self.sql_type_to_data_type(&f.field_type)?;
-                        let name = f.field_name.as_ref()
+                        let name = f
+                            .field_name
+                            .as_ref()
                             .map(|n| n.value.clone())
                             .unwrap_or_default();
-                        Ok(StructField { name, data_type: dt })
+                        Ok(StructField {
+                            name,
+                            data_type: dt,
+                        })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(DataType::Struct(struct_fields))

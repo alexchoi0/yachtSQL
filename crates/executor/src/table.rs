@@ -1,8 +1,8 @@
 //! Table data structure for query results.
 
 use yachtsql_core::error::{Error, Result};
-use yachtsql_core::types::{DataType, Value};
 use yachtsql_core::types::coercion::CoercionRules;
+use yachtsql_core::types::{DataType, Value};
 use yachtsql_storage::{Column, Row, Schema};
 
 #[inline]
@@ -30,8 +30,7 @@ fn are_types_compatible(col_type: &DataType, schema_type: &DataType) -> bool {
 
     matches!(
         (col_type, schema_type),
-        (DataType::Float64, DataType::Int64)
-            | (DataType::Float64, DataType::BigNumeric)
+        (DataType::Float64, DataType::Int64) | (DataType::Float64, DataType::BigNumeric)
     )
 }
 

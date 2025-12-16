@@ -911,6 +911,7 @@ impl LogicalPlanBuilder {
         expr.clone()
     }
 
+    #[allow(dead_code)]
     fn convert_normalization_form_column_to_string(expr: &Expr) -> Expr {
         if let Expr::Column { name, table: None } = expr {
             let upper = name.to_uppercase();

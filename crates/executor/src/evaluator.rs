@@ -1,9 +1,15 @@
 //! Expression evaluation for WHERE clauses, projections, etc.
 
+#![allow(clippy::wildcard_enum_match_arm)]
+#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::ptr_arg)]
+
+use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value as SqlValue};
 use yachtsql_core::error::{Error, Result};
 use yachtsql_core::types::{DataType, Value};
 use yachtsql_storage::{Row, Schema};
-use sqlparser::ast::{Expr, BinaryOperator, UnaryOperator, Value as SqlValue};
 
 use crate::catalog::TableData;
 
@@ -20,7 +26,9 @@ impl<'a> Evaluator<'a> {
         match expr {
             Expr::Identifier(ident) => {
                 let name = ident.value.to_uppercase();
-                let idx = self.schema.fields()
+                let idx = self
+                    .schema
+                    .fields()
                     .iter()
                     .position(|f| f.name.to_uppercase() == name)
                     .ok_or_else(|| Error::ColumnNotFound(ident.value.clone()))?;
@@ -28,10 +36,13 @@ impl<'a> Evaluator<'a> {
             }
 
             Expr::CompoundIdentifier(parts) => {
-                let name = parts.last()
+                let name = parts
+                    .last()
                     .map(|i| i.value.to_uppercase())
                     .unwrap_or_default();
-                let idx = self.schema.fields()
+                let idx = self
+                    .schema
+                    .fields()
                     .iter()
                     .position(|f| f.name.to_uppercase() == name)
                     .ok_or_else(|| Error::ColumnNotFound(name.clone()))?;
@@ -63,37 +74,47 @@ impl<'a> Evaluator<'a> {
 
             Expr::Nested(inner) => self.evaluate(inner, row),
 
-            Expr::Function(func) => {
-                self.evaluate_function(func, row)
-            }
+            Expr::Function(func) => self.evaluate_function(func, row),
 
-            Expr::Case { operand, conditions, else_result, .. } => {
-                self.evaluate_case(operand.as_deref(), conditions, else_result.as_deref(), row)
-            }
+            Expr::Case {
+                operand,
+                conditions,
+                else_result,
+                ..
+            } => self.evaluate_case(operand.as_deref(), conditions, else_result.as_deref(), row),
 
-            Expr::Array(arr) => {
-                self.evaluate_array(arr, row)
-            }
+            Expr::Array(arr) => self.evaluate_array(arr, row),
 
-            Expr::InList { expr, list, negated } => {
-                self.evaluate_in_list(expr, list, *negated, row)
-            }
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => self.evaluate_in_list(expr, list, *negated, row),
 
-            Expr::Between { expr, low, high, negated } => {
-                self.evaluate_between(expr, low, high, *negated, row)
-            }
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => self.evaluate_between(expr, low, high, *negated, row),
 
-            Expr::Like { expr, pattern, negated, .. } => {
-                self.evaluate_like(expr, pattern, *negated, row)
-            }
+            Expr::Like {
+                expr,
+                pattern,
+                negated,
+                ..
+            } => self.evaluate_like(expr, pattern, *negated, row),
 
-            Expr::ILike { expr, pattern, negated, .. } => {
-                self.evaluate_ilike(expr, pattern, *negated, row)
-            }
+            Expr::ILike {
+                expr,
+                pattern,
+                negated,
+                ..
+            } => self.evaluate_ilike(expr, pattern, *negated, row),
 
-            Expr::Cast { expr, data_type, .. } => {
-                self.evaluate_cast(expr, data_type, row)
-            }
+            Expr::Cast {
+                expr, data_type, ..
+            } => self.evaluate_cast(expr, data_type, row),
 
             Expr::Tuple(exprs) => {
                 let mut values = Vec::with_capacity(exprs.len());
@@ -103,10 +124,209 @@ impl<'a> Evaluator<'a> {
                 Ok(Value::array(values))
             }
 
+            Expr::TypedString(ts) => self.evaluate_typed_string(&ts.data_type, &ts.value),
+
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                self.evaluate_compound_field_access(root, access_chain, row)
+            }
+
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => Err(Error::UnsupportedFeature(
+                "IN subquery not yet supported in evaluator".to_string(),
+            )),
+
+            Expr::Subquery(_) => Err(Error::UnsupportedFeature(
+                "Subquery not yet supported in evaluator".to_string(),
+            )),
+
+            Expr::Struct { values, fields } => self.evaluate_struct_expr(values, row),
+
+            Expr::Named { expr, name } => self.evaluate(expr, row),
+
             _ => Err(Error::UnsupportedFeature(format!(
                 "Expression type not yet supported: {:?}",
                 expr
             ))),
+        }
+    }
+
+    fn evaluate_struct_expr(&self, values: &[Expr], row: &Row) -> Result<Value> {
+        let mut struct_fields = indexmap::IndexMap::new();
+        for (i, expr) in values.iter().enumerate() {
+            match expr {
+                Expr::Named {
+                    expr: inner_expr,
+                    name,
+                } => {
+                    let val = self.evaluate(inner_expr, row)?;
+                    struct_fields.insert(name.value.clone(), val);
+                }
+                _ => {
+                    let val = self.evaluate(expr, row)?;
+                    struct_fields.insert(format!("_field{}", i), val);
+                }
+            }
+        }
+        Ok(Value::struct_val(struct_fields))
+    }
+
+    fn evaluate_typed_string(
+        &self,
+        data_type: &sqlparser::ast::DataType,
+        value: &sqlparser::ast::ValueWithSpan,
+    ) -> Result<Value> {
+        let s = match &value.value {
+            SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => s.as_str(),
+            _ => {
+                return Err(Error::InvalidQuery(
+                    "TypedString value must be a string".to_string(),
+                ));
+            }
+        };
+        match data_type {
+            sqlparser::ast::DataType::Date => {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    Ok(Value::date(date))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            sqlparser::ast::DataType::Time(_, _) => {
+                if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S") {
+                    Ok(Value::time(time))
+                } else if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f") {
+                    Ok(Value::time(time))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            sqlparser::ast::DataType::Timestamp(_, _) | sqlparser::ast::DataType::Datetime(_) => {
+                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(s) {
+                    Ok(Value::timestamp(ts.with_timezone(&chrono::Utc)))
+                } else if let Ok(ndt) =
+                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                {
+                    Ok(Value::timestamp(
+                        chrono::DateTime::from_naive_utc_and_offset(ndt, chrono::Utc),
+                    ))
+                } else if let Ok(ndt) =
+                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                {
+                    Ok(Value::timestamp(
+                        chrono::DateTime::from_naive_utc_and_offset(ndt, chrono::Utc),
+                    ))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            sqlparser::ast::DataType::JSON => {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(s) {
+                    Ok(Value::json(json_val))
+                } else {
+                    Ok(Value::string(s.to_string()))
+                }
+            }
+            sqlparser::ast::DataType::Bytes(_) => Ok(Value::bytes(s.as_bytes().to_vec())),
+            _ => Ok(Value::string(s.to_string())),
+        }
+    }
+
+    fn evaluate_compound_field_access(
+        &self,
+        root: &Expr,
+        access_chain: &[sqlparser::ast::AccessExpr],
+        row: &Row,
+    ) -> Result<Value> {
+        let mut current = self.evaluate(root, row)?;
+
+        for access in access_chain {
+            match access {
+                sqlparser::ast::AccessExpr::Subscript(subscript) => {
+                    current = self.apply_subscript(current, subscript, row)?;
+                }
+                sqlparser::ast::AccessExpr::Dot(field_expr) => match field_expr {
+                    Expr::Identifier(ident) => {
+                        if let Some(struct_val) = current.as_struct() {
+                            let field_name = ident.value.to_uppercase();
+                            current = struct_val
+                                .iter()
+                                .find(|(name, _)| name.to_uppercase() == field_name)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or_else(Value::null);
+                        } else {
+                            return Ok(Value::null());
+                        }
+                    }
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Non-identifier field access".to_string(),
+                        ));
+                    }
+                },
+            }
+        }
+
+        Ok(current)
+    }
+
+    fn apply_subscript(
+        &self,
+        base_val: Value,
+        subscript: &sqlparser::ast::Subscript,
+        row: &Row,
+    ) -> Result<Value> {
+        match subscript {
+            sqlparser::ast::Subscript::Index { index } => {
+                let idx_val = self.evaluate(index, row)?;
+                let idx = idx_val.as_i64().ok_or_else(|| Error::TypeMismatch {
+                    expected: "INT64".to_string(),
+                    actual: idx_val.data_type().to_string(),
+                })?;
+
+                if let Some(arr) = base_val.as_array() {
+                    let idx_usize = if idx > 0 {
+                        (idx - 1) as usize
+                    } else if idx < 0 {
+                        let len = arr.len() as i64;
+                        if -idx > len {
+                            return Ok(Value::null());
+                        }
+                        (len + idx) as usize
+                    } else {
+                        return Ok(Value::null());
+                    };
+
+                    if idx_usize < arr.len() {
+                        Ok(arr[idx_usize].clone())
+                    } else {
+                        Ok(Value::null())
+                    }
+                } else if let Some(s) = base_val.as_str() {
+                    let chars: Vec<char> = s.chars().collect();
+                    let idx_usize = if idx > 0 {
+                        (idx - 1) as usize
+                    } else {
+                        return Ok(Value::null());
+                    };
+
+                    if idx_usize < chars.len() {
+                        Ok(Value::string(chars[idx_usize].to_string()))
+                    } else {
+                        Ok(Value::null())
+                    }
+                } else {
+                    Err(Error::TypeMismatch {
+                        expected: "ARRAY or STRING".to_string(),
+                        actual: base_val.data_type().to_string(),
+                    })
+                }
+            }
+            sqlparser::ast::Subscript::Slice { .. } => Err(Error::UnsupportedFeature(
+                "Array slice not yet supported".to_string(),
+            )),
         }
     }
 
@@ -150,7 +370,13 @@ impl<'a> Evaluator<'a> {
         Ok(Value::array(values))
     }
 
-    fn evaluate_in_list(&self, expr: &Expr, list: &[Expr], negated: bool, row: &Row) -> Result<Value> {
+    fn evaluate_in_list(
+        &self,
+        expr: &Expr,
+        list: &[Expr],
+        negated: bool,
+        row: &Row,
+    ) -> Result<Value> {
         let val = self.evaluate(expr, row)?;
         if val.is_null() {
             return Ok(Value::null());
@@ -176,7 +402,14 @@ impl<'a> Evaluator<'a> {
         Ok(Value::bool_val(if negated { !result } else { result }))
     }
 
-    fn evaluate_between(&self, expr: &Expr, low: &Expr, high: &Expr, negated: bool, row: &Row) -> Result<Value> {
+    fn evaluate_between(
+        &self,
+        expr: &Expr,
+        low: &Expr,
+        high: &Expr,
+        negated: bool,
+        row: &Row,
+    ) -> Result<Value> {
         let val = self.evaluate(expr, row)?;
         let low_val = self.evaluate(low, row)?;
         let high_val = self.evaluate(high, row)?;
@@ -192,7 +425,13 @@ impl<'a> Evaluator<'a> {
         Ok(Value::bool_val(if negated { !in_range } else { in_range }))
     }
 
-    fn evaluate_like(&self, expr: &Expr, pattern: &Expr, negated: bool, row: &Row) -> Result<Value> {
+    fn evaluate_like(
+        &self,
+        expr: &Expr,
+        pattern: &Expr,
+        negated: bool,
+        row: &Row,
+    ) -> Result<Value> {
         let val = self.evaluate(expr, row)?;
         let pat = self.evaluate(pattern, row)?;
 
@@ -213,7 +452,13 @@ impl<'a> Evaluator<'a> {
         Ok(Value::bool_val(if negated { !matches } else { matches }))
     }
 
-    fn evaluate_ilike(&self, expr: &Expr, pattern: &Expr, negated: bool, row: &Row) -> Result<Value> {
+    fn evaluate_ilike(
+        &self,
+        expr: &Expr,
+        pattern: &Expr,
+        negated: bool,
+        row: &Row,
+    ) -> Result<Value> {
         let val = self.evaluate(expr, row)?;
         let pat = self.evaluate(pattern, row)?;
 
@@ -241,9 +486,7 @@ impl<'a> Evaluator<'a> {
             (text.to_string(), pattern.to_string())
         };
 
-        let regex_pattern = pattern
-            .replace('%', ".*")
-            .replace('_', ".");
+        let regex_pattern = pattern.replace('%', ".*").replace('_', ".");
         let regex_pattern = format!("^{}$", regex_pattern);
 
         regex::Regex::new(&regex_pattern)
@@ -251,14 +494,21 @@ impl<'a> Evaluator<'a> {
             .unwrap_or(false)
     }
 
-    fn evaluate_cast(&self, expr: &Expr, target_type: &sqlparser::ast::DataType, row: &Row) -> Result<Value> {
+    fn evaluate_cast(
+        &self,
+        expr: &Expr,
+        target_type: &sqlparser::ast::DataType,
+        row: &Row,
+    ) -> Result<Value> {
         let val = self.evaluate(expr, row)?;
         if val.is_null() {
             return Ok(Value::null());
         }
 
         match target_type {
-            sqlparser::ast::DataType::Int64 | sqlparser::ast::DataType::BigInt(_) | sqlparser::ast::DataType::Integer(_) => {
+            sqlparser::ast::DataType::Int64
+            | sqlparser::ast::DataType::BigInt(_)
+            | sqlparser::ast::DataType::Integer(_) => {
                 if let Some(i) = val.as_i64() {
                     return Ok(Value::int64(i));
                 }
@@ -295,9 +545,9 @@ impl<'a> Evaluator<'a> {
                     actual: val.data_type().to_string(),
                 })
             }
-            sqlparser::ast::DataType::String(_) | sqlparser::ast::DataType::Varchar(_) | sqlparser::ast::DataType::Text => {
-                Ok(Value::string(val.to_string()))
-            }
+            sqlparser::ast::DataType::String(_)
+            | sqlparser::ast::DataType::Varchar(_)
+            | sqlparser::ast::DataType::Text => Ok(Value::string(val.to_string())),
             sqlparser::ast::DataType::Boolean | sqlparser::ast::DataType::Bool => {
                 if let Some(b) = val.as_bool() {
                     return Ok(Value::bool_val(b));
@@ -318,6 +568,103 @@ impl<'a> Evaluator<'a> {
                     expected: "BOOL".to_string(),
                     actual: val.data_type().to_string(),
                 })
+            }
+            sqlparser::ast::DataType::Date => {
+                if let Some(s) = val.as_str() {
+                    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                        return Ok(Value::date(date));
+                    }
+                }
+                Err(Error::TypeMismatch {
+                    expected: "DATE".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::Timestamp(_, _) | sqlparser::ast::DataType::Datetime(_) => {
+                if let Some(s) = val.as_str() {
+                    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(s) {
+                        return Ok(Value::timestamp(ts.with_timezone(&chrono::Utc)));
+                    }
+                    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                        return Ok(Value::timestamp(
+                            chrono::DateTime::from_naive_utc_and_offset(ndt, chrono::Utc),
+                        ));
+                    }
+                    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                        return Ok(Value::timestamp(
+                            chrono::DateTime::from_naive_utc_and_offset(ndt, chrono::Utc),
+                        ));
+                    }
+                }
+                Err(Error::TypeMismatch {
+                    expected: "TIMESTAMP".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::Time(_, _) => {
+                if let Some(s) = val.as_str() {
+                    if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S") {
+                        return Ok(Value::time(time));
+                    }
+                    if let Ok(time) = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f") {
+                        return Ok(Value::time(time));
+                    }
+                }
+                Err(Error::TypeMismatch {
+                    expected: "TIME".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::Numeric(_) | sqlparser::ast::DataType::Decimal(_) => {
+                if let Some(i) = val.as_i64() {
+                    return Ok(Value::numeric(rust_decimal::Decimal::from(i)));
+                }
+                if let Some(f) = val.as_f64() {
+                    if let Some(dec) = rust_decimal::Decimal::from_f64_retain(f) {
+                        return Ok(Value::numeric(dec));
+                    }
+                    return Ok(Value::float64(f));
+                }
+                if let Some(s) = val.as_str() {
+                    if let Ok(dec) = rust_decimal::Decimal::from_str_exact(s) {
+                        return Ok(Value::numeric(dec));
+                    }
+                    if let Ok(f) = s.parse::<f64>() {
+                        return Ok(Value::float64(f));
+                    }
+                }
+                Err(Error::TypeMismatch {
+                    expected: "NUMERIC".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::Bytes(_) => {
+                if let Some(b) = val.as_bytes() {
+                    return Ok(Value::bytes(b.to_vec()));
+                }
+                if let Some(s) = val.as_str() {
+                    return Ok(Value::bytes(s.as_bytes().to_vec()));
+                }
+                Err(Error::TypeMismatch {
+                    expected: "BYTES".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::Array(elem_def) => {
+                if let Some(arr) = val.as_array() {
+                    return Ok(Value::array(arr.to_vec()));
+                }
+                Err(Error::TypeMismatch {
+                    expected: "ARRAY".to_string(),
+                    actual: val.data_type().to_string(),
+                })
+            }
+            sqlparser::ast::DataType::JSON => {
+                let json_str = val.to_string();
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                    return Ok(Value::json(json_val));
+                }
+                Ok(Value::json(serde_json::Value::String(json_str)))
             }
             _ => Err(Error::UnsupportedFeature(format!(
                 "CAST to {:?} not yet supported",
@@ -340,8 +687,22 @@ impl<'a> Evaluator<'a> {
             SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
                 Ok(Value::string(s.clone()))
             }
+            SqlValue::SingleQuotedByteStringLiteral(s)
+            | SqlValue::DoubleQuotedByteStringLiteral(s) => Ok(Value::bytes(s.as_bytes().to_vec())),
             SqlValue::Boolean(b) => Ok(Value::bool_val(*b)),
             SqlValue::Null => Ok(Value::null()),
+            SqlValue::HexStringLiteral(s) => {
+                let bytes = hex::decode(s).unwrap_or_default();
+                Ok(Value::bytes(bytes))
+            }
+            SqlValue::SingleQuotedRawStringLiteral(s)
+            | SqlValue::DoubleQuotedRawStringLiteral(s) => Ok(Value::string(s.clone())),
+            SqlValue::TripleSingleQuotedString(s) | SqlValue::TripleDoubleQuotedString(s) => {
+                Ok(Value::string(s.clone()))
+            }
+            SqlValue::TripleSingleQuotedRawStringLiteral(s)
+            | SqlValue::TripleDoubleQuotedRawStringLiteral(s) => Ok(Value::string(s.clone())),
+            SqlValue::DollarQuotedString(dqs) => Ok(Value::string(dqs.value.clone())),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Literal type not yet supported: {:?}",
                 val
@@ -349,7 +710,12 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn evaluate_binary_op(&self, left: &Value, op: &BinaryOperator, right: &Value) -> Result<Value> {
+    fn evaluate_binary_op(
+        &self,
+        left: &Value,
+        op: &BinaryOperator,
+        right: &Value,
+    ) -> Result<Value> {
         if left.is_null() || right.is_null() {
             match op {
                 BinaryOperator::And => {
@@ -451,19 +817,28 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::bool_val(pred(l.cmp(&r))));
         }
         if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
-            return Ok(Value::bool_val(pred(l.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal))));
+            return Ok(Value::bool_val(pred(
+                l.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal),
+            )));
         }
         if let (Some(l), Some(r)) = (left.as_str(), right.as_str()) {
             return Ok(Value::bool_val(pred(l.cmp(r))));
         }
         if let Some(l) = left.as_i64() {
             if let Some(r) = right.as_f64() {
-                return Ok(Value::bool_val(pred((l as f64).partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal))));
+                return Ok(Value::bool_val(pred(
+                    (l as f64)
+                        .partial_cmp(&r)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )));
             }
         }
         if let Some(l) = left.as_f64() {
             if let Some(r) = right.as_i64() {
-                return Ok(Value::bool_val(pred(l.partial_cmp(&(r as f64)).unwrap_or(std::cmp::Ordering::Equal))));
+                return Ok(Value::bool_val(pred(
+                    l.partial_cmp(&(r as f64))
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )));
             }
         }
         Err(Error::TypeMismatch {
@@ -541,7 +916,9 @@ impl<'a> Evaluator<'a> {
             }
             "NULLIF" => {
                 if args.len() != 2 {
-                    return Err(Error::InvalidQuery("NULLIF requires 2 arguments".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "NULLIF requires 2 arguments".to_string(),
+                    ));
                 }
                 if args[0] == args[1] {
                     Ok(Value::null())
@@ -551,7 +928,9 @@ impl<'a> Evaluator<'a> {
             }
             "IFNULL" => {
                 if args.len() != 2 {
-                    return Err(Error::InvalidQuery("IFNULL requires 2 arguments".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "IFNULL requires 2 arguments".to_string(),
+                    ));
                 }
                 if args[0].is_null() {
                     Ok(args[1].clone())
@@ -597,7 +976,9 @@ impl<'a> Evaluator<'a> {
             }
             "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => {
                 if args.len() != 1 {
-                    return Err(Error::InvalidQuery("LENGTH requires 1 argument".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "LENGTH requires 1 argument".to_string(),
+                    ));
                 }
                 if args[0].is_null() {
                     return Ok(Value::null());
@@ -658,7 +1039,9 @@ impl<'a> Evaluator<'a> {
             }
             "SUBSTR" | "SUBSTRING" => {
                 if args.len() < 2 || args.len() > 3 {
-                    return Err(Error::InvalidQuery("SUBSTR requires 2 or 3 arguments".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "SUBSTR requires 2 or 3 arguments".to_string(),
+                    ));
                 }
                 if args[0].is_null() {
                     return Ok(Value::null());
@@ -689,7 +1072,9 @@ impl<'a> Evaluator<'a> {
             }
             "REPLACE" => {
                 if args.len() != 3 {
-                    return Err(Error::InvalidQuery("REPLACE requires 3 arguments".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "REPLACE requires 3 arguments".to_string(),
+                    ));
                 }
                 if args[0].is_null() {
                     return Ok(Value::null());
@@ -764,7 +1149,9 @@ impl<'a> Evaluator<'a> {
             }
             "ROUND" => {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(Error::InvalidQuery("ROUND requires 1 or 2 arguments".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "ROUND requires 1 or 2 arguments".to_string(),
+                    ));
                 }
                 if args[0].is_null() {
                     return Ok(Value::null());
@@ -808,7 +1195,9 @@ impl<'a> Evaluator<'a> {
             }
             "GREATEST" => {
                 if args.is_empty() {
-                    return Err(Error::InvalidQuery("GREATEST requires at least 1 argument".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "GREATEST requires at least 1 argument".to_string(),
+                    ));
                 }
                 let mut max: Option<Value> = None;
                 for val in args {
@@ -828,7 +1217,9 @@ impl<'a> Evaluator<'a> {
             }
             "LEAST" => {
                 if args.is_empty() {
-                    return Err(Error::InvalidQuery("LEAST requires at least 1 argument".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "LEAST requires at least 1 argument".to_string(),
+                    ));
                 }
                 let mut min: Option<Value> = None;
                 for val in args {
@@ -848,7 +1239,9 @@ impl<'a> Evaluator<'a> {
             }
             "ARRAY_LENGTH" => {
                 if args.len() != 1 {
-                    return Err(Error::InvalidQuery("ARRAY_LENGTH requires 1 argument".to_string()));
+                    return Err(Error::InvalidQuery(
+                        "ARRAY_LENGTH requires 1 argument".to_string(),
+                    ));
                 }
                 if args[0].is_null() {
                     return Ok(Value::null());
@@ -861,6 +1254,957 @@ impl<'a> Evaluator<'a> {
                     actual: args[0].data_type().to_string(),
                 })
             }
+            "SAFE_DIVIDE" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "SAFE_DIVIDE requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let divisor = args[1]
+                    .as_f64()
+                    .or_else(|| args[1].as_i64().map(|i| i as f64));
+                if divisor == Some(0.0) {
+                    return Ok(Value::null());
+                }
+                let dividend = args[0]
+                    .as_f64()
+                    .or_else(|| args[0].as_i64().map(|i| i as f64));
+                match (dividend, divisor) {
+                    (Some(a), Some(b)) => Ok(Value::float64(a / b)),
+                    _ => Ok(Value::null()),
+                }
+            }
+            "SAFE_ADD" | "SAFE_SUBTRACT" | "SAFE_MULTIPLY" | "SAFE_NEGATE" => match name.as_str() {
+                "SAFE_ADD" => {
+                    if args.len() != 2 || args[0].is_null() || args[1].is_null() {
+                        return Ok(Value::null());
+                    }
+                    match (args[0].as_i64(), args[1].as_i64()) {
+                        (Some(a), Some(b)) => Ok(Value::int64(a.wrapping_add(b))),
+                        _ => match (args[0].as_f64(), args[1].as_f64()) {
+                            (Some(a), Some(b)) => Ok(Value::float64(a + b)),
+                            _ => Ok(Value::null()),
+                        },
+                    }
+                }
+                "SAFE_SUBTRACT" => {
+                    if args.len() != 2 || args[0].is_null() || args[1].is_null() {
+                        return Ok(Value::null());
+                    }
+                    match (args[0].as_i64(), args[1].as_i64()) {
+                        (Some(a), Some(b)) => Ok(Value::int64(a.wrapping_sub(b))),
+                        _ => match (args[0].as_f64(), args[1].as_f64()) {
+                            (Some(a), Some(b)) => Ok(Value::float64(a - b)),
+                            _ => Ok(Value::null()),
+                        },
+                    }
+                }
+                "SAFE_MULTIPLY" => {
+                    if args.len() != 2 || args[0].is_null() || args[1].is_null() {
+                        return Ok(Value::null());
+                    }
+                    match (args[0].as_i64(), args[1].as_i64()) {
+                        (Some(a), Some(b)) => Ok(Value::int64(a.wrapping_mul(b))),
+                        _ => match (args[0].as_f64(), args[1].as_f64()) {
+                            (Some(a), Some(b)) => Ok(Value::float64(a * b)),
+                            _ => Ok(Value::null()),
+                        },
+                    }
+                }
+                "SAFE_NEGATE" => {
+                    if args.len() != 1 || args[0].is_null() {
+                        return Ok(Value::null());
+                    }
+                    if let Some(i) = args[0].as_i64() {
+                        return Ok(Value::int64(i.wrapping_neg()));
+                    }
+                    if let Some(f) = args[0].as_f64() {
+                        return Ok(Value::float64(-f));
+                    }
+                    Ok(Value::null())
+                }
+                _ => Ok(Value::null()),
+            },
+            "MD5" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("MD5 requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let input = if let Some(s) = args[0].as_str() {
+                    s.as_bytes().to_vec()
+                } else if let Some(b) = args[0].as_bytes() {
+                    b.to_vec()
+                } else {
+                    return Ok(Value::null());
+                };
+                let digest = md5::compute(&input);
+                Ok(Value::bytes(digest.to_vec()))
+            }
+            "BYTE_LENGTH" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "BYTE_LENGTH requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(s) = args[0].as_str() {
+                    return Ok(Value::int64(s.len() as i64));
+                }
+                if let Some(b) = args[0].as_bytes() {
+                    return Ok(Value::int64(b.len() as i64));
+                }
+                Err(Error::TypeMismatch {
+                    expected: "STRING or BYTES".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })
+            }
+            "INT64" | "INT" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("INT64 requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::int64(i));
+                }
+                if let Some(f) = args[0].as_f64() {
+                    return Ok(Value::int64(f as i64));
+                }
+                if let Some(s) = args[0].as_str() {
+                    if let Ok(i) = s.parse::<i64>() {
+                        return Ok(Value::int64(i));
+                    }
+                }
+                if let Some(b) = args[0].as_bool() {
+                    return Ok(Value::int64(if b { 1 } else { 0 }));
+                }
+                Ok(Value::null())
+            }
+            "FLOAT64" | "FLOAT" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "FLOAT64 requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(f) = args[0].as_f64() {
+                    return Ok(Value::float64(f));
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::float64(i as f64));
+                }
+                if let Some(s) = args[0].as_str() {
+                    if let Ok(f) = s.parse::<f64>() {
+                        return Ok(Value::float64(f));
+                    }
+                }
+                Ok(Value::null())
+            }
+            "STRING" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "STRING requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                Ok(Value::string(args[0].to_string()))
+            }
+            "BOOL" | "BOOLEAN" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("BOOL requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(b) = args[0].as_bool() {
+                    return Ok(Value::bool_val(b));
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::bool_val(i != 0));
+                }
+                if let Some(s) = args[0].as_str() {
+                    let lower = s.to_lowercase();
+                    if lower == "true" || lower == "1" {
+                        return Ok(Value::bool_val(true));
+                    }
+                    if lower == "false" || lower == "0" {
+                        return Ok(Value::bool_val(false));
+                    }
+                }
+                Ok(Value::null())
+            }
+            "SAFE_CONVERT_BYTES_TO_STRING" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "SAFE_CONVERT_BYTES_TO_STRING requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(b) = args[0].as_bytes() {
+                    match String::from_utf8(b.to_vec()) {
+                        Ok(s) => return Ok(Value::string(s)),
+                        Err(_) => return Ok(Value::null()),
+                    }
+                }
+                Ok(Value::null())
+            }
+            "REGEXP_CONTAINS" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "REGEXP_CONTAINS requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let text = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let pattern = args[1].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[1].data_type().to_string(),
+                })?;
+                match regex::Regex::new(pattern) {
+                    Ok(re) => Ok(Value::bool_val(re.is_match(text))),
+                    Err(_) => Ok(Value::null()),
+                }
+            }
+            "REGEXP_EXTRACT" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(Error::InvalidQuery(
+                        "REGEXP_EXTRACT requires 2 or 3 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let text = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let pattern = args[1].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[1].data_type().to_string(),
+                })?;
+                match regex::Regex::new(pattern) {
+                    Ok(re) => {
+                        if let Some(caps) = re.captures(text) {
+                            let group_idx = if args.len() == 3 {
+                                args[2].as_i64().unwrap_or(0) as usize
+                            } else if re.captures_len() > 1 {
+                                1
+                            } else {
+                                0
+                            };
+                            if let Some(m) = caps.get(group_idx) {
+                                return Ok(Value::string(m.as_str().to_string()));
+                            }
+                        }
+                        Ok(Value::null())
+                    }
+                    Err(_) => Ok(Value::null()),
+                }
+            }
+            "JSON_EXTRACT_SCALAR" | "JSON_VALUE" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "JSON_EXTRACT_SCALAR requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let json_str = args[0].as_str().unwrap_or_default();
+                let path = args[1].as_str().unwrap_or_default();
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    let result = self.json_path_extract(&json_val, path);
+                    return Ok(result
+                        .map(|v| match v {
+                            serde_json::Value::String(s) => Value::string(s),
+                            serde_json::Value::Number(n) => {
+                                if let Some(i) = n.as_i64() {
+                                    Value::string(i.to_string())
+                                } else if let Some(f) = n.as_f64() {
+                                    Value::string(f.to_string())
+                                } else {
+                                    Value::null()
+                                }
+                            }
+                            serde_json::Value::Bool(b) => Value::string(b.to_string()),
+                            serde_json::Value::Null => Value::null(),
+                            _ => Value::null(),
+                        })
+                        .unwrap_or_else(Value::null));
+                }
+                Ok(Value::null())
+            }
+            "JSON_QUERY" | "JSON_EXTRACT" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "JSON_QUERY requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let json_str = args[0].as_str().unwrap_or_default();
+                let path = args[1].as_str().unwrap_or_default();
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    let result = self.json_path_extract(&json_val, path);
+                    return Ok(result
+                        .map(|v| Value::string(v.to_string()))
+                        .unwrap_or_else(Value::null));
+                }
+                Ok(Value::null())
+            }
+            "JSON_TYPE" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "JSON_TYPE requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let json_str = args[0].as_str().unwrap_or_default();
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    let type_name = match json_val {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                    };
+                    return Ok(Value::string(type_name.to_string()));
+                }
+                Ok(Value::null())
+            }
+            "BIT_COUNT" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "BIT_COUNT requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::int64(i.count_ones() as i64));
+                }
+                if let Some(b) = args[0].as_bytes() {
+                    let count: u32 = b.iter().map(|byte| byte.count_ones()).sum();
+                    return Ok(Value::int64(count as i64));
+                }
+                Ok(Value::null())
+            }
+            "LEFT" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery("LEFT requires 2 arguments".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let n = args[1].as_i64().unwrap_or(0) as usize;
+                let result: String = s.chars().take(n).collect();
+                Ok(Value::string(result))
+            }
+            "RIGHT" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "RIGHT requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let n = args[1].as_i64().unwrap_or(0) as usize;
+                let chars: Vec<char> = s.chars().collect();
+                let start = chars.len().saturating_sub(n);
+                let result: String = chars[start..].iter().collect();
+                Ok(Value::string(result))
+            }
+            "REVERSE" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "REVERSE requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                Ok(Value::string(s.chars().rev().collect()))
+            }
+            "REPEAT" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "REPEAT requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let n = args[1].as_i64().unwrap_or(0) as usize;
+                Ok(Value::string(s.repeat(n)))
+            }
+            "STARTS_WITH" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "STARTS_WITH requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let prefix = args[1].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[1].data_type().to_string(),
+                })?;
+                Ok(Value::bool_val(s.starts_with(prefix)))
+            }
+            "ENDS_WITH" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "ENDS_WITH requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let suffix = args[1].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[1].data_type().to_string(),
+                })?;
+                Ok(Value::bool_val(s.ends_with(suffix)))
+            }
+            "CONTAINS_SUBSTR" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "CONTAINS_SUBSTR requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let substr = args[1].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[1].data_type().to_string(),
+                })?;
+                Ok(Value::bool_val(
+                    s.to_lowercase().contains(&substr.to_lowercase()),
+                ))
+            }
+            "INSTR" | "STRPOS" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "INSTR requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let substr = args[1].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[1].data_type().to_string(),
+                })?;
+                match s.find(substr) {
+                    Some(idx) => Ok(Value::int64((idx + 1) as i64)),
+                    None => Ok(Value::int64(0)),
+                }
+            }
+            "SPLIT" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(Error::InvalidQuery(
+                        "SPLIT requires 1 or 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let delimiter = if args.len() == 2 {
+                    args[1].as_str().unwrap_or(",")
+                } else {
+                    ","
+                };
+                let parts: Vec<Value> = s
+                    .split(delimiter)
+                    .map(|p| Value::string(p.to_string()))
+                    .collect();
+                Ok(Value::array(parts))
+            }
+            "POWER" | "POW" => {
+                if args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "POWER requires 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let base = args[0]
+                    .as_f64()
+                    .or_else(|| args[0].as_i64().map(|i| i as f64));
+                let exp = args[1]
+                    .as_f64()
+                    .or_else(|| args[1].as_i64().map(|i| i as f64));
+                match (base, exp) {
+                    (Some(b), Some(e)) => Ok(Value::float64(b.powf(e))),
+                    _ => Ok(Value::null()),
+                }
+            }
+            "SQRT" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("SQRT requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let n = args[0]
+                    .as_f64()
+                    .or_else(|| args[0].as_i64().map(|i| i as f64));
+                match n {
+                    Some(v) if v >= 0.0 => Ok(Value::float64(v.sqrt())),
+                    Some(_) => Ok(Value::null()),
+                    None => Ok(Value::null()),
+                }
+            }
+            "LOG" | "LN" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("LOG requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let n = args[0]
+                    .as_f64()
+                    .or_else(|| args[0].as_i64().map(|i| i as f64));
+                match n {
+                    Some(v) if v > 0.0 => Ok(Value::float64(v.ln())),
+                    _ => Ok(Value::null()),
+                }
+            }
+            "LOG10" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("LOG10 requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let n = args[0]
+                    .as_f64()
+                    .or_else(|| args[0].as_i64().map(|i| i as f64));
+                match n {
+                    Some(v) if v > 0.0 => Ok(Value::float64(v.log10())),
+                    _ => Ok(Value::null()),
+                }
+            }
+            "EXP" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("EXP requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let n = args[0]
+                    .as_f64()
+                    .or_else(|| args[0].as_i64().map(|i| i as f64));
+                match n {
+                    Some(v) => Ok(Value::float64(v.exp())),
+                    None => Ok(Value::null()),
+                }
+            }
+            "SIGN" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery("SIGN requires 1 argument".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::int64(i.signum()));
+                }
+                if let Some(f) = args[0].as_f64() {
+                    if f > 0.0 {
+                        return Ok(Value::int64(1));
+                    }
+                    if f < 0.0 {
+                        return Ok(Value::int64(-1));
+                    }
+                    return Ok(Value::int64(0));
+                }
+                Ok(Value::null())
+            }
+            "TRUNC" | "TRUNCATE" => {
+                if args.len() != 1 && args.len() != 2 {
+                    return Err(Error::InvalidQuery(
+                        "TRUNC requires 1 or 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let decimals = if args.len() == 2 {
+                    args[1].as_i64().unwrap_or(0) as i32
+                } else {
+                    0
+                };
+                if let Some(f) = args[0].as_f64() {
+                    let multiplier = 10f64.powi(decimals);
+                    return Ok(Value::float64((f * multiplier).trunc() / multiplier));
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::int64(i));
+                }
+                Ok(Value::null())
+            }
+            "DATE" => {
+                if args.is_empty() {
+                    return Err(Error::InvalidQuery("DATE requires arguments".to_string()));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(s) = args[0].as_str() {
+                    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                        return Ok(Value::date(date));
+                    }
+                }
+                Ok(Value::null())
+            }
+            "CURRENT_DATE" => {
+                let today = chrono::Utc::now().date_naive();
+                Ok(Value::date(today))
+            }
+            "CURRENT_TIMESTAMP" | "CURRENT_DATETIME" | "NOW" => {
+                let now = chrono::Utc::now();
+                Ok(Value::timestamp(now))
+            }
+            "FORMAT" => {
+                if args.is_empty() {
+                    return Err(Error::InvalidQuery("FORMAT requires arguments".to_string()));
+                }
+                if args.len() == 1 {
+                    return Ok(args[0].clone());
+                }
+                let format_str = args[0].as_str().unwrap_or("%s");
+                let mut result = format_str.to_string();
+                for (i, arg) in args.iter().skip(1).enumerate() {
+                    result = result.replacen("%s", &arg.to_string(), 1);
+                    result = result.replace(&format!("%{}", i + 1), &arg.to_string());
+                }
+                Ok(Value::string(result))
+            }
+            "TO_HEX" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "TO_HEX requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(b) = args[0].as_bytes() {
+                    return Ok(Value::string(hex::encode(b)));
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::string(format!("{:x}", i)));
+                }
+                Ok(Value::null())
+            }
+            "FROM_HEX" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "FROM_HEX requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(s) = args[0].as_str() {
+                    if let Ok(bytes) = hex::decode(s) {
+                        return Ok(Value::bytes(bytes));
+                    }
+                }
+                Ok(Value::null())
+            }
+            "TO_JSON" | "TO_JSON_STRING" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "TO_JSON requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::string("null".to_string()));
+                }
+                let json_val = self.value_to_json(&args[0]);
+                Ok(Value::string(json_val.to_string()))
+            }
+            "REGEXP_REPLACE" => {
+                if args.len() < 3 {
+                    return Err(Error::InvalidQuery(
+                        "REGEXP_REPLACE requires at least 3 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let text = args[0].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[0].data_type().to_string(),
+                })?;
+                let pattern = args[1].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[1].data_type().to_string(),
+                })?;
+                let replacement = args[2].as_str().ok_or_else(|| Error::TypeMismatch {
+                    expected: "STRING".to_string(),
+                    actual: args[2].data_type().to_string(),
+                })?;
+                match regex::Regex::new(pattern) {
+                    Ok(re) => Ok(Value::string(re.replace_all(text, replacement).to_string())),
+                    Err(_) => Ok(Value::null()),
+                }
+            }
+            "REGEXP_INSTR" => {
+                if args.len() < 2 {
+                    return Err(Error::InvalidQuery(
+                        "REGEXP_INSTR requires at least 2 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() || args[1].is_null() {
+                    return Ok(Value::null());
+                }
+                let text = args[0].as_str().unwrap_or_default();
+                let pattern = args[1].as_str().unwrap_or_default();
+                match regex::Regex::new(pattern) {
+                    Ok(re) => match re.find(text) {
+                        Some(m) => Ok(Value::int64((m.start() + 1) as i64)),
+                        None => Ok(Value::int64(0)),
+                    },
+                    Err(_) => Ok(Value::null()),
+                }
+            }
+            "SAFE_OFFSET" | "OFFSET" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "OFFSET requires 1 argument".to_string(),
+                    ));
+                }
+                Ok(args[0].clone())
+            }
+            "SAFE_ORDINAL" | "ORDINAL" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "ORDINAL requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(i) = args[0].as_i64() {
+                    return Ok(Value::int64(i - 1));
+                }
+                Ok(args[0].clone())
+            }
+            "GENERATE_UUID" => {
+                let uuid = uuid::Uuid::new_v4();
+                Ok(Value::string(uuid.to_string()))
+            }
+            "LPAD" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(Error::InvalidQuery(
+                        "LPAD requires 2 or 3 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().unwrap_or_default();
+                let len = args[1].as_i64().unwrap_or(0) as usize;
+                let pad = if args.len() == 3 {
+                    args[2].as_str().unwrap_or(" ")
+                } else {
+                    " "
+                };
+                if s.chars().count() >= len {
+                    return Ok(Value::string(s.chars().take(len).collect()));
+                }
+                let pad_len = len - s.chars().count();
+                let pad_chars: Vec<char> = pad.chars().cycle().take(pad_len).collect();
+                let result: String = pad_chars.into_iter().chain(s.chars()).collect();
+                Ok(Value::string(result))
+            }
+            "RPAD" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(Error::InvalidQuery(
+                        "RPAD requires 2 or 3 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let s = args[0].as_str().unwrap_or_default();
+                let len = args[1].as_i64().unwrap_or(0) as usize;
+                let pad = if args.len() == 3 {
+                    args[2].as_str().unwrap_or(" ")
+                } else {
+                    " "
+                };
+                if s.chars().count() >= len {
+                    return Ok(Value::string(s.chars().take(len).collect()));
+                }
+                let pad_len = len - s.chars().count();
+                let pad_chars: Vec<char> = pad.chars().cycle().take(pad_len).collect();
+                let result: String = s.chars().chain(pad_chars).collect();
+                Ok(Value::string(result))
+            }
+            "ARRAY_CONCAT" => {
+                if args.is_empty() {
+                    return Err(Error::InvalidQuery(
+                        "ARRAY_CONCAT requires at least 1 argument".to_string(),
+                    ));
+                }
+                let mut result = Vec::new();
+                for arg in args {
+                    if arg.is_null() {
+                        continue;
+                    }
+                    if let Some(arr) = arg.as_array() {
+                        result.extend(arr.iter().cloned());
+                    }
+                }
+                Ok(Value::array(result))
+            }
+            "ARRAY_REVERSE" => {
+                if args.len() != 1 {
+                    return Err(Error::InvalidQuery(
+                        "ARRAY_REVERSE requires 1 argument".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                if let Some(arr) = args[0].as_array() {
+                    let mut reversed = arr.to_vec();
+                    reversed.reverse();
+                    return Ok(Value::array(reversed));
+                }
+                Ok(Value::null())
+            }
+            "ARRAY_TO_STRING" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(Error::InvalidQuery(
+                        "ARRAY_TO_STRING requires 2 or 3 arguments".to_string(),
+                    ));
+                }
+                if args[0].is_null() {
+                    return Ok(Value::null());
+                }
+                let delimiter = args[1].as_str().unwrap_or(",");
+                let null_text = if args.len() == 3 {
+                    args[2].as_str().map(|s| s.to_string())
+                } else {
+                    None
+                };
+                if let Some(arr) = args[0].as_array() {
+                    let parts: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| {
+                            if v.is_null() {
+                                null_text.clone()
+                            } else {
+                                Some(v.to_string())
+                            }
+                        })
+                        .collect();
+                    return Ok(Value::string(parts.join(delimiter)));
+                }
+                Ok(Value::null())
+            }
+            "GENERATE_ARRAY" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(Error::InvalidQuery(
+                        "GENERATE_ARRAY requires 2 or 3 arguments".to_string(),
+                    ));
+                }
+                let start = args[0].as_i64().unwrap_or(0);
+                let end = args[1].as_i64().unwrap_or(0);
+                let step = if args.len() == 3 {
+                    args[2].as_i64().unwrap_or(1)
+                } else {
+                    1
+                };
+                if step == 0 {
+                    return Err(Error::InvalidQuery(
+                        "GENERATE_ARRAY step cannot be 0".to_string(),
+                    ));
+                }
+                let mut result = Vec::new();
+                let mut curr = start;
+                if step > 0 {
+                    while curr <= end {
+                        result.push(Value::int64(curr));
+                        curr += step;
+                    }
+                } else {
+                    while curr >= end {
+                        result.push(Value::int64(curr));
+                        curr += step;
+                    }
+                }
+                Ok(Value::array(result))
+            }
             _ => Err(Error::UnsupportedFeature(format!(
                 "Function not yet supported: {}",
                 name
@@ -868,11 +2212,74 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn extract_function_args(&self, func: &sqlparser::ast::Function, row: &Row) -> Result<Vec<Value>> {
+    fn value_to_json(&self, value: &Value) -> serde_json::Value {
+        if value.is_null() {
+            return serde_json::Value::Null;
+        }
+        if let Some(b) = value.as_bool() {
+            return serde_json::Value::Bool(b);
+        }
+        if let Some(i) = value.as_i64() {
+            return serde_json::Value::Number(serde_json::Number::from(i));
+        }
+        if let Some(f) = value.as_f64() {
+            if let Some(n) = serde_json::Number::from_f64(f) {
+                return serde_json::Value::Number(n);
+            }
+        }
+        if let Some(s) = value.as_str() {
+            return serde_json::Value::String(s.to_string());
+        }
+        if let Some(arr) = value.as_array() {
+            let json_arr: Vec<serde_json::Value> =
+                arr.iter().map(|v| self.value_to_json(v)).collect();
+            return serde_json::Value::Array(json_arr);
+        }
+        if let Some(fields) = value.as_struct() {
+            let mut map = serde_json::Map::new();
+            for (name, val) in fields {
+                map.insert(name.clone(), self.value_to_json(val));
+            }
+            return serde_json::Value::Object(map);
+        }
+        serde_json::Value::String(value.to_string())
+    }
+
+    fn json_path_extract(&self, json: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+        let path = path.trim_start_matches('$');
+        let mut current = json.clone();
+
+        for part in path.split('.').filter(|s| !s.is_empty()) {
+            let part = part.trim();
+            if let Some(idx_start) = part.find('[') {
+                let key = &part[..idx_start];
+                if !key.is_empty() {
+                    current = current.get(key)?.clone();
+                }
+                let idx_end = part.find(']')?;
+                let idx_str = &part[idx_start + 1..idx_end];
+                let idx: usize = idx_str.parse().ok()?;
+                current = current.get(idx)?.clone();
+            } else {
+                current = current.get(part)?.clone();
+            }
+        }
+
+        Some(current)
+    }
+
+    fn extract_function_args(
+        &self,
+        func: &sqlparser::ast::Function,
+        row: &Row,
+    ) -> Result<Vec<Value>> {
         let mut args = Vec::new();
         if let sqlparser::ast::FunctionArguments::List(arg_list) = &func.args {
             for arg in &arg_list.args {
-                if let sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) = arg {
+                if let sqlparser::ast::FunctionArg::Unnamed(
+                    sqlparser::ast::FunctionArgExpr::Expr(expr),
+                ) = arg
+                {
                     args.push(self.evaluate(expr, row)?);
                 }
             }
@@ -902,5 +2309,14 @@ impl<'a> Evaluator<'a> {
             expected: "BOOL".to_string(),
             actual: val.data_type().to_string(),
         })
+    }
+
+    pub fn evaluate_binary_op_values(
+        &self,
+        left: &Value,
+        op: &BinaryOperator,
+        right: &Value,
+    ) -> Result<Value> {
+        self.evaluate_binary_op(left, op, right)
     }
 }
