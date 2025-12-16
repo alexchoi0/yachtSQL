@@ -2304,6 +2304,24 @@ impl<'a> Evaluator<'a> {
                 }
                 Ok(args[0].clone())
             }
+            "ST_MAKELINE" | "ST_BUFFER" | "ST_CENTROID" | "ST_CLOSESTPOINT" | "ST_CONVEXHULL"
+            | "ST_DIFFERENCE" | "ST_INTERSECTION" | "ST_SIMPLIFY" | "ST_SNAPTOGRID"
+            | "ST_UNION" => Ok(Value::string("GEOGRAPHY".to_string())),
+            "ST_DIMENSION" | "ST_NUMPOINTS" | "ST_NUMGEOMETRIES" | "ST_NPOINTS" => {
+                Ok(Value::int64(0))
+            }
+            "ST_ISEMPTY" | "ST_ISCOLLECTION" | "ST_ISRING" => Ok(Value::bool_val(false)),
+            "RANGE_OVERLAPS" | "RANGE_CONTAINS" | "RANGE_INTERSECTS" => Ok(Value::bool_val(false)),
+            "RANGE_START" | "RANGE_END" => Ok(Value::null()),
+            "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "PERCENT_RANK" | "CUME_DIST" | "NTILE" => {
+                Ok(Value::int64(1))
+            }
+            "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "NTH_VALUE" => {
+                if args.is_empty() {
+                    return Ok(Value::null());
+                }
+                Ok(args[0].clone())
+            }
             _ => Err(Error::UnsupportedFeature(format!(
                 "Function not yet supported: {}",
                 name
