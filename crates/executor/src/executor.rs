@@ -2179,7 +2179,7 @@ impl QueryExecutor {
         let (input_schema, input_rows) = self.get_from_data(&select.from)?;
         let evaluator = Evaluator::with_user_functions(&input_schema, self.catalog.get_functions());
 
-        let filtered_rows: Vec<Record> = if let Some(selection) = &select.selection {
+        let mut filtered_rows: Vec<Record> = if let Some(selection) = &select.selection {
             let substituted_selection = self.substitute_variables(selection);
             let resolved_selection = self.resolve_scalar_subqueries(&substituted_selection)?;
             input_rows
@@ -2204,15 +2204,69 @@ impl QueryExecutor {
         }
 
         let has_window_funcs = self.has_window_functions(&select.projection);
-        if has_window_funcs {
-            let window_results =
-                self.compute_window_functions(&input_schema, &filtered_rows, &select.projection)?;
-            return self.project_rows_with_windows(
+        let has_qualify = select.qualify.is_some();
+        let qualify_has_window = select
+            .qualify
+            .as_ref()
+            .is_some_and(|q| self.expr_has_window_function(q));
+
+        if has_window_funcs || qualify_has_window {
+            let window_results = self.compute_window_functions_with_qualify(
                 &input_schema,
                 &filtered_rows,
                 &select.projection,
+                select.qualify.as_ref(),
+            )?;
+
+            let rows_after_qualify = if let Some(qualify_expr) = &select.qualify {
+                let qualifying_indices = self.apply_qualify_filter(
+                    &input_schema,
+                    &filtered_rows,
+                    qualify_expr,
+                    &window_results,
+                )?;
+
+                let filtered: Vec<Record> = qualifying_indices
+                    .iter()
+                    .map(|&i| filtered_rows[i].clone())
+                    .collect();
+
+                let new_window_results: HashMap<String, Vec<Value>> = window_results
+                    .iter()
+                    .map(|(k, v)| {
+                        let filtered_v: Vec<Value> =
+                            qualifying_indices.iter().map(|&i| v[i].clone()).collect();
+                        (k.clone(), filtered_v)
+                    })
+                    .collect();
+
+                return self.project_rows_with_windows(
+                    &input_schema,
+                    &filtered,
+                    &select.projection,
+                    &new_window_results,
+                );
+            } else {
+                filtered_rows.clone()
+            };
+
+            return self.project_rows_with_windows(
+                &input_schema,
+                &rows_after_qualify,
+                &select.projection,
                 &window_results,
             );
+        }
+
+        if has_qualify {
+            let evaluator =
+                Evaluator::with_user_functions(&input_schema, self.catalog.get_functions());
+            let qualify_expr = select.qualify.as_ref().unwrap();
+            filtered_rows.retain(|row| {
+                evaluator
+                    .evaluate_to_bool(qualify_expr, row)
+                    .unwrap_or(false)
+            });
         }
 
         let (output_schema, mut output_rows) =
@@ -2246,7 +2300,7 @@ impl QueryExecutor {
         let (input_schema, input_rows) = self.get_from_data_ctes(&select.from, cte_tables)?;
         let evaluator = Evaluator::with_user_functions(&input_schema, self.catalog.get_functions());
 
-        let filtered_rows: Vec<Record> = if let Some(selection) = &select.selection {
+        let mut filtered_rows: Vec<Record> = if let Some(selection) = &select.selection {
             let substituted_selection = self.substitute_variables(selection);
             let resolved_selection = self.resolve_scalar_subqueries(&substituted_selection)?;
             input_rows
@@ -2273,9 +2327,51 @@ impl QueryExecutor {
         }
 
         let has_window_funcs = self.has_window_functions(&select.projection);
-        if has_window_funcs {
-            let window_results =
-                self.compute_window_functions(&input_schema, &filtered_rows, &select.projection)?;
+        let has_qualify = select.qualify.is_some();
+        let qualify_has_window = select
+            .qualify
+            .as_ref()
+            .is_some_and(|q| self.expr_has_window_function(q));
+
+        if has_window_funcs || qualify_has_window {
+            let window_results = self.compute_window_functions_with_qualify(
+                &input_schema,
+                &filtered_rows,
+                &select.projection,
+                select.qualify.as_ref(),
+            )?;
+
+            if let Some(qualify_expr) = &select.qualify {
+                let qualifying_indices = self.apply_qualify_filter(
+                    &input_schema,
+                    &filtered_rows,
+                    qualify_expr,
+                    &window_results,
+                )?;
+
+                let filtered: Vec<Record> = qualifying_indices
+                    .iter()
+                    .map(|&i| filtered_rows[i].clone())
+                    .collect();
+
+                let new_window_results: HashMap<String, Vec<Value>> = window_results
+                    .iter()
+                    .map(|(k, v)| {
+                        let filtered_v: Vec<Value> =
+                            qualifying_indices.iter().map(|&i| v[i].clone()).collect();
+                        (k.clone(), filtered_v)
+                    })
+                    .collect();
+
+                let (schema, rows) = self.project_rows_with_windows(
+                    &input_schema,
+                    &filtered,
+                    &select.projection,
+                    &new_window_results,
+                )?;
+                return Ok((schema, rows, false));
+            }
+
             let (schema, rows) = self.project_rows_with_windows(
                 &input_schema,
                 &filtered_rows,
@@ -2283,6 +2379,17 @@ impl QueryExecutor {
                 &window_results,
             )?;
             return Ok((schema, rows, false));
+        }
+
+        if has_qualify {
+            let evaluator =
+                Evaluator::with_user_functions(&input_schema, self.catalog.get_functions());
+            let qualify_expr = select.qualify.as_ref().unwrap();
+            filtered_rows.retain(|row| {
+                evaluator
+                    .evaluate_to_bool(qualify_expr, row)
+                    .unwrap_or(false)
+            });
         }
 
         let needs_deferred_projection = order_by.as_ref().is_some_and(|ob| {
@@ -3349,7 +3456,163 @@ impl QueryExecutor {
             });
         }
 
+        if let Some(qualify_expr) = &select.qualify {
+            let substituted_qualify =
+                self.substitute_aggregates_in_qualify(qualify_expr, &select.projection);
+            let qualify_has_window = self.expr_has_window_function(&substituted_qualify);
+
+            if qualify_has_window {
+                let window_results = self.compute_window_functions_with_qualify(
+                    &schema,
+                    &result_rows,
+                    &[],
+                    Some(&substituted_qualify),
+                )?;
+
+                let qualifying_indices = self.apply_qualify_filter(
+                    &schema,
+                    &result_rows,
+                    &substituted_qualify,
+                    &window_results,
+                )?;
+
+                result_rows = qualifying_indices
+                    .iter()
+                    .map(|&i| result_rows[i].clone())
+                    .collect();
+            } else {
+                let evaluator =
+                    Evaluator::with_user_functions(&schema, self.catalog.get_functions());
+                result_rows.retain(|row| {
+                    evaluator
+                        .evaluate_to_bool(&substituted_qualify, row)
+                        .unwrap_or(false)
+                });
+            }
+        }
+
         Ok((schema, result_rows))
+    }
+
+    fn substitute_aggregates_in_qualify(
+        &self,
+        qualify_expr: &Expr,
+        projection: &[SelectItem],
+    ) -> Expr {
+        let mut agg_to_alias: HashMap<String, String> = HashMap::new();
+        for (idx, item) in projection.iter().enumerate() {
+            match item {
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    if self.expr_has_aggregate(expr) {
+                        let expr_key = format!("{}", expr);
+                        agg_to_alias.insert(expr_key, alias.value.clone());
+                    }
+                }
+                SelectItem::UnnamedExpr(expr) => {
+                    if self.expr_has_aggregate(expr) {
+                        let expr_key = format!("{}", expr);
+                        let alias = self.expr_to_alias(expr, idx);
+                        agg_to_alias.insert(expr_key, alias);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.substitute_aggregate_in_expr(qualify_expr, &agg_to_alias)
+    }
+
+    fn substitute_aggregate_in_expr(
+        &self,
+        expr: &Expr,
+        agg_to_alias: &HashMap<String, String>,
+    ) -> Expr {
+        let expr_key = format!("{}", expr);
+        if let Some(alias) = agg_to_alias.get(&expr_key) {
+            return Expr::Identifier(ast::Ident::new(alias.clone()));
+        }
+
+        match expr {
+            Expr::Function(func) if func.over.is_some() => {
+                let new_over = func.over.as_ref().map(|over| match over {
+                    ast::WindowType::WindowSpec(spec) => {
+                        let new_partition_by: Vec<Expr> = spec
+                            .partition_by
+                            .iter()
+                            .map(|e| self.substitute_aggregate_in_expr(e, agg_to_alias))
+                            .collect();
+                        let new_order_by: Vec<ast::OrderByExpr> = spec
+                            .order_by
+                            .iter()
+                            .map(|ob| ast::OrderByExpr {
+                                expr: self.substitute_aggregate_in_expr(&ob.expr, agg_to_alias),
+                                options: ob.options,
+                                with_fill: ob.with_fill.clone(),
+                            })
+                            .collect();
+                        ast::WindowType::WindowSpec(ast::WindowSpec {
+                            partition_by: new_partition_by,
+                            order_by: new_order_by,
+                            window_frame: spec.window_frame.clone(),
+                            window_name: spec.window_name.clone(),
+                        })
+                    }
+                    ast::WindowType::NamedWindow(name) => {
+                        ast::WindowType::NamedWindow(name.clone())
+                    }
+                });
+
+                let new_args = match &func.args {
+                    ast::FunctionArguments::List(list) => {
+                        let new_list = ast::FunctionArgumentList {
+                            duplicate_treatment: list.duplicate_treatment,
+                            args: list
+                                .args
+                                .iter()
+                                .map(|arg| match arg {
+                                    ast::FunctionArg::Unnamed(unnamed_arg) => match unnamed_arg {
+                                        ast::FunctionArgExpr::Expr(e) => {
+                                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
+                                                self.substitute_aggregate_in_expr(e, agg_to_alias),
+                                            ))
+                                        }
+                                        _ => arg.clone(),
+                                    },
+                                    _ => arg.clone(),
+                                })
+                                .collect(),
+                            clauses: list.clauses.clone(),
+                        };
+                        ast::FunctionArguments::List(new_list)
+                    }
+                    other => other.clone(),
+                };
+
+                Expr::Function(ast::Function {
+                    name: func.name.clone(),
+                    uses_odbc_syntax: func.uses_odbc_syntax,
+                    parameters: func.parameters.clone(),
+                    args: new_args,
+                    filter: func.filter.clone(),
+                    null_treatment: func.null_treatment,
+                    over: new_over,
+                    within_group: func.within_group.clone(),
+                })
+            }
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(self.substitute_aggregate_in_expr(left, agg_to_alias)),
+                op: op.clone(),
+                right: Box::new(self.substitute_aggregate_in_expr(right, agg_to_alias)),
+            },
+            Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(self.substitute_aggregate_in_expr(inner, agg_to_alias)),
+            },
+            Expr::Nested(inner) => Expr::Nested(Box::new(
+                self.substitute_aggregate_in_expr(inner, agg_to_alias),
+            )),
+            _ => expr.clone(),
+        }
     }
 
     fn extract_group_by_exprs(&self, group_by: &ast::GroupByExpr) -> Vec<Expr> {
@@ -7056,6 +7319,16 @@ impl QueryExecutor {
         rows: &[Record],
         projection: &[SelectItem],
     ) -> Result<HashMap<String, Vec<Value>>> {
+        self.compute_window_functions_with_qualify(schema, rows, projection, None)
+    }
+
+    fn compute_window_functions_with_qualify(
+        &self,
+        schema: &Schema,
+        rows: &[Record],
+        projection: &[SelectItem],
+        qualify: Option<&Expr>,
+    ) -> Result<HashMap<String, Vec<Value>>> {
         let mut window_results: HashMap<String, Vec<Value>> = HashMap::new();
         let evaluator = Evaluator::with_user_functions(schema, self.catalog.get_functions());
 
@@ -7068,6 +7341,16 @@ impl QueryExecutor {
 
             self.collect_window_function_results(
                 expr,
+                schema,
+                rows,
+                &evaluator,
+                &mut window_results,
+            )?;
+        }
+
+        if let Some(qualify_expr) = qualify {
+            self.collect_window_function_results(
+                qualify_expr,
                 schema,
                 rows,
                 &evaluator,
@@ -8020,6 +8303,32 @@ impl QueryExecutor {
         }
 
         Ok((output_schema, output_rows))
+    }
+
+    fn apply_qualify_filter(
+        &self,
+        schema: &Schema,
+        rows: &[Record],
+        qualify_expr: &Expr,
+        window_results: &HashMap<String, Vec<Value>>,
+    ) -> Result<Vec<usize>> {
+        let mut qualifying_indices = Vec::new();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            let val = self.evaluate_expr_with_window_results(
+                qualify_expr,
+                schema,
+                row,
+                row_idx,
+                window_results,
+            )?;
+
+            if val.as_bool().unwrap_or_default() {
+                qualifying_indices.push(row_idx);
+            }
+        }
+
+        Ok(qualifying_indices)
     }
 
     fn evaluate_expr_with_window_results(
