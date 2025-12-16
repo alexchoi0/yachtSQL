@@ -342,8 +342,9 @@ impl QueryExecutor {
                 object_type,
                 names,
                 if_exists,
+                cascade,
                 ..
-            } => self.execute_drop(object_type, names, *if_exists),
+            } => self.execute_drop(object_type, names, *if_exists, *cascade),
             Statement::Insert(insert) => self.execute_insert(insert),
             Statement::Update {
                 table,
@@ -376,6 +377,15 @@ impl QueryExecutor {
             } => self.execute_drop_procedure(proc_desc, *if_exists),
             Statement::Call(func) => self.execute_call(func),
             Statement::ExportData(export_data) => self.execute_export_data(export_data),
+            Statement::CreateSchema {
+                schema_name,
+                if_not_exists,
+                options,
+                ..
+            } => self.execute_create_schema(schema_name, *if_not_exists, options),
+            Statement::AlterSchema(alter_schema) => self.execute_alter_schema(alter_schema),
+            Statement::Set(set) => self.execute_set(set),
+            Statement::Merge { .. } => self.execute_merge(stmt),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Statement type not yet supported: {:?}",
                 stmt
@@ -3256,6 +3266,7 @@ impl QueryExecutor {
         object_type: &ast::ObjectType,
         names: &[ObjectName],
         if_exists: bool,
+        cascade: bool,
     ) -> Result<Table> {
         match object_type {
             ast::ObjectType::Table => {
@@ -3265,6 +3276,13 @@ impl QueryExecutor {
                         continue;
                     }
                     self.catalog.drop_table(&table_name)?;
+                }
+                Ok(Table::empty(Schema::new()))
+            }
+            ast::ObjectType::Schema => {
+                for name in names {
+                    let schema_name = name.to_string();
+                    self.catalog.drop_schema(&schema_name, if_exists, cascade)?;
                 }
                 Ok(Table::empty(Schema::new()))
             }
@@ -6210,6 +6228,504 @@ impl QueryExecutor {
         };
 
         Ok(value)
+    }
+
+    fn execute_create_schema(
+        &mut self,
+        schema_name: &ast::SchemaName,
+        if_not_exists: bool,
+        options: &Option<Vec<ast::SqlOption>>,
+    ) -> Result<Table> {
+        let name = match schema_name {
+            ast::SchemaName::Simple(name) => name.to_string(),
+            ast::SchemaName::UnnamedAuthorization(ident) => ident.value.clone(),
+            ast::SchemaName::NamedAuthorization(name, _) => name.to_string(),
+        };
+
+        match options {
+            Some(opts) if !opts.is_empty() => {
+                let option_map = self.extract_schema_options(opts);
+                self.catalog
+                    .create_schema_with_options(&name, if_not_exists, option_map)?;
+            }
+            _ => {
+                self.catalog.create_schema(&name, if_not_exists)?;
+            }
+        }
+
+        Ok(Table::empty(Schema::new()))
+    }
+
+    fn extract_schema_options(
+        &self,
+        opts: &[ast::SqlOption],
+    ) -> std::collections::HashMap<String, String> {
+        let mut option_map = std::collections::HashMap::new();
+        for opt in opts {
+            if let ast::SqlOption::KeyValue { key, value } = opt {
+                let key_str = key.value.clone();
+                let value_str = match value {
+                    Expr::Value(v) => match &v.value {
+                        SqlValue::SingleQuotedString(s) => s.clone(),
+                        SqlValue::DoubleQuotedString(s) => s.clone(),
+                        SqlValue::Number(n, _) => n.clone(),
+                        _ => format!("{}", value),
+                    },
+                    _ => format!("{}", value),
+                };
+                option_map.insert(key_str, value_str);
+            }
+        }
+        option_map
+    }
+
+    fn execute_alter_schema(&mut self, alter_schema: &ast::AlterSchema) -> Result<Table> {
+        let schema_name = alter_schema.name.to_string();
+
+        for operation in &alter_schema.operations {
+            match operation {
+                ast::AlterSchemaOperation::SetOptionsParens { options } => {
+                    let option_map = self.extract_schema_options(options);
+                    self.catalog
+                        .alter_schema_options(&schema_name, option_map)?;
+                }
+                _ => {
+                    return Err(Error::UnsupportedFeature(format!(
+                        "ALTER SCHEMA operation not supported: {:?}",
+                        operation
+                    )));
+                }
+            }
+        }
+
+        Ok(Table::empty(Schema::new()))
+    }
+
+    fn execute_set(&mut self, set: &ast::Set) -> Result<Table> {
+        match set {
+            ast::Set::SingleAssignment {
+                variable, values, ..
+            } => {
+                let var_name = variable.to_string().to_uppercase();
+                if var_name == "SEARCH_PATH" {
+                    let schemas: Vec<String> = values
+                        .iter()
+                        .filter_map(|v| match v {
+                            Expr::Identifier(ident) => Some(ident.value.clone()),
+                            Expr::Value(val) => match &val.value {
+                                SqlValue::SingleQuotedString(s) => Some(s.clone()),
+                                SqlValue::DoubleQuotedString(s) => Some(s.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .collect();
+                    self.catalog.set_search_path(schemas);
+                    Ok(Table::empty(Schema::new()))
+                } else {
+                    Err(Error::UnsupportedFeature(format!(
+                        "SET {} not supported",
+                        var_name
+                    )))
+                }
+            }
+            _ => Err(Error::UnsupportedFeature(format!(
+                "SET variant not supported: {:?}",
+                set
+            ))),
+        }
+    }
+
+    fn execute_merge(&mut self, stmt: &Statement) -> Result<Table> {
+        let Statement::Merge {
+            into: _,
+            table,
+            source,
+            on,
+            clauses,
+            output: _,
+        } = stmt
+        else {
+            panic!("execute_merge called with non-MERGE statement");
+        };
+
+        let target_name = match table {
+            TableFactor::Table { name, .. } => name.to_string(),
+            _ => {
+                return Err(Error::UnsupportedFeature(
+                    "MERGE target must be a table".to_string(),
+                ));
+            }
+        };
+        let target_alias = match table {
+            TableFactor::Table { alias, .. } => alias.as_ref().map(|a| a.name.value.clone()),
+            _ => None,
+        };
+
+        let (source_schema, source_rows, source_alias) = self.get_merge_source_data(source)?;
+
+        let target_table = self
+            .catalog
+            .get_table(&target_name)
+            .ok_or_else(|| Error::TableNotFound(target_name.clone()))?;
+        let target_schema = target_table.schema().clone();
+        let target_row_count = target_table.row_count();
+        let target_rows: Vec<Record> = (0..target_row_count)
+            .map(|i| target_table.get_row(i))
+            .collect::<Result<Vec<_>>>()?;
+
+        let combined_schema = self.create_merge_combined_schema(
+            &target_schema,
+            &source_schema,
+            target_alias.as_deref(),
+            source_alias.as_deref(),
+        );
+
+        let mut matched_target_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        let mut matched_source_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        let mut match_pairs: Vec<(usize, usize)> = Vec::new();
+
+        let evaluator = Evaluator::new(&combined_schema);
+
+        for (t_idx, target_row) in target_rows.iter().enumerate() {
+            for (s_idx, source_row) in source_rows.iter().enumerate() {
+                let combined_record = self.create_combined_record(target_row, source_row);
+                if evaluator
+                    .evaluate_to_bool(on, &combined_record)
+                    .unwrap_or(false)
+                {
+                    match_pairs.push((t_idx, s_idx));
+                    matched_target_indices.insert(t_idx);
+                    matched_source_indices.insert(s_idx);
+                }
+            }
+        }
+
+        let mut updates: Vec<(usize, Vec<Value>)> = Vec::new();
+        let mut deletes: Vec<usize> = Vec::new();
+        let mut inserts: Vec<Vec<Value>> = Vec::new();
+
+        for clause in clauses {
+            let ast::MergeClause {
+                clause_kind,
+                predicate,
+                action,
+            } = clause;
+
+            match clause_kind {
+                ast::MergeClauseKind::Matched => match action {
+                    ast::MergeAction::Update { assignments } => {
+                        for &(t_idx, s_idx) in &match_pairs {
+                            let target_row = &target_rows[t_idx];
+                            let source_row = &source_rows[s_idx];
+                            let combined_record =
+                                self.create_combined_record(target_row, source_row);
+
+                            let should_apply = match predicate {
+                                Some(pred) => evaluator.evaluate_to_bool(pred, &combined_record)?,
+                                None => true,
+                            };
+
+                            if should_apply && !deletes.contains(&t_idx) {
+                                let mut new_values = target_row.values().to_vec();
+                                for assignment in assignments {
+                                    let col_name = match &assignment.target {
+                                        ast::AssignmentTarget::ColumnName(name) => name.to_string(),
+                                        _ => continue,
+                                    };
+                                    let col_idx = target_schema
+                                        .fields()
+                                        .iter()
+                                        .position(|f| f.name.eq_ignore_ascii_case(&col_name))
+                                        .ok_or_else(|| Error::ColumnNotFound(col_name.clone()))?;
+                                    let new_val =
+                                        evaluator.evaluate(&assignment.value, &combined_record)?;
+                                    new_values[col_idx] = new_val;
+                                }
+                                if let Some(pos) = updates.iter().position(|(idx, _)| *idx == t_idx)
+                                {
+                                    updates[pos] = (t_idx, new_values);
+                                } else {
+                                    updates.push((t_idx, new_values));
+                                }
+                            }
+                        }
+                    }
+                    ast::MergeAction::Delete => {
+                        for &(t_idx, s_idx) in &match_pairs {
+                            let target_row = &target_rows[t_idx];
+                            let source_row = &source_rows[s_idx];
+                            let combined_record =
+                                self.create_combined_record(target_row, source_row);
+
+                            let should_apply = match predicate {
+                                Some(pred) => evaluator.evaluate_to_bool(pred, &combined_record)?,
+                                None => true,
+                            };
+
+                            if should_apply && !deletes.contains(&t_idx) {
+                                deletes.push(t_idx);
+                                updates.retain(|(idx, _)| *idx != t_idx);
+                            }
+                        }
+                    }
+                    ast::MergeAction::Insert(_) => {
+                        return Err(Error::InvalidQuery(
+                            "INSERT action not valid for WHEN MATCHED".to_string(),
+                        ));
+                    }
+                },
+                ast::MergeClauseKind::NotMatched | ast::MergeClauseKind::NotMatchedByTarget => {
+                    match action {
+                        ast::MergeAction::Insert(insert_expr) => {
+                            for (s_idx, source_row) in source_rows.iter().enumerate() {
+                                if matched_source_indices.contains(&s_idx) {
+                                    continue;
+                                }
+
+                                let source_evaluator = Evaluator::new(&source_schema);
+
+                                let should_apply = match predicate {
+                                    Some(pred) => {
+                                        source_evaluator.evaluate_to_bool(pred, source_row)?
+                                    }
+                                    None => true,
+                                };
+
+                                if should_apply {
+                                    let insert_values = match &insert_expr.kind {
+                                        ast::MergeInsertKind::Values(val) => {
+                                            let val_exprs = &val.rows;
+                                            let mut row_values =
+                                                vec![Value::null(); target_schema.field_count()];
+                                            let col_indices: Vec<usize> =
+                                                if insert_expr.columns.is_empty() {
+                                                    (0..target_schema.field_count()).collect()
+                                                } else {
+                                                    insert_expr
+                                                        .columns
+                                                        .iter()
+                                                        .map(|c| {
+                                                            target_schema
+                                                                .fields()
+                                                                .iter()
+                                                                .position(|f| {
+                                                                    f.name.eq_ignore_ascii_case(
+                                                                        &c.value,
+                                                                    )
+                                                                })
+                                                                .ok_or_else(|| {
+                                                                    Error::ColumnNotFound(
+                                                                        c.value.clone(),
+                                                                    )
+                                                                })
+                                                        })
+                                                        .collect::<Result<Vec<_>>>()?
+                                                };
+
+                                            if let Some(first_row) = val_exprs.first() {
+                                                for (expr_idx, col_idx) in
+                                                    col_indices.iter().enumerate()
+                                                {
+                                                    if expr_idx < first_row.len() {
+                                                        let val = source_evaluator.evaluate(
+                                                            &first_row[expr_idx],
+                                                            source_row,
+                                                        )?;
+                                                        row_values[*col_idx] = val;
+                                                    }
+                                                }
+                                            }
+                                            row_values
+                                        }
+                                        ast::MergeInsertKind::Row => {
+                                            let source_values = source_row.values();
+                                            let mut row_values =
+                                                vec![Value::null(); target_schema.field_count()];
+                                            for (s_idx, s_field) in
+                                                source_schema.fields().iter().enumerate()
+                                            {
+                                                if let Some(t_idx) =
+                                                    target_schema.fields().iter().position(|f| {
+                                                        f.name.eq_ignore_ascii_case(&s_field.name)
+                                                    })
+                                                {
+                                                    row_values[t_idx] =
+                                                        source_values[s_idx].clone();
+                                                }
+                                            }
+                                            row_values
+                                        }
+                                    };
+                                    inserts.push(insert_values);
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(Error::InvalidQuery(
+                                "Only INSERT action valid for WHEN NOT MATCHED".to_string(),
+                            ));
+                        }
+                    }
+                }
+                ast::MergeClauseKind::NotMatchedBySource => match action {
+                    ast::MergeAction::Delete => {
+                        for (t_idx, target_row) in target_rows.iter().enumerate() {
+                            if matched_target_indices.contains(&t_idx) {
+                                continue;
+                            }
+
+                            let target_evaluator = Evaluator::new(&target_schema);
+
+                            let should_apply = match predicate {
+                                Some(pred) => {
+                                    target_evaluator.evaluate_to_bool(pred, target_row)?
+                                }
+                                None => true,
+                            };
+
+                            if should_apply && !deletes.contains(&t_idx) {
+                                deletes.push(t_idx);
+                                updates.retain(|(idx, _)| *idx != t_idx);
+                            }
+                        }
+                    }
+                    ast::MergeAction::Update { assignments } => {
+                        for (t_idx, target_row) in target_rows.iter().enumerate() {
+                            if matched_target_indices.contains(&t_idx) {
+                                continue;
+                            }
+
+                            let target_evaluator = Evaluator::new(&target_schema);
+
+                            let should_apply = match predicate {
+                                Some(pred) => {
+                                    target_evaluator.evaluate_to_bool(pred, target_row)?
+                                }
+                                None => true,
+                            };
+
+                            if should_apply {
+                                let mut new_values = target_row.values().to_vec();
+                                for assignment in assignments {
+                                    let col_name = match &assignment.target {
+                                        ast::AssignmentTarget::ColumnName(name) => name.to_string(),
+                                        _ => continue,
+                                    };
+                                    let col_idx = target_schema
+                                        .fields()
+                                        .iter()
+                                        .position(|f| f.name.eq_ignore_ascii_case(&col_name))
+                                        .ok_or_else(|| Error::ColumnNotFound(col_name.clone()))?;
+                                    let new_val =
+                                        target_evaluator.evaluate(&assignment.value, target_row)?;
+                                    new_values[col_idx] = new_val;
+                                }
+                                if let Some(pos) = updates.iter().position(|(idx, _)| *idx == t_idx)
+                                {
+                                    updates[pos] = (t_idx, new_values);
+                                } else {
+                                    updates.push((t_idx, new_values));
+                                }
+                            }
+                        }
+                    }
+                    ast::MergeAction::Insert(_) => {
+                        return Err(Error::InvalidQuery(
+                            "INSERT action not valid for WHEN NOT MATCHED BY SOURCE".to_string(),
+                        ));
+                    }
+                },
+            }
+        }
+
+        let target_table = self.catalog.get_table_mut(&target_name).unwrap();
+        for (idx, values) in updates {
+            target_table.update_row(idx, values)?;
+        }
+
+        deletes.sort_unstable();
+        deletes.reverse();
+        for idx in deletes {
+            target_table.remove_row(idx);
+        }
+
+        for values in inserts {
+            target_table.push_row(values)?;
+        }
+
+        Ok(Table::empty(Schema::new()))
+    }
+
+    fn get_merge_source_data(
+        &self,
+        source: &ast::TableFactor,
+    ) -> Result<(Schema, Vec<Record>, Option<String>)> {
+        match source {
+            TableFactor::Table { name, alias, .. } => {
+                let table_name = name.to_string();
+                let table = self
+                    .catalog
+                    .get_table(&table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+                let schema = table.schema().clone();
+                let rows: Vec<Record> = (0..table.row_count())
+                    .map(|i| table.get_row(i))
+                    .collect::<Result<Vec<_>>>()?;
+                let alias_name = alias.as_ref().map(|a| a.name.value.clone());
+                Ok((schema, rows, alias_name))
+            }
+            TableFactor::Derived {
+                subquery, alias, ..
+            } => {
+                let result = self.execute_query(subquery)?;
+                let schema = result.schema().clone();
+                let rows: Vec<Record> = (0..result.row_count())
+                    .map(|i| result.get_row(i))
+                    .collect::<Result<Vec<_>>>()?;
+                let alias_name = alias.as_ref().map(|a| a.name.value.clone());
+                Ok((schema, rows, alias_name))
+            }
+            _ => Err(Error::UnsupportedFeature(
+                "Unsupported MERGE source type".to_string(),
+            )),
+        }
+    }
+
+    fn create_merge_combined_schema(
+        &self,
+        target_schema: &Schema,
+        source_schema: &Schema,
+        target_alias: Option<&str>,
+        source_alias: Option<&str>,
+    ) -> Schema {
+        let mut fields = Vec::new();
+
+        for field in target_schema.fields() {
+            let name = match target_alias {
+                Some(alias) => format!("{}.{}", alias, field.name),
+                None => field.name.clone(),
+            };
+            fields.push(Field::nullable(name, field.data_type.clone()));
+        }
+
+        for field in source_schema.fields() {
+            let name = match source_alias {
+                Some(alias) => format!("{}.{}", alias, field.name),
+                None => field.name.clone(),
+            };
+            fields.push(Field::nullable(name, field.data_type.clone()));
+        }
+
+        Schema::from_fields(fields)
+    }
+
+    fn create_combined_record(&self, target_row: &Record, source_row: &Record) -> Record {
+        let mut values = target_row.values().to_vec();
+        values.extend(source_row.values().iter().cloned());
+        Record::from_values(values)
     }
 }
 

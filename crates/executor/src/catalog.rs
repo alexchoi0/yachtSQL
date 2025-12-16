@@ -1,6 +1,6 @@
 //! In-memory catalog for storing table metadata and data.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::{ConditionalStatements, Expr, OperateFunctionArg, ProcedureParam};
 use yachtsql_common::error::{Error, Result};
@@ -29,12 +29,20 @@ pub struct ViewDef {
     pub column_aliases: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SchemaMetadata {
+    pub options: HashMap<String, String>,
+}
+
 #[derive(Debug, Default)]
 pub struct Catalog {
     tables: HashMap<String, Table>,
     functions: HashMap<String, UserFunction>,
     procedures: HashMap<String, UserProcedure>,
     views: HashMap<String, ViewDef>,
+    schemas: HashSet<String>,
+    schema_metadata: HashMap<String, SchemaMetadata>,
+    search_path: Vec<String>,
 }
 
 impl Catalog {
@@ -44,11 +52,136 @@ impl Catalog {
             functions: HashMap::new(),
             procedures: HashMap::new(),
             views: HashMap::new(),
+            schemas: HashSet::new(),
+            schema_metadata: HashMap::new(),
+            search_path: Vec::new(),
         }
+    }
+
+    pub fn create_schema(&mut self, name: &str, if_not_exists: bool) -> Result<()> {
+        let key = name.to_uppercase();
+        if self.schemas.contains(&key) {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(Error::invalid_query(format!(
+                "Schema already exists: {}",
+                name
+            )));
+        }
+        self.schemas.insert(key.clone());
+        self.schema_metadata.insert(key, SchemaMetadata::default());
+        Ok(())
+    }
+
+    pub fn create_schema_with_options(
+        &mut self,
+        name: &str,
+        if_not_exists: bool,
+        options: HashMap<String, String>,
+    ) -> Result<()> {
+        let key = name.to_uppercase();
+        if self.schemas.contains(&key) {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(Error::invalid_query(format!(
+                "Schema already exists: {}",
+                name
+            )));
+        }
+        self.schemas.insert(key.clone());
+        self.schema_metadata.insert(key, SchemaMetadata { options });
+        Ok(())
+    }
+
+    pub fn drop_schema(&mut self, name: &str, if_exists: bool, cascade: bool) -> Result<()> {
+        let key = name.to_uppercase();
+        if !self.schemas.contains(&key) {
+            if if_exists {
+                return Ok(());
+            }
+            return Err(Error::invalid_query(format!("Schema not found: {}", name)));
+        }
+
+        let prefix = format!("{}.", key);
+        let tables_in_schema: Vec<String> = self
+            .tables
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        if !tables_in_schema.is_empty() && !cascade {
+            return Err(Error::invalid_query(format!(
+                "Cannot drop schema '{}' because it contains objects. Use CASCADE to drop all objects.",
+                name
+            )));
+        }
+
+        for table_key in tables_in_schema {
+            self.tables.remove(&table_key);
+        }
+
+        self.schemas.remove(&key);
+        self.schema_metadata.remove(&key);
+        Ok(())
+    }
+
+    pub fn schema_exists(&self, name: &str) -> bool {
+        self.schemas.contains(&name.to_uppercase())
+    }
+
+    pub fn alter_schema_options(
+        &mut self,
+        name: &str,
+        options: HashMap<String, String>,
+    ) -> Result<()> {
+        let key = name.to_uppercase();
+        if !self.schemas.contains(&key) {
+            return Err(Error::invalid_query(format!("Schema not found: {}", name)));
+        }
+        if let Some(metadata) = self.schema_metadata.get_mut(&key) {
+            for (k, v) in options {
+                metadata.options.insert(k, v);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_search_path(&mut self, schemas: Vec<String>) {
+        self.search_path = schemas.into_iter().map(|s| s.to_uppercase()).collect();
+    }
+
+    pub fn get_search_path(&self) -> &[String] {
+        &self.search_path
+    }
+
+    fn resolve_table_name(&self, name: &str) -> String {
+        let key = name.to_uppercase();
+        if key.contains('.') || self.tables.contains_key(&key) {
+            return key;
+        }
+        for schema in &self.search_path {
+            let qualified = format!("{}.{}", schema, key);
+            if self.tables.contains_key(&qualified) {
+                return qualified;
+            }
+        }
+        key
     }
 
     pub fn create_table(&mut self, name: &str, schema: Schema) -> Result<()> {
         let key = name.to_uppercase();
+        if let Some(dot_pos) = key.find('.') {
+            let schema_name = &key[..dot_pos];
+            if !self.schemas.contains(schema_name) && !schema_name.is_empty() {
+                return Err(Error::invalid_query(format!(
+                    "Schema not found: {}",
+                    &name[..dot_pos]
+                )));
+            }
+        }
         if self.tables.contains_key(&key) {
             return Err(Error::invalid_query(format!(
                 "Table already exists: {}",
@@ -60,7 +193,7 @@ impl Catalog {
     }
 
     pub fn drop_table(&mut self, name: &str) -> Result<()> {
-        let key = name.to_uppercase();
+        let key = self.resolve_table_name(name);
         if self.tables.remove(&key).is_none() {
             return Err(Error::TableNotFound(name.to_string()));
         }
@@ -68,19 +201,22 @@ impl Catalog {
     }
 
     pub fn get_table(&self, name: &str) -> Option<&Table> {
-        self.tables.get(&name.to_uppercase())
+        let key = self.resolve_table_name(name);
+        self.tables.get(&key)
     }
 
     pub fn get_table_mut(&mut self, name: &str) -> Option<&mut Table> {
-        self.tables.get_mut(&name.to_uppercase())
+        let key = self.resolve_table_name(name);
+        self.tables.get_mut(&key)
     }
 
     pub fn table_exists(&self, name: &str) -> bool {
-        self.tables.contains_key(&name.to_uppercase())
+        let key = self.resolve_table_name(name);
+        self.tables.contains_key(&key)
     }
 
     pub fn rename_table(&mut self, old_name: &str, new_name: &str) -> Result<()> {
-        let old_key = old_name.to_uppercase();
+        let old_key = self.resolve_table_name(old_name);
         let new_key = new_name.to_uppercase();
 
         if !self.tables.contains_key(&old_key) {
