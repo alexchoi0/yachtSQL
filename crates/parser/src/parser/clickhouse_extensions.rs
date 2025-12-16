@@ -701,6 +701,110 @@ impl ClickHouseStatementParser for CreateTableWithSettingsParser {
 static CREATE_TABLE_WITH_SETTINGS_PARSER: CreateTableWithSettingsParser =
     CreateTableWithSettingsParser;
 
+fn find_sample_by_clause(sql: &str) -> Option<usize> {
+    let upper = sql.to_uppercase();
+    let mut pos = 0;
+    while let Some(idx) = upper[pos..].find("SAMPLE") {
+        let abs_idx = pos + idx;
+        let before_ok = abs_idx == 0
+            || (!sql.as_bytes()[abs_idx - 1].is_ascii_alphanumeric()
+                && sql.as_bytes()[abs_idx - 1] != b'_');
+        let after_idx = abs_idx + "SAMPLE".len();
+        let after_ok = after_idx >= sql.len()
+            || (!sql.as_bytes()[after_idx].is_ascii_alphanumeric()
+                && sql.as_bytes()[after_idx] != b'_');
+        if before_ok && after_ok {
+            let after_sample = upper[after_idx..].trim_start();
+            if after_sample.starts_with("BY") {
+                return Some(abs_idx);
+            }
+        }
+        pos = abs_idx + 1;
+    }
+    None
+}
+
+fn strip_sample_by(sql: &str) -> String {
+    if let Some(sample_pos) = find_sample_by_clause(sql) {
+        let rest = &sql[sample_pos + "SAMPLE".len()..];
+        let rest_trimmed = rest.trim_start();
+        if let Some(after_by) = rest_trimmed
+            .strip_prefix("BY")
+            .or_else(|| rest_trimmed.strip_prefix("by"))
+        {
+            let after_by = after_by.trim_start();
+            let mut depth = 0;
+            let mut end_pos = 0;
+            let mut in_ident = false;
+            for (i, c) in after_by.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        if depth == 0 {
+                            end_pos = i;
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    ' ' | '\t' | '\n' | '\r' if depth == 0 && in_ident => {
+                        end_pos = i;
+                        break;
+                    }
+                    _ if c.is_ascii_alphanumeric() || c == '_' || c == '.' => {
+                        in_ident = true;
+                    }
+                    _ if depth == 0 && in_ident => {
+                        end_pos = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if end_pos == 0 {
+                end_pos = after_by.len();
+            }
+            let actual_end = sample_pos
+                + "SAMPLE".len()
+                + (rest.len() - rest_trimmed.len())
+                + 2
+                + (rest_trimmed.len() - 2 - after_by.len() + after_by.len()
+                    - after_by.trim_start().len())
+                + end_pos;
+            return format!(
+                "{} {}",
+                sql[..sample_pos].trim_end(),
+                sql[actual_end..].trim_start()
+            );
+        }
+    }
+    sql.to_string()
+}
+
+struct CreateTableWithSampleByParser;
+
+impl ClickHouseStatementParser for CreateTableWithSampleByParser {
+    fn pattern(&self) -> KeywordPattern {
+        KeywordPattern::StartsWithAndContains {
+            prefix: &["CREATE", "TABLE"],
+            contains: "SAMPLE",
+        }
+    }
+
+    fn parse(&self, _tokens: &[&Token], sql: &str) -> Result<Option<CustomStatement>> {
+        if find_sample_by_clause(sql).is_none() {
+            return Ok(None);
+        }
+        let stripped = strip_sample_by(sql);
+        Ok(Some(CustomStatement::ClickHouseCreateTablePassthrough {
+            original: sql.to_string(),
+            stripped,
+        }))
+    }
+}
+
+static CREATE_TABLE_WITH_SAMPLE_BY_PARSER: CreateTableWithSampleByParser =
+    CreateTableWithSampleByParser;
+
 #[allow(dead_code)]
 fn find_engine_clause(sql: &str) -> Option<usize> {
     let upper = sql.to_uppercase();
@@ -1045,6 +1149,7 @@ static PARSERS: &[&dyn ClickHouseStatementParser] = &[
     &CREATE_TABLE_WITH_COMPLEX_ENGINE_PARSER,
     &CREATE_TABLE_WITH_PARTITION_PARSER,
     &CREATE_TABLE_WITH_SETTINGS_PARSER,
+    &CREATE_TABLE_WITH_SAMPLE_BY_PARSER,
     &CREATE_TABLE_WITH_PROJECTION_PARSER,
     &CREATE_TABLE_WITH_INLINE_INDEX_PARSER,
     &ALTER_TABLE_MODIFY_PARSER,

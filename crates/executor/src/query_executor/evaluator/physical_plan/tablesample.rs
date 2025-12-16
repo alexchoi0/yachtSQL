@@ -3,7 +3,8 @@ use std::rc::Rc;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use yachtsql_core::error::{Error, Result};
-use yachtsql_storage::Schema;
+use yachtsql_core::types::DataType;
+use yachtsql_storage::{Field, Schema};
 
 use super::ExecutionPlan;
 use crate::Table;
@@ -60,7 +61,12 @@ impl TableSampleExec {
             }
         }
 
-        let schema = input.schema().clone();
+        let mut fields = input.schema().fields().to_vec();
+        fields.push(Field::nullable(
+            "_sample_factor".to_string(),
+            DataType::Float64,
+        ));
+        let schema = Schema::from_fields(fields);
 
         Ok(Self {
             input,
@@ -116,7 +122,14 @@ impl TableSampleExec {
         probability: f64,
         rng: &mut StdRng,
     ) -> Result<Vec<Table>> {
+        use yachtsql_core::types::Value;
         use yachtsql_storage::Column;
+
+        let sample_factor = if probability > 0.0 {
+            1.0 / probability
+        } else {
+            f64::INFINITY
+        };
 
         let mut result_batches = Vec::new();
 
@@ -138,13 +151,19 @@ impl TableSampleExec {
                 continue;
             }
 
-            let sampled_columns: Vec<Column> = batch
+            let mut sampled_columns: Vec<Column> = batch
                 .expect_columns()
                 .iter()
                 .map(|col| col.gather(&selected_indices))
                 .collect::<Result<Vec<_>>>()?;
 
-            result_batches.push(Table::new(batch.schema().clone(), sampled_columns)?);
+            let mut sample_factor_col = Column::new(&DataType::Float64, selected_indices.len());
+            for _ in 0..selected_indices.len() {
+                sample_factor_col.push(Value::float64(sample_factor))?;
+            }
+            sampled_columns.push(sample_factor_col);
+
+            result_batches.push(Table::new(self.schema.clone(), sampled_columns)?);
         }
 
         if result_batches.is_empty() {
@@ -160,6 +179,15 @@ impl TableSampleExec {
         probability: f64,
         rng: &mut StdRng,
     ) -> Result<Vec<Table>> {
+        use yachtsql_core::types::Value;
+        use yachtsql_storage::Column;
+
+        let sample_factor = if probability > 0.0 {
+            1.0 / probability
+        } else {
+            f64::INFINITY
+        };
+
         let mut result_batches = Vec::new();
 
         for batch in batches {
@@ -168,7 +196,16 @@ impl TableSampleExec {
             }
 
             if rng.r#gen::<f64>() < probability {
-                result_batches.push(batch);
+                let num_rows = batch.num_rows();
+                let mut columns = batch.expect_columns().to_vec();
+
+                let mut sample_factor_col = Column::new(&DataType::Float64, num_rows);
+                for _ in 0..num_rows {
+                    sample_factor_col.push(Value::float64(sample_factor))?;
+                }
+                columns.push(sample_factor_col);
+
+                result_batches.push(Table::new(self.schema.clone(), columns)?);
             }
         }
 
@@ -180,6 +217,7 @@ impl TableSampleExec {
     }
 
     fn sample_n_rows(&self, batches: Vec<Table>, n: usize, rng: &mut StdRng) -> Result<Vec<Table>> {
+        use yachtsql_core::types::Value;
         use yachtsql_storage::Column;
 
         let merged_batch = if batches.is_empty() {
@@ -200,6 +238,12 @@ impl TableSampleExec {
 
         let sample_count = n.min(total_rows);
 
+        let sample_factor = if sample_count > 0 {
+            total_rows as f64 / sample_count as f64
+        } else {
+            f64::INFINITY
+        };
+
         let mut selected_indices: Vec<usize> = (0..sample_count).collect();
 
         for i in sample_count..total_rows {
@@ -211,16 +255,19 @@ impl TableSampleExec {
 
         selected_indices.sort_unstable();
 
-        let sampled_columns: Vec<Column> = merged_batch
+        let mut sampled_columns: Vec<Column> = merged_batch
             .expect_columns()
             .iter()
             .map(|col| col.gather(&selected_indices))
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(vec![Table::new(
-            merged_batch.schema().clone(),
-            sampled_columns,
-        )?])
+        let mut sample_factor_col = Column::new(&DataType::Float64, selected_indices.len());
+        for _ in 0..selected_indices.len() {
+            sample_factor_col.push(Value::float64(sample_factor))?;
+        }
+        sampled_columns.push(sample_factor_col);
+
+        Ok(vec![Table::new(self.schema.clone(), sampled_columns)?])
     }
 }
 

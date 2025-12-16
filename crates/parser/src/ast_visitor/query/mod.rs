@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use sqlparser::ast::{self, CteAsMaterialized};
 use yachtsql_core::error::{Error, Result};
 use yachtsql_ir::expr::{Expr, LiteralValue};
-use yachtsql_ir::plan::{JoinType, LogicalPlan, PlanNode};
+use yachtsql_ir::plan::{JoinType, LogicalPlan, PlanNode, SampleSize, SamplingMethod};
 
 use super::{AliasScopeGuard, GroupingExtension, LogicalPlanBuilder};
 
@@ -2247,7 +2247,12 @@ impl LogicalPlanBuilder {
                     alias: table_alias,
                 }))
             }
-            ast::TableFactor::Table { name, alias, .. } => {
+            ast::TableFactor::Table {
+                name,
+                alias,
+                sample,
+                ..
+            } => {
                 let original_name = name.to_string();
 
                 let (table_name, only) = if original_name.eq_ignore_ascii_case("ONLY") {
@@ -2265,12 +2270,133 @@ impl LogicalPlanBuilder {
                 } else {
                     alias.as_ref().map(|a| a.name.value.clone())
                 };
-                Ok(LogicalPlan::new(PlanNode::Scan {
+                let scan_node = PlanNode::Scan {
                     table_name,
                     alias: table_alias,
                     projection: None,
                     only,
-                }))
+                };
+
+                if let Some(sample_kind) = sample {
+                    let table_sample = match sample_kind {
+                        ast::TableSampleKind::BeforeTableAlias(ts)
+                        | ast::TableSampleKind::AfterTableAlias(ts) => ts,
+                    };
+
+                    let method = match &table_sample.name {
+                        Some(ast::TableSampleMethod::System) => SamplingMethod::System,
+                        _ => SamplingMethod::Bernoulli,
+                    };
+
+                    let seed = table_sample.seed.as_ref().and_then(|s| match &s.value {
+                        ast::Value::Number(n, _) => n.parse::<u64>().ok(),
+                        _ => None,
+                    });
+
+                    let (size, offset) = if let Some(quantity) = &table_sample.quantity {
+                        let value_expr = self.sql_expr_to_expr(&quantity.value)?;
+
+                        let size = match &quantity.unit {
+                            Some(ast::TableSampleUnit::Rows) => match value_expr {
+                                Expr::Literal(LiteralValue::Int64(v)) => {
+                                    SampleSize::Rows(v as usize)
+                                }
+                                _ => {
+                                    return Err(Error::invalid_query(
+                                        "SAMPLE row count must be an integer literal".to_string(),
+                                    ));
+                                }
+                            },
+                            Some(ast::TableSampleUnit::Percent) => {
+                                let percent = match value_expr {
+                                    Expr::Literal(LiteralValue::Int64(v)) => v as f64,
+                                    Expr::Literal(LiteralValue::Float64(v)) => v,
+                                    Expr::Literal(LiteralValue::Numeric(d)) => {
+                                        d.to_string().parse().unwrap_or(0.0)
+                                    }
+                                    _ => {
+                                        return Err(Error::invalid_query(
+                                            "SAMPLE percentage must be a numeric literal"
+                                                .to_string(),
+                                        ));
+                                    }
+                                };
+                                SampleSize::Percent(percent)
+                            }
+                            None => match value_expr {
+                                Expr::Literal(LiteralValue::Float64(v)) => {
+                                    if v <= 1.0 {
+                                        SampleSize::Percent(v * 100.0)
+                                    } else {
+                                        SampleSize::Rows(v as usize)
+                                    }
+                                }
+                                Expr::Literal(LiteralValue::Numeric(d)) => {
+                                    let f: f64 = d.to_string().parse().unwrap_or(0.0);
+                                    if f <= 1.0 {
+                                        SampleSize::Percent(f * 100.0)
+                                    } else {
+                                        SampleSize::Rows(f as usize)
+                                    }
+                                }
+                                Expr::Literal(LiteralValue::Int64(v)) => {
+                                    SampleSize::Rows(v as usize)
+                                }
+                                Expr::BinaryOp { op, left, right } => {
+                                    if let (
+                                        yachtsql_ir::expr::BinaryOp::Divide,
+                                        Expr::Literal(LiteralValue::Int64(l)),
+                                        Expr::Literal(LiteralValue::Int64(r)),
+                                    ) = (&op, left.as_ref(), right.as_ref())
+                                    {
+                                        let frac = (*l as f64) / (*r as f64);
+                                        SampleSize::Percent(frac * 100.0)
+                                    } else {
+                                        return Err(Error::invalid_query(
+                                            "SAMPLE value must be a literal number or fraction"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                                _ => {
+                                    return Err(Error::invalid_query(
+                                        "SAMPLE value must be a literal number or fraction"
+                                            .to_string(),
+                                    ));
+                                }
+                            },
+                        };
+
+                        let offset_value = table_sample.offset.as_ref().and_then(|offset_expr| {
+                            self.sql_expr_to_expr(offset_expr)
+                                .ok()
+                                .and_then(|e| match e {
+                                    Expr::Literal(LiteralValue::Float64(v)) => Some(v),
+                                    Expr::Literal(LiteralValue::Numeric(d)) => {
+                                        d.to_string().parse().ok()
+                                    }
+                                    _ => None,
+                                })
+                        });
+
+                        (size, offset_value)
+                    } else {
+                        return Err(Error::invalid_query(
+                            "SAMPLE clause must specify a value".to_string(),
+                        ));
+                    };
+
+                    let _ = offset;
+
+                    Ok(LogicalPlan::new(PlanNode::TableSample {
+                        input: Box::new(scan_node),
+                        method,
+                        size,
+                        seed,
+                    }))
+                } else {
+                    Ok(LogicalPlan::new(scan_node))
+                }
             }
             ast::TableFactor::Derived {
                 lateral: _lateral,
@@ -2278,12 +2404,6 @@ impl LogicalPlanBuilder {
                 alias,
                 ..
             } => {
-                if alias.is_none() {
-                    return Err(Error::invalid_query(
-                        "Subquery in FROM clause must have an alias".to_string(),
-                    ));
-                }
-
                 let subquery_plan = self.query_to_plan(subquery)?;
                 let alias_name =
                     alias

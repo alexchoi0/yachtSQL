@@ -36,7 +36,6 @@ fn test_sample_fraction() {
     assert!(result.num_rows() == 1);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_sample_rows() {
     let mut executor = create_executor();
@@ -137,7 +136,6 @@ fn test_sample_with_group_by() {
     assert!(result.num_rows() <= 5);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_sample_virtual_columns() {
     let mut executor = create_executor();
@@ -191,7 +189,6 @@ fn test_sample_join() {
     assert!(result.num_rows() > 0);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_sample_subquery() {
     let mut executor = create_executor();
@@ -210,7 +207,6 @@ fn test_sample_subquery() {
     assert!(result.num_rows() == 1);
 }
 
-#[ignore = "Implement me!"]
 #[test]
 fn test_sample_deterministic() {
     let mut executor = create_executor();
