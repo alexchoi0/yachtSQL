@@ -439,6 +439,44 @@ impl<'a> Evaluator<'a> {
                     return Ok(record.values().get(idx).cloned().unwrap_or(Value::null()));
                 }
 
+                if parts.len() >= 3 {
+                    let first_two = format!(
+                        "{}.{}",
+                        parts[0].value.to_uppercase(),
+                        parts[1].value.to_uppercase()
+                    );
+                    if let Some(base_idx) = self
+                        .schema
+                        .fields()
+                        .iter()
+                        .position(|f| f.name.to_uppercase() == first_two)
+                    {
+                        let base_val = record
+                            .values()
+                            .get(base_idx)
+                            .cloned()
+                            .unwrap_or(Value::null());
+                        if let Some(struct_fields) = base_val.as_struct() {
+                            let field_name = parts[2].value.to_uppercase();
+                            for (name, val) in struct_fields {
+                                if name.to_uppercase() == field_name {
+                                    if parts.len() == 3 {
+                                        return Ok(val.clone());
+                                    }
+                                    if let Some(nested) = val.as_struct() {
+                                        let nested_field = parts[3].value.to_uppercase();
+                                        for (n, v) in nested {
+                                            if n.to_uppercase() == nested_field {
+                                                return Ok(v.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if parts.len() >= 2 {
                     let first = parts[0].value.to_uppercase();
                     if let Some(base_idx) = self
@@ -4905,20 +4943,26 @@ impl<'a> Evaluator<'a> {
                 if args[0].is_null() || args[1].is_null() {
                     return Ok(Value::null());
                 }
-                let lng = args[0].as_f64().or_else(|| {
-                    use rust_decimal::prelude::ToPrimitive;
-                    args[0].as_numeric().and_then(|d| d.to_f64())
-                }).ok_or_else(|| Error::TypeMismatch {
-                    expected: "FLOAT64".to_string(),
-                    actual: args[0].data_type().to_string(),
-                })?;
-                let lat = args[1].as_f64().or_else(|| {
-                    use rust_decimal::prelude::ToPrimitive;
-                    args[1].as_numeric().and_then(|d| d.to_f64())
-                }).ok_or_else(|| Error::TypeMismatch {
-                    expected: "FLOAT64".to_string(),
-                    actual: args[1].data_type().to_string(),
-                })?;
+                let lng = args[0]
+                    .as_f64()
+                    .or_else(|| {
+                        use rust_decimal::prelude::ToPrimitive;
+                        args[0].as_numeric().and_then(|d| d.to_f64())
+                    })
+                    .ok_or_else(|| Error::TypeMismatch {
+                        expected: "FLOAT64".to_string(),
+                        actual: args[0].data_type().to_string(),
+                    })?;
+                let lat = args[1]
+                    .as_f64()
+                    .or_else(|| {
+                        use rust_decimal::prelude::ToPrimitive;
+                        args[1].as_numeric().and_then(|d| d.to_f64())
+                    })
+                    .ok_or_else(|| Error::TypeMismatch {
+                        expected: "FLOAT64".to_string(),
+                        actual: args[1].data_type().to_string(),
+                    })?;
                 let point = Point::new(lng, lat);
                 Ok(Value::geography(format_wkt_number(&Geometry::Point(point))))
             }
@@ -6099,10 +6143,13 @@ impl<'a> Evaluator<'a> {
                         actual: args[0].data_type().to_string(),
                     })?;
                 let grid_size = if args.len() > 1 {
-                    args[1].as_f64().or_else(|| {
-                        use rust_decimal::prelude::ToPrimitive;
-                        args[1].as_numeric().and_then(|d| d.to_f64())
-                    }).unwrap_or(0.0001)
+                    args[1]
+                        .as_f64()
+                        .or_else(|| {
+                            use rust_decimal::prelude::ToPrimitive;
+                            args[1].as_numeric().and_then(|d| d.to_f64())
+                        })
+                        .unwrap_or(0.0001)
                 } else {
                     0.0001
                 };
