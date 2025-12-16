@@ -253,7 +253,6 @@ fn test_customer_lifetime_value() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_product_affinity_analysis() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -596,7 +595,6 @@ fn test_customer_acquisition_by_month() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_product_margin_analysis() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -772,7 +770,6 @@ fn test_cross_sell_opportunities() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_revenue_concentration() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -806,12 +803,12 @@ fn test_revenue_concentration() {
     assert_table_eq!(
         result,
         [
-            ["Laptop Pro", 3600, 65.45, 65.4545454545455],
-            ["Standing Desk", 600, 10.91, 76.3636363636364],
-            ["USB-C Hub", 400, 7.27, 83.6363636363636],
-            ["Notebook Set", 375, 6.82, 90.4545454545455],
-            ["Office Chair", 350, 6.36, 96.8181818181818],
-            ["Wireless Mouse", 100, 1.82, 98.6363636363636],
+            ["Laptop Pro", 3600, 65.45, 65.45454545454545],
+            ["Standing Desk", 600, 10.91, 76.36363636363636],
+            ["USB-C Hub", 400, 7.27, 83.63636363636364],
+            ["Notebook Set", 375, 6.82, 90.45454545454545],
+            ["Office Chair", 350, 6.36, 96.81818181818181],
+            ["Wireless Mouse", 100, 1.82, 98.63636363636364],
             ["Pen Pack", 75, 1.36, 100.0],
         ]
     );
