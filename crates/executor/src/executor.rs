@@ -3875,6 +3875,26 @@ impl QueryExecutor {
                 }
                 Ok(Value::struct_val(struct_fields))
             }
+            Expr::Interval(interval) => {
+                let val = self.evaluate_literal_expr(&interval.value)?;
+                let amount = val.as_i64().unwrap_or(0);
+                let unit = interval
+                    .leading_field
+                    .as_ref()
+                    .map(|f| format!("{:?}", f).to_uppercase())
+                    .unwrap_or_else(|| "SECOND".to_string());
+                use yachtsql_common::types::IntervalValue;
+                let interval_val = match unit.as_str() {
+                    "YEAR" => IntervalValue::from_months(amount as i32 * 12),
+                    "MONTH" => IntervalValue::from_months(amount as i32),
+                    "DAY" => IntervalValue::from_days(amount as i32),
+                    "HOUR" => IntervalValue::from_hours(amount),
+                    "MINUTE" => IntervalValue::new(0, 0, amount * IntervalValue::MICROS_PER_MINUTE),
+                    "SECOND" => IntervalValue::new(0, 0, amount * IntervalValue::MICROS_PER_SECOND),
+                    _ => IntervalValue::new(0, amount as i32, 0),
+                };
+                Ok(Value::interval(interval_val))
+            }
             _ => Err(Error::UnsupportedFeature(format!(
                 "Expression not supported in this context: {:?}",
                 expr
@@ -4147,6 +4167,7 @@ impl QueryExecutor {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(DataType::Struct(struct_fields))
             }
+            ast::DataType::Interval { .. } => Ok(DataType::Interval),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Data type not yet supported: {:?}",
                 sql_type

@@ -100,6 +100,7 @@ pub enum Literal {
     Date(i32),
     Time(i64),
     Timestamp(i64),
+    Interval { months: i32, days: i32, nanos: i64 },
     Array(Vec<Literal>),
     Struct(Vec<(String, Literal)>),
     Json(serde_json::Value),
@@ -118,6 +119,7 @@ impl Literal {
             Literal::Date(_) => DataType::Date,
             Literal::Time(_) => DataType::Time,
             Literal::Timestamp(_) => DataType::Timestamp,
+            Literal::Interval { .. } => DataType::Interval,
             Literal::Array(elements) => {
                 let elem_type = elements
                     .first()
