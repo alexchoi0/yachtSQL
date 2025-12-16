@@ -27,6 +27,7 @@ pub enum LogicalPlan {
         group_by: Vec<Expr>,
         aggregates: Vec<Expr>,
         schema: PlanSchema,
+        grouping_sets: Option<Vec<Vec<usize>>>,
     },
 
     Join {
@@ -98,6 +99,27 @@ pub enum LogicalPlan {
     Truncate {
         table_name: String,
     },
+
+    SetOperation {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        op: SetOperationType,
+        quantifier: SetQuantifier,
+        schema: PlanSchema,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SetOperationType {
+    Union,
+    Intersect,
+    Except,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SetQuantifier {
+    All,
+    Distinct,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -248,6 +270,7 @@ impl LogicalPlan {
             LogicalPlan::DropTable { .. } => &EMPTY_SCHEMA,
             LogicalPlan::AlterTable { .. } => &EMPTY_SCHEMA,
             LogicalPlan::Truncate { .. } => &EMPTY_SCHEMA,
+            LogicalPlan::SetOperation { schema, .. } => schema,
         }
     }
 

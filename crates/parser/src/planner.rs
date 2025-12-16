@@ -3,7 +3,7 @@ use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::DataType;
 use yachtsql_ir::{
     AlterTableOp, Assignment, ColumnDef, Expr, JoinType, LogicalPlan, PlanField, PlanSchema,
-    SortExpr,
+    SetOperationType, SetQuantifier, SortExpr,
 };
 use yachtsql_storage::Schema;
 
@@ -89,11 +89,67 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             SetExpr::Select(select) => self.plan_select(select),
             SetExpr::Values(values) => self.plan_values(values),
             SetExpr::Query(query) => self.plan_query(query),
+            SetExpr::SetOperation {
+                op,
+                set_quantifier,
+                left,
+                right,
+            } => self.plan_set_operation(op, set_quantifier, left, right),
             _ => Err(Error::unsupported(format!(
                 "Unsupported set expression: {:?}",
                 set_expr
             ))),
         }
+    }
+
+    fn plan_set_operation(
+        &self,
+        op: &ast::SetOperator,
+        quantifier: &ast::SetQuantifier,
+        left: &SetExpr,
+        right: &SetExpr,
+    ) -> Result<LogicalPlan> {
+        let left_plan = self.plan_set_expr(left)?;
+        let right_plan = self.plan_set_expr(right)?;
+
+        let left_schema = left_plan.schema();
+        let right_schema = right_plan.schema();
+
+        if left_schema.field_count() != right_schema.field_count() {
+            return Err(Error::invalid_query(format!(
+                "Set operation requires both sides to have the same number of columns. Left has {}, right has {}",
+                left_schema.field_count(),
+                right_schema.field_count()
+            )));
+        }
+
+        let ir_op = match op {
+            ast::SetOperator::Union => SetOperationType::Union,
+            ast::SetOperator::Intersect => SetOperationType::Intersect,
+            ast::SetOperator::Except | ast::SetOperator::Minus => SetOperationType::Except,
+        };
+
+        let ir_quantifier = match quantifier {
+            ast::SetQuantifier::All => SetQuantifier::All,
+            ast::SetQuantifier::Distinct | ast::SetQuantifier::None => SetQuantifier::Distinct,
+            ast::SetQuantifier::ByName => return Err(Error::unsupported("SET operation BY NAME")),
+            ast::SetQuantifier::AllByName => {
+                return Err(Error::unsupported("SET operation ALL BY NAME"));
+            }
+            ast::SetQuantifier::DistinctByName => {
+                return Err(Error::unsupported("SET operation DISTINCT BY NAME"));
+            }
+        };
+
+        let schema = left_schema.clone();
+
+        Ok(LogicalPlan::SetOperation {
+            left: Box::new(left_plan),
+            right: Box::new(right_plan),
+            op: ir_op,
+            quantifier: ir_quantifier,
+            schema,
+        })
     }
 
     fn plan_select(&self, select: &ast::Select) -> Result<LogicalPlan> {
@@ -344,16 +400,22 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         let mut group_by_exprs = Vec::new();
         let mut aggregate_exprs = Vec::new();
         let mut fields = Vec::new();
+        let mut grouping_sets: Option<Vec<Vec<usize>>> = None;
 
         match &select.group_by {
             ast::GroupByExpr::All(_) => {}
             ast::GroupByExpr::Expressions(exprs, _) => {
-                for expr in exprs {
-                    let planned = ExprPlanner::plan_expr(expr, input.schema())?;
-                    let name = self.expr_name(expr);
-                    let data_type = self.infer_expr_type(&planned, input.schema());
-                    fields.push(PlanField::new(name, data_type));
-                    group_by_exprs.push(planned);
+                let (all_exprs, sets) = self.extract_grouping_sets(exprs, input.schema())?;
+
+                for (i, (planned, name)) in all_exprs.iter().enumerate() {
+                    let data_type = self.infer_expr_type(planned, input.schema());
+                    fields.push(PlanField::new(name.clone(), data_type));
+                    group_by_exprs.push(planned.clone());
+                    let _ = i;
+                }
+
+                if !sets.is_empty() {
+                    grouping_sets = Some(sets);
                 }
             }
         }
@@ -382,7 +444,137 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             group_by: group_by_exprs,
             aggregates: aggregate_exprs,
             schema: PlanSchema::from_fields(fields),
+            grouping_sets,
         })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn extract_grouping_sets(
+        &self,
+        exprs: &[ast::Expr],
+        schema: &PlanSchema,
+    ) -> Result<(Vec<(Expr, String)>, Vec<Vec<usize>>)> {
+        let mut all_exprs: Vec<(Expr, String)> = Vec::new();
+        let mut expr_indices: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut grouping_sets: Vec<Vec<usize>> = Vec::new();
+        let mut has_grouping_modifier = false;
+        let mut regular_group_by_indices: Vec<usize> = Vec::new();
+
+        for expr in exprs {
+            match expr {
+                ast::Expr::Rollup(rollup_exprs) => {
+                    has_grouping_modifier = true;
+                    let flat_exprs: Vec<ast::Expr> =
+                        rollup_exprs.iter().flatten().cloned().collect();
+                    let indices = self.add_exprs_to_list(
+                        &mut all_exprs,
+                        &mut expr_indices,
+                        &flat_exprs,
+                        schema,
+                    )?;
+                    let sets = self.expand_rollup(&indices);
+                    grouping_sets.extend(sets);
+                }
+                ast::Expr::Cube(cube_exprs) => {
+                    has_grouping_modifier = true;
+                    let flat_exprs: Vec<ast::Expr> = cube_exprs.iter().flatten().cloned().collect();
+                    let indices = self.add_exprs_to_list(
+                        &mut all_exprs,
+                        &mut expr_indices,
+                        &flat_exprs,
+                        schema,
+                    )?;
+                    let sets = self.expand_cube(&indices);
+                    grouping_sets.extend(sets);
+                }
+                ast::Expr::GroupingSets(sets_exprs) => {
+                    has_grouping_modifier = true;
+                    for set_vec in sets_exprs {
+                        let indices = self.add_exprs_to_list(
+                            &mut all_exprs,
+                            &mut expr_indices,
+                            set_vec,
+                            schema,
+                        )?;
+                        grouping_sets.push(indices);
+                    }
+                }
+                _ => {
+                    let index =
+                        self.add_expr_to_list(&mut all_exprs, &mut expr_indices, expr, schema)?;
+                    regular_group_by_indices.push(index);
+                }
+            }
+        }
+
+        if has_grouping_modifier && !regular_group_by_indices.is_empty() {
+            let mut expanded_sets = Vec::new();
+            for set in &grouping_sets {
+                let mut new_set = regular_group_by_indices.clone();
+                new_set.extend(set.iter());
+                expanded_sets.push(new_set);
+            }
+            grouping_sets = expanded_sets;
+        }
+
+        Ok((all_exprs, grouping_sets))
+    }
+
+    fn add_expr_to_list(
+        &self,
+        all_exprs: &mut Vec<(Expr, String)>,
+        expr_indices: &mut std::collections::HashMap<String, usize>,
+        expr: &ast::Expr,
+        schema: &PlanSchema,
+    ) -> Result<usize> {
+        let name = self.expr_name(expr);
+        if let Some(&idx) = expr_indices.get(&name) {
+            return Ok(idx);
+        }
+        let planned = ExprPlanner::plan_expr(expr, schema)?;
+        let idx = all_exprs.len();
+        all_exprs.push((planned, name.clone()));
+        expr_indices.insert(name, idx);
+        Ok(idx)
+    }
+
+    fn add_exprs_to_list(
+        &self,
+        all_exprs: &mut Vec<(Expr, String)>,
+        expr_indices: &mut std::collections::HashMap<String, usize>,
+        exprs: &[ast::Expr],
+        schema: &PlanSchema,
+    ) -> Result<Vec<usize>> {
+        let mut indices = Vec::new();
+        for expr in exprs {
+            let idx = self.add_expr_to_list(all_exprs, expr_indices, expr, schema)?;
+            indices.push(idx);
+        }
+        Ok(indices)
+    }
+
+    fn expand_rollup(&self, indices: &[usize]) -> Vec<Vec<usize>> {
+        let mut sets = Vec::new();
+        for i in (0..=indices.len()).rev() {
+            sets.push(indices[..i].to_vec());
+        }
+        sets
+    }
+
+    fn expand_cube(&self, indices: &[usize]) -> Vec<Vec<usize>> {
+        let n = indices.len();
+        let mut sets = Vec::new();
+        for mask in 0..(1 << n) {
+            let mut set = Vec::new();
+            for (i, &idx) in indices.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    set.push(idx);
+                }
+            }
+            sets.push(set);
+        }
+        sets
     }
 
     fn plan_order_by(&self, input: LogicalPlan, order_by: &ast::OrderBy) -> Result<LogicalPlan> {
