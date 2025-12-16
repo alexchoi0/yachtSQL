@@ -2344,6 +2344,20 @@ impl QueryExecutor {
                     }
                 }
                 Expr::CompoundIdentifier(parts) => {
+                    if let Some(first) = parts.first() {
+                        let first_name = first.value.to_uppercase();
+                        if let Some(field) = input_schema
+                            .fields()
+                            .iter()
+                            .find(|f| f.name.to_uppercase() == first_name)
+                        {
+                            if matches!(field.data_type, DataType::Struct(_))
+                                && !projected_columns.contains(&first_name)
+                            {
+                                return true;
+                            }
+                        }
+                    }
                     if let Some(last) = parts.last() {
                         let col_name = last.value.to_uppercase();
                         if !projected_columns.contains(&col_name) {
