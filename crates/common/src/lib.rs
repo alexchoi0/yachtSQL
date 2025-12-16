@@ -1,4 +1,4 @@
-//! Core types and error handling for YachtSQL.
+//! Common types and error handling for YachtSQL (BigQuery dialect).
 
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]

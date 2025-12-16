@@ -2,29 +2,12 @@
 
 use std::collections::HashMap;
 
-use yachtsql_core::error::{Error, Result};
-use yachtsql_storage::Schema;
-
-use crate::record::Record;
-
-#[derive(Debug, Clone)]
-pub struct TableData {
-    pub schema: Schema,
-    pub rows: Vec<Record>,
-}
-
-impl TableData {
-    pub fn new(schema: Schema) -> Self {
-        Self {
-            schema,
-            rows: Vec::new(),
-        }
-    }
-}
+use yachtsql_common::error::{Error, Result};
+use yachtsql_storage::{Schema, Table};
 
 #[derive(Debug, Default)]
 pub struct Catalog {
-    tables: HashMap<String, TableData>,
+    tables: HashMap<String, Table>,
 }
 
 impl Catalog {
@@ -42,7 +25,7 @@ impl Catalog {
                 name
             )));
         }
-        self.tables.insert(key, TableData::new(schema));
+        self.tables.insert(key, Table::new(schema));
         Ok(())
     }
 
@@ -54,11 +37,11 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn get_table(&self, name: &str) -> Option<&TableData> {
+    pub fn get_table(&self, name: &str) -> Option<&Table> {
         self.tables.get(&name.to_uppercase())
     }
 
-    pub fn get_table_mut(&mut self, name: &str) -> Option<&mut TableData> {
+    pub fn get_table_mut(&mut self, name: &str) -> Option<&mut Table> {
         self.tables.get_mut(&name.to_uppercase())
     }
 
@@ -80,8 +63,8 @@ impl Catalog {
             )));
         }
 
-        if let Some(table_data) = self.tables.remove(&old_key) {
-            self.tables.insert(new_key, table_data);
+        if let Some(table) = self.tables.remove(&old_key) {
+            self.tables.insert(new_key, table);
         }
         Ok(())
     }

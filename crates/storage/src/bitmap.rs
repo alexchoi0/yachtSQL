@@ -158,6 +158,12 @@ impl NullBitmap {
     pub fn push(&mut self, is_valid: bool) {
         self.data.push(if is_valid { 1 } else { 0 });
     }
+
+    pub fn remove(&mut self, index: usize) {
+        if index < self.data.len() {
+            self.data.remove(index);
+        }
+    }
 }
 
 pub struct NullBitmapIter<'a> {

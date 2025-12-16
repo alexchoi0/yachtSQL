@@ -7,7 +7,7 @@ description = "YachtSQL - Lightweight in-memory SQL test database with columnar 
 
 [dependencies]
 # Internal crates
-yachtsql-core = { path = "crates/core" }
+yachtsql-common = { path = "crates/common" }
 yachtsql-storage = { path = "crates/storage" }
 yachtsql-ir = { path = "crates/ir" }
 yachtsql-parser = { path = "crates/parser" }
@@ -91,17 +91,6 @@ parquet = { version = "54", default-features = false, features = ["arrow"] }
 tempfile = "3.14"
 yachtsql-test-utils = { path = "crates/test-utils" }
 
-[features]
-# Benchmark configuration features
-# Use `cargo bench --features bench-large-sample` for more accurate results (100 samples)
-# Default is 10 samples for faster iteration during development
-bench-large-sample = []
-
-[[bench]]
-name = "bigquery"
-path = "benches/bigquery/main.rs"
-harness = false
-
 # Linting configuration
 # Run with: cargo clippy -- -D warnings
 [lints.clippy]
@@ -115,7 +104,7 @@ wildcard-enum-match-arm = "warn"     # Discourage wildcards in match (prefer exh
 [workspace]
 members = [
     ".",
-    "crates/core",
+    "crates/common",
     "crates/executor",
     "crates/functions",
     "crates/ir",

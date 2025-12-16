@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use yachtsql_core::error::{Error, Result};
-use yachtsql_core::types::DataType;
+use yachtsql_common::error::{Error, Result};
+use yachtsql_common::types::DataType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FieldMode {

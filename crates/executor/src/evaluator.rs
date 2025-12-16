@@ -8,12 +8,9 @@
 
 use chrono::{Datelike, Timelike};
 use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value as SqlValue};
-use yachtsql_core::error::{Error, Result};
-use yachtsql_core::types::{DataType, Value};
-use yachtsql_storage::Schema;
-
-use crate::catalog::TableData;
-use crate::record::Record;
+use yachtsql_common::error::{Error, Result};
+use yachtsql_common::types::Value;
+use yachtsql_storage::{Record, Schema};
 
 pub fn parse_byte_string_escapes(s: &str) -> Vec<u8> {
     let mut result = Vec::new();
@@ -409,21 +406,21 @@ impl<'a> Evaluator<'a> {
                     .map(|f| format!("{:?}", f).to_uppercase())
                     .unwrap_or_else(|| "SECOND".to_string());
                 let interval_val = match unit.as_str() {
-                    "YEAR" => yachtsql_core::types::Interval::from_months(amount as i32 * 12),
-                    "MONTH" => yachtsql_core::types::Interval::from_months(amount as i32),
-                    "DAY" => yachtsql_core::types::Interval::from_days(amount as i32),
-                    "HOUR" => yachtsql_core::types::Interval::from_hours(amount),
-                    "MINUTE" => yachtsql_core::types::Interval::new(
+                    "YEAR" => yachtsql_common::types::Interval::from_months(amount as i32 * 12),
+                    "MONTH" => yachtsql_common::types::Interval::from_months(amount as i32),
+                    "DAY" => yachtsql_common::types::Interval::from_days(amount as i32),
+                    "HOUR" => yachtsql_common::types::Interval::from_hours(amount),
+                    "MINUTE" => yachtsql_common::types::Interval::new(
                         0,
                         0,
-                        amount * yachtsql_core::types::Interval::MICROS_PER_MINUTE,
+                        amount * yachtsql_common::types::Interval::MICROS_PER_MINUTE,
                     ),
-                    "SECOND" => yachtsql_core::types::Interval::new(
+                    "SECOND" => yachtsql_common::types::Interval::new(
                         0,
                         0,
-                        amount * yachtsql_core::types::Interval::MICROS_PER_SECOND,
+                        amount * yachtsql_common::types::Interval::MICROS_PER_SECOND,
                     ),
-                    _ => yachtsql_core::types::Interval::new(0, amount as i32, 0),
+                    _ => yachtsql_common::types::Interval::new(0, amount as i32, 0),
                 };
                 Ok(Value::interval(interval_val))
             }

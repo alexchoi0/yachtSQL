@@ -1,7 +1,9 @@
 use indexmap::IndexMap;
+use yachtsql_common::error::Result;
+use yachtsql_common::types::Value;
 
 use crate::storage_backend::ColumnarStorage;
-use crate::{Column, Schema};
+use crate::{Column, Record, Schema};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TableEngine {
@@ -83,6 +85,55 @@ impl Table {
             storage: ColumnarStorage::from_columns(columns, row_count),
             engine: self.engine.clone(),
             comment: self.comment.clone(),
+        }
+    }
+
+    pub fn push_row(&mut self, values: Vec<Value>) -> Result<()> {
+        self.storage.push_row_values(&values, &self.schema)
+    }
+
+    pub fn get_row(&self, index: usize) -> Result<Record> {
+        let columns: Vec<Column> = self.storage.columns().values().cloned().collect();
+        Record::from_columns(&columns, index)
+    }
+
+    pub fn to_records(&self) -> Result<Vec<Record>> {
+        let num_rows = self.row_count();
+        let mut records = Vec::with_capacity(num_rows);
+        for i in 0..num_rows {
+            records.push(self.get_row(i)?);
+        }
+        Ok(records)
+    }
+
+    pub fn clear(&mut self) {
+        self.storage.clear_data();
+    }
+
+    pub fn remove_row(&mut self, index: usize) {
+        for col in self.storage.columns_mut().values_mut() {
+            col.remove(index);
+        }
+    }
+
+    pub fn update_row(&mut self, index: usize, values: Vec<Value>) -> Result<()> {
+        for (col, value) in self
+            .storage
+            .columns_mut()
+            .values_mut()
+            .zip(values.into_iter())
+        {
+            col.set(index, value)?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_column(&mut self, index: usize) {
+        if index < self.storage.columns().len() {
+            let key = self.storage.columns().keys().nth(index).cloned();
+            if let Some(key) = key {
+                self.storage.columns_mut().shift_remove(&key);
+            }
         }
     }
 }

@@ -1,11 +1,9 @@
 //! Table data structure for query results - columnar storage only.
 
-use yachtsql_core::error::{Error, Result};
-use yachtsql_core::types::coercion::CoercionRules;
-use yachtsql_core::types::{DataType, Value};
-use yachtsql_storage::{Column, Schema};
-
-use crate::record::Record;
+use yachtsql_common::error::{Error, Result};
+use yachtsql_common::types::coercion::CoercionRules;
+use yachtsql_common::types::{DataType, Value};
+use yachtsql_storage::{Column, Record, Schema};
 
 #[inline]
 fn are_types_compatible(col_type: &DataType, schema_type: &DataType) -> bool {

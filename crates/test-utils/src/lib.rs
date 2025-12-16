@@ -7,10 +7,9 @@
 #![allow(missing_docs)]
 
 use yachtsql::{QueryExecutor, Record, Result, Schema, Table, Value};
-use yachtsql_parser::DialectType;
 
 pub fn setup_executor() -> QueryExecutor {
-    QueryExecutor::with_dialect(DialectType::BigQuery)
+    QueryExecutor::new()
 }
 
 pub fn assert_batch_empty(batch: &yachtsql::Table) {
@@ -145,7 +144,7 @@ pub fn build_nested_expression(wrapper: &str, inner: &str, depth: usize) -> Stri
 }
 
 pub fn setup_bool_table() -> QueryExecutor {
-    let mut executor = QueryExecutor::with_dialect(DialectType::BigQuery);
+    let mut executor = QueryExecutor::new();
     executor
         .execute_sql("CREATE TABLE bools (id INT64, val BOOL)")
         .expect("CREATE TABLE should succeed");

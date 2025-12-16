@@ -3,6 +3,7 @@
 pub mod bitmap;
 pub mod column;
 pub mod column_ops;
+pub mod record;
 pub mod schema;
 pub mod simd;
 pub mod storage_backend;
@@ -11,10 +12,11 @@ pub mod table;
 pub use bitmap::NullBitmap;
 pub use column::Column;
 use indexmap::IndexMap;
+pub use record::Record;
 pub use schema::{Field, FieldMode, Schema};
 pub use storage_backend::ColumnarStorage;
 pub use table::{ColumnStatistics, Table, TableEngine, TableSchemaOps, TableStatistics};
-use yachtsql_core::error::{Error, Result};
+use yachtsql_common::error::{Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct Storage {
@@ -162,7 +164,7 @@ impl Dataset {
             self.tables.insert(new_table_id.to_string(), table);
             Ok(())
         } else {
-            Err(yachtsql_core::error::Error::table_not_found(
+            Err(yachtsql_common::error::Error::table_not_found(
                 old_table_id.to_string(),
             ))
         }
@@ -171,7 +173,7 @@ impl Dataset {
 
 #[cfg(test)]
 mod tests {
-    use yachtsql_core::types::DataType;
+    use yachtsql_common::types::DataType;
 
     use super::*;
 

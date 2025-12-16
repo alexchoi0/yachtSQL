@@ -1,7 +1,7 @@
 use sqlparser::ast::{self, Statement};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser as SqlParser;
-use yachtsql_core::error::{Error, Result};
+use yachtsql_common::error::{Error, Result};
 use yachtsql_ir::expr::Expr;
 use yachtsql_ir::plan::{
     AlterTableOperation, ConflictAction, LogicalPlan, MergeWhenMatched, MergeWhenNotMatched,
@@ -248,18 +248,16 @@ impl LogicalPlanBuilder {
                 };
                 AlterTableOperation::RenameTable { new_name }
             }
-            ast::AlterTableOperation::AddConstraint { constraint, .. } => {
-                let table_constraint = Self::parse_table_constraint(constraint)?;
-                AlterTableOperation::AddConstraint {
-                    constraint: table_constraint,
-                }
+            ast::AlterTableOperation::AddConstraint { .. } => {
+                return Err(Error::unsupported_feature(
+                    "ADD CONSTRAINT is not supported in BigQuery".to_string(),
+                ));
             }
-            ast::AlterTableOperation::DropConstraint {
-                name, if_exists, ..
-            } => AlterTableOperation::DropConstraint {
-                constraint_name: name.value.clone(),
-                if_exists: *if_exists,
-            },
+            ast::AlterTableOperation::DropConstraint { .. } => {
+                return Err(Error::unsupported_feature(
+                    "DROP CONSTRAINT is not supported in BigQuery".to_string(),
+                ));
+            }
             ast::AlterTableOperation::ModifyColumn {
                 col_name,
                 data_type,

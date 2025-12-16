@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast;
-use yachtsql_core::error::{Error, Result};
+use yachtsql_common::error::{Error, Result};
 use yachtsql_ir::expr::{BinaryOp, Expr, LiteralValue};
 use yachtsql_ir::plan::{LogicalPlan, PlanNode};
 
@@ -31,7 +31,7 @@ impl Drop for AliasScopeGuard<'_> {
     }
 }
 
-use yachtsql_core::types::{DataType, Value};
+use yachtsql_common::types::{DataType, Value};
 
 #[derive(Debug, Clone)]
 pub struct SessionVariable {
@@ -50,7 +50,6 @@ pub struct LogicalPlanBuilder {
     storage: Option<std::rc::Rc<RefCell<yachtsql_storage::Storage>>>,
     alias_stack: RefCell<Vec<HashSet<String>>>,
     named_windows: RefCell<HashMap<String, ast::WindowSpec>>,
-    dialect: crate::DialectType,
     current_sql: RefCell<Option<String>>,
     subquery_alias_counter: Cell<usize>,
     merge_returning: RefCell<Option<String>>,
@@ -77,7 +76,6 @@ impl LogicalPlanBuilder {
             storage: None,
             alias_stack: RefCell::new(Vec::new()),
             named_windows: RefCell::new(HashMap::new()),
-            dialect: crate::DialectType::BigQuery,
             current_sql: RefCell::new(None),
             subquery_alias_counter: Cell::new(0),
             merge_returning: RefCell::new(None),
@@ -127,23 +125,6 @@ impl LogicalPlanBuilder {
             storage: Some(storage),
             alias_stack: self.alias_stack,
             named_windows: self.named_windows,
-            dialect: self.dialect,
-            current_sql: self.current_sql,
-            subquery_alias_counter: self.subquery_alias_counter,
-            merge_returning: self.merge_returning,
-            session_variables: self.session_variables,
-            udfs: self.udfs,
-            final_tables: self.final_tables,
-            current_group_by_exprs: self.current_group_by_exprs,
-        }
-    }
-
-    pub fn with_dialect(self, dialect: crate::DialectType) -> Self {
-        Self {
-            storage: self.storage,
-            alias_stack: self.alias_stack,
-            named_windows: self.named_windows,
-            dialect,
             current_sql: self.current_sql,
             subquery_alias_counter: self.subquery_alias_counter,
             merge_returning: self.merge_returning,
@@ -164,7 +145,6 @@ impl LogicalPlanBuilder {
             storage: self.storage,
             alias_stack: self.alias_stack,
             named_windows: self.named_windows,
-            dialect: self.dialect,
             current_sql: self.current_sql,
             subquery_alias_counter: self.subquery_alias_counter,
             merge_returning: self.merge_returning,
@@ -180,7 +160,6 @@ impl LogicalPlanBuilder {
             storage: self.storage,
             alias_stack: self.alias_stack,
             named_windows: self.named_windows,
-            dialect: self.dialect,
             current_sql: self.current_sql,
             subquery_alias_counter: self.subquery_alias_counter,
             merge_returning: self.merge_returning,

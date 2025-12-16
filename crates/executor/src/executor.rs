@@ -9,37 +9,26 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::{
-    self, Expr, Ident, LimitClause, ObjectName, OrderBy, OrderByExpr, OrderByKind, Query, Select,
+    self, Expr, LimitClause, ObjectName, OrderBy, OrderByExpr, OrderByKind, Query, Select,
     SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value as SqlValue,
 };
 use sqlparser::dialect::BigQueryDialect;
 use sqlparser::parser::Parser;
-use yachtsql_core::error::{Error, Result};
-use yachtsql_core::types::{DataType, StructField, Value};
-use yachtsql_parser::DialectType;
-use yachtsql_storage::{Column, Field, Schema};
+use yachtsql_common::error::{Error, Result};
+use yachtsql_common::types::{DataType, StructField, Value};
+use yachtsql_storage::{Column, Field, Record, Schema, TableSchemaOps};
 
-use crate::catalog::{Catalog, TableData};
+use crate::catalog::Catalog;
 use crate::evaluator::{Evaluator, parse_byte_string_escapes};
-use crate::record::Record;
 use crate::table::Table;
 
 pub struct QueryExecutor {
-    dialect: DialectType,
     catalog: Catalog,
 }
 
 impl QueryExecutor {
     pub fn new() -> Self {
         Self {
-            dialect: DialectType::BigQuery,
-            catalog: Catalog::new(),
-        }
-    }
-
-    pub fn with_dialect(dialect: DialectType) -> Self {
-        Self {
-            dialect,
             catalog: Catalog::new(),
         }
     }
@@ -411,7 +400,7 @@ impl QueryExecutor {
                     let prefix = &alias.name.value;
                     Schema::from_fields(
                         table_data
-                            .schema
+                            .schema()
                             .fields()
                             .iter()
                             .map(|f| {
@@ -423,10 +412,10 @@ impl QueryExecutor {
                             .collect(),
                     )
                 } else {
-                    table_data.schema.clone()
+                    table_data.schema().clone()
                 };
 
-                Ok((schema, table_data.rows.clone()))
+                Ok((schema, table_data.to_records()?))
             }
             TableFactor::NestedJoin {
                 table_with_joins, ..
@@ -1693,7 +1682,7 @@ impl QueryExecutor {
             .get_table_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
-        let schema = table_data.schema.clone();
+        let schema = table_data.schema().clone();
 
         let column_indices: Vec<usize> = if insert.columns.is_empty() {
             (0..schema.field_count()).collect()
@@ -1736,7 +1725,7 @@ impl QueryExecutor {
                     }
 
                     let table_data = self.catalog.get_table_mut(&table_name).unwrap();
-                    table_data.rows.push(Record::from_values(row_values));
+                    table_data.push_row(row_values)?;
                 }
             }
             SetExpr::Select(select) => {
@@ -1756,7 +1745,7 @@ impl QueryExecutor {
                     for (val_idx, &col_idx) in column_indices.iter().enumerate() {
                         row_values[col_idx] = values[val_idx].clone();
                     }
-                    table_data.rows.push(Record::from_values(row_values));
+                    table_data.push_row(row_values)?;
                 }
             }
             _ => {
@@ -1781,7 +1770,7 @@ impl QueryExecutor {
             .get_table_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
-        let schema = table_data.schema.clone();
+        let schema = table_data.schema().clone();
         let evaluator = Evaluator::new(&schema);
 
         let assignment_indices: Vec<(usize, &Expr)> = assignments
@@ -1804,19 +1793,21 @@ impl QueryExecutor {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        for row in &mut table_data.rows {
+        let num_rows = table_data.row_count();
+        for row_idx in 0..num_rows {
+            let row = table_data.get_row(row_idx)?;
             let should_update = match selection {
-                Some(sel) => evaluator.evaluate_to_bool(sel, row)?,
+                Some(sel) => evaluator.evaluate_to_bool(sel, &row)?,
                 None => true,
             };
 
             if should_update {
                 let mut values = row.values().to_vec();
                 for (col_idx, expr) in &assignment_indices {
-                    let new_val = evaluator.evaluate(expr, row)?;
+                    let new_val = evaluator.evaluate(expr, &row)?;
                     values[*col_idx] = new_val;
                 }
-                *row = Record::from_values(values);
+                table_data.update_row(row_idx, values)?;
             }
         }
 
@@ -1830,17 +1821,25 @@ impl QueryExecutor {
             .get_table_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
-        let schema = table_data.schema.clone();
+        let schema = table_data.schema().clone();
         let evaluator = Evaluator::new(&schema);
 
         match &delete.selection {
             Some(selection) => {
-                table_data
-                    .rows
-                    .retain(|row| !evaluator.evaluate_to_bool(selection, row).unwrap_or(false));
+                let num_rows = table_data.row_count();
+                let mut indices_to_delete = Vec::new();
+                for row_idx in 0..num_rows {
+                    let row = table_data.get_row(row_idx)?;
+                    if evaluator.evaluate_to_bool(selection, &row).unwrap_or(false) {
+                        indices_to_delete.push(row_idx);
+                    }
+                }
+                for idx in indices_to_delete.into_iter().rev() {
+                    table_data.remove_row(idx);
+                }
             }
             None => {
-                table_data.rows.clear();
+                table_data.clear();
             }
         }
 
@@ -1851,7 +1850,7 @@ impl QueryExecutor {
         for target in table_names {
             let table_name = target.name.to_string();
             if let Some(table_data) = self.catalog.get_table_mut(&table_name) {
-                table_data.rows.clear();
+                table_data.clear();
             } else {
                 return Err(Error::TableNotFound(table_name));
             }
@@ -1875,56 +1874,30 @@ impl QueryExecutor {
                         .get_table_mut(&table_name)
                         .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
-                    table_data
-                        .schema
-                        .add_field(Field::nullable(col_name, data_type));
-
-                    for row in &mut table_data.rows {
-                        row.push(Value::null());
-                    }
+                    let field = Field::nullable(col_name, data_type);
+                    TableSchemaOps::add_column(table_data, field, None)?;
                 }
                 ast::AlterTableOperation::DropColumn { column_names, .. } => {
                     let column_name = column_names.first().ok_or_else(|| {
                         Error::InvalidQuery("DROP COLUMN requires a column name".to_string())
                     })?;
-                    let col_name = column_name.value.to_uppercase();
                     let table_data = self
                         .catalog
                         .get_table_mut(&table_name)
                         .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
-                    let idx = table_data
-                        .schema
-                        .fields()
-                        .iter()
-                        .position(|f| f.name.to_uppercase() == col_name)
-                        .ok_or_else(|| Error::ColumnNotFound(column_name.value.clone()))?;
-
-                    table_data.schema.remove_field(idx);
-                    for row in &mut table_data.rows {
-                        row.remove(idx);
-                    }
+                    table_data.drop_column(&column_name.value)?;
                 }
                 ast::AlterTableOperation::RenameColumn {
                     old_column_name,
                     new_column_name,
                 } => {
-                    let old_name = old_column_name.value.to_uppercase();
                     let table_data = self
                         .catalog
                         .get_table_mut(&table_name)
                         .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
 
-                    let idx = table_data
-                        .schema
-                        .fields()
-                        .iter()
-                        .position(|f| f.name.to_uppercase() == old_name)
-                        .ok_or_else(|| Error::ColumnNotFound(old_column_name.value.clone()))?;
-
-                    table_data
-                        .schema
-                        .rename_field(idx, new_column_name.value.clone());
+                    table_data.rename_column(&old_column_name.value, &new_column_name.value)?;
                 }
                 ast::AlterTableOperation::RenameTable {
                     table_name: new_name,

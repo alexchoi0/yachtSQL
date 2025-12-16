@@ -12,10 +12,8 @@ use sqlparser::dialect::{BigQueryDialect, Dialect, GenericDialect};
 use sqlparser::parser::Parser as SqlParser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 use types::JsonValueRewriteResult;
-pub use types::{
-    DialectType, JSON_VALUE_OPTIONS_PREFIX, JsonValueRewriteOptions, StandardStatement, Statement,
-};
-use yachtsql_core::error::{Error, Result};
+pub use types::{JSON_VALUE_OPTIONS_PREFIX, JsonValueRewriteOptions, StandardStatement, Statement};
+use yachtsql_common::error::{Error, Result};
 
 use crate::sql_context::SqlWalker;
 use crate::validator::StatementValidator;
@@ -28,27 +26,13 @@ lazy_static! {
 
 pub struct Parser {
     dialect: Box<dyn Dialect>,
-    dialect_type: DialectType,
 }
 
 impl Parser {
     pub fn new() -> Self {
-        Self::with_dialect(DialectType::BigQuery)
-    }
-
-    pub fn with_dialect(dialect_type: DialectType) -> Self {
-        let dialect: Box<dyn Dialect> = match dialect_type {
-            DialectType::BigQuery => Box::new(BigQueryDialect),
-        };
-
         Self {
-            dialect,
-            dialect_type,
+            dialect: Box::new(BigQueryDialect),
         }
-    }
-
-    pub fn dialect_type(&self) -> DialectType {
-        self.dialect_type
     }
 
     pub fn parse_sql(&self, sql: &str) -> Result<Vec<Statement>> {
@@ -133,7 +117,7 @@ impl Parser {
     }
 
     fn validate_statements(&self, statements: &[Statement]) -> Result<()> {
-        let validator = StatementValidator::new(self.dialect_type);
+        let validator = StatementValidator::new();
 
         for stmt in statements {
             match stmt {
@@ -217,19 +201,6 @@ impl Parser {
         if self.is_exists_database(&meaningful_tokens)
             && let Some(custom_stmt) =
                 CustomStatementParser::parse_exists_database(&meaningful_tokens)?
-        {
-            return Ok(Some(Statement::Custom(custom_stmt)));
-        }
-
-        if self.is_abort(&meaningful_tokens)
-            && let Some(custom_stmt) = CustomStatementParser::parse_abort(&meaningful_tokens)?
-        {
-            return Ok(Some(Statement::Custom(custom_stmt)));
-        }
-
-        if self.is_begin(&meaningful_tokens)
-            && let Some(custom_stmt) =
-                CustomStatementParser::parse_begin_transaction_with_deferrable(&meaningful_tokens)?
         {
             return Ok(Some(Statement::Custom(custom_stmt)));
         }
@@ -387,14 +358,6 @@ impl Parser {
 
     fn is_exists_database(&self, tokens: &[&Token]) -> bool {
         self.matches_keyword_sequence(tokens, &["EXISTS", "DATABASE"])
-    }
-
-    fn is_abort(&self, tokens: &[&Token]) -> bool {
-        self.matches_keyword_sequence(tokens, &["ABORT"])
-    }
-
-    fn is_begin(&self, tokens: &[&Token]) -> bool {
-        self.matches_keyword_sequence(tokens, &["BEGIN"])
     }
 
     fn is_create_snapshot_table(&self, tokens: &[&Token]) -> bool {
