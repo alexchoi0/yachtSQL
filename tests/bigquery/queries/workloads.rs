@@ -369,7 +369,6 @@ fn test_customer_segmentation() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_conversion_funnel() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -715,7 +714,6 @@ fn test_order_size_distribution() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_cross_sell_opportunities() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
