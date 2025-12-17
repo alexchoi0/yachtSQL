@@ -81,7 +81,6 @@ fn test_numeric_division() {
 }
 
 #[test]
-#[ignore = "Re-enable after sccache update"]
 fn test_numeric_sum() {
     let mut executor = create_executor();
     executor
@@ -164,7 +163,6 @@ fn test_numeric_cast_from_string() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_numeric_round() {
     let mut executor = create_executor();
     let result = executor
@@ -174,7 +172,6 @@ fn test_numeric_round() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_numeric_trunc() {
     let mut executor = create_executor();
     let result = executor
@@ -243,7 +240,6 @@ fn test_numeric_group_by() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_numeric_precision_preservation() {
     let mut executor = create_executor();
     let result = executor
