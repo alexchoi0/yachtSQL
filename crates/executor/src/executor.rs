@@ -3891,6 +3891,7 @@ impl QueryExecutor {
                     || self.expr_has_aggregate(low)
                     || self.expr_has_aggregate(high)
             }
+            Expr::CompoundFieldAccess { root, .. } => self.expr_has_aggregate(root),
             _ => false,
         }
     }
@@ -5190,6 +5191,24 @@ impl QueryExecutor {
                 )?;
                 evaluator.cast_value(&val, data_type, false)
             }
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                let root_val = self.evaluate_aggregate_expr(
+                    root,
+                    input_schema,
+                    group_rows,
+                    group_key,
+                    group_by,
+                )?;
+                if let Some(row) = group_rows.first() {
+                    evaluator.apply_access_chain(root_val, access_chain, row)
+                } else {
+                    evaluator.apply_access_chain(
+                        root_val,
+                        access_chain,
+                        &Record::from_values(vec![]),
+                    )
+                }
+            }
             _ => {
                 if let Some(row) = group_rows.first() {
                     evaluator.evaluate(expr, row)
@@ -5504,6 +5523,26 @@ impl QueryExecutor {
                 )?;
                 evaluator.evaluate_between_values(&expr_val, &low_val, &high_val, *negated)
             }
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                let root_val = self.evaluate_aggregate_expr_with_grouping_ctes(
+                    root,
+                    input_schema,
+                    group_rows,
+                    group_key,
+                    group_exprs,
+                    active_indices,
+                    cte_tables,
+                )?;
+                if let Some(row) = group_rows.first() {
+                    evaluator.apply_access_chain(root_val, access_chain, row)
+                } else {
+                    evaluator.apply_access_chain(
+                        root_val,
+                        access_chain,
+                        &Record::from_values(vec![]),
+                    )
+                }
+            }
             _ => {
                 if let Some(row) = group_rows.first() {
                     evaluator.evaluate(expr, row)
@@ -5798,9 +5837,61 @@ impl QueryExecutor {
                 let expr = arg_expr.ok_or_else(|| {
                     Error::InvalidQuery("ARRAY_AGG requires an argument".to_string())
                 })?;
-                let mut values = Vec::new();
 
-                for row in group_rows {
+                let mut order_by_exprs: Vec<&ast::OrderByExpr> = Vec::new();
+                let mut limit_value: Option<u64> = None;
+
+                if let ast::FunctionArguments::List(arg_list) = &func.args {
+                    for clause in &arg_list.clauses {
+                        match clause {
+                            ast::FunctionArgumentClause::OrderBy(order_by_vec) => {
+                                order_by_exprs.extend(order_by_vec.iter());
+                            }
+                            ast::FunctionArgumentClause::Limit(limit_expr) => {
+                                if let Some(row) = group_rows.first() {
+                                    if let Ok(val) = evaluator.evaluate(limit_expr, row) {
+                                        limit_value = val.as_i64().map(|i| i as u64);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                let rows_to_process: Vec<&Record> = if order_by_exprs.is_empty() {
+                    group_rows.to_vec()
+                } else {
+                    let mut row_indices: Vec<(usize, &Record)> =
+                        group_rows.iter().copied().enumerate().collect();
+
+                    row_indices.sort_by(|a, b| {
+                        for ob in &order_by_exprs {
+                            let val_a = evaluator.evaluate(&ob.expr, a.1).ok();
+                            let val_b = evaluator.evaluate(&ob.expr, b.1).ok();
+
+                            let cmp = match (val_a, val_b) {
+                                (Some(va), Some(vb)) => va.cmp(&vb),
+                                (None, None) => std::cmp::Ordering::Equal,
+                                (None, Some(_)) => std::cmp::Ordering::Greater,
+                                (Some(_), None) => std::cmp::Ordering::Less,
+                            };
+
+                            if cmp != std::cmp::Ordering::Equal {
+                                let is_desc = ob.options.asc == Some(false);
+                                return if is_desc { cmp.reverse() } else { cmp };
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+
+                    row_indices.into_iter().map(|(_, r)| r).collect()
+                };
+
+                let mut values = Vec::new();
+                let limit = limit_value.unwrap_or(rows_to_process.len() as u64) as usize;
+
+                for row in rows_to_process.into_iter().take(limit) {
                     let val = evaluator.evaluate(&expr, row)?;
                     values.push(val);
                 }

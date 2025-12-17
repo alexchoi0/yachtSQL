@@ -434,3 +434,37 @@ fn test_map_values() {
         .unwrap();
     assert_table_eq!(result, [[[1, 2]]]);
 }
+
+#[test]
+fn test_array_agg_with_subscript() {
+    let mut executor = create_executor();
+    executor
+        .execute_sql("CREATE TABLE items_agg (id INT64, tag STRING)")
+        .unwrap();
+    executor
+        .execute_sql("INSERT INTO items_agg VALUES (1, 'a'), (1, 'b'), (2, 'c')")
+        .unwrap();
+    let result = executor
+        .execute_sql(
+            "SELECT id, ARRAY_AGG(tag)[OFFSET(0)] AS first_tag FROM items_agg GROUP BY id ORDER BY id",
+        )
+        .unwrap();
+    assert_table_eq!(result, [[1, "a"], [2, "c"]]);
+}
+
+#[test]
+fn test_array_agg_with_order_by_and_limit() {
+    let mut executor = create_executor();
+    executor
+        .execute_sql("CREATE TABLE items_agg2 (id INT64, tag STRING, score INT64)")
+        .unwrap();
+    executor
+        .execute_sql("INSERT INTO items_agg2 VALUES (1, 'a', 10), (1, 'b', 20), (2, 'c', 30)")
+        .unwrap();
+    let result = executor
+        .execute_sql(
+            "SELECT id, ARRAY_AGG(tag ORDER BY score DESC LIMIT 1)[OFFSET(0)] AS top_tag FROM items_agg2 GROUP BY id ORDER BY id",
+        )
+        .unwrap();
+    assert_table_eq!(result, [[1, "b"], [2, "c"]]);
+}
