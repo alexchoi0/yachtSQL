@@ -3345,53 +3345,6 @@ impl QueryExecutor {
         }
     }
 
-    fn has_array_join(&self, projection: &[SelectItem]) -> bool {
-        for item in projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    if self.expr_has_array_join(expr) {
-                        return true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
-    fn expr_has_array_join(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Function(func) => {
-                let name = func.name.to_string().to_uppercase();
-                name == "ARRAYJOIN"
-            }
-            Expr::BinaryOp { left, right, .. } => {
-                self.expr_has_array_join(left) || self.expr_has_array_join(right)
-            }
-            Expr::UnaryOp { expr, .. } => self.expr_has_array_join(expr),
-            Expr::Nested(inner) => self.expr_has_array_join(inner),
-            _ => false,
-        }
-    }
-
-    fn find_array_join_expr<'a>(&self, expr: &'a Expr) -> Option<&'a Expr> {
-        match expr {
-            Expr::Function(func) => {
-                let name = func.name.to_string().to_uppercase();
-                if name == "ARRAYJOIN" {
-                    return Some(expr);
-                }
-                None
-            }
-            Expr::BinaryOp { left, right, .. } => self
-                .find_array_join_expr(left)
-                .or_else(|| self.find_array_join_expr(right)),
-            Expr::UnaryOp { expr, .. } => self.find_array_join_expr(expr),
-            Expr::Nested(inner) => self.find_array_join_expr(inner),
-            _ => None,
-        }
-    }
-
     fn execute_aggregate_query_with_ctes(
         &self,
         input_schema: &Schema,
@@ -5721,10 +5674,6 @@ impl QueryExecutor {
     ) -> Result<(Schema, Vec<Record>)> {
         let resolved_projection = self.resolve_projection_subqueries(projection)?;
 
-        if self.has_array_join(&resolved_projection) {
-            return self.project_rows_with_array_join(input_schema, rows, &resolved_projection);
-        }
-
         let evaluator = Evaluator::with_user_functions(input_schema, self.catalog.get_functions());
         let sample_record = rows.first().cloned().unwrap_or_else(|| {
             Record::from_values(vec![Value::null(); input_schema.field_count()])
@@ -5882,147 +5831,6 @@ impl QueryExecutor {
                 other => Ok(other.clone()),
             })
             .collect()
-    }
-
-    fn project_rows_with_array_join(
-        &self,
-        input_schema: &Schema,
-        rows: &[Record],
-        projection: &[SelectItem],
-    ) -> Result<(Schema, Vec<Record>)> {
-        let evaluator = Evaluator::new(input_schema);
-
-        let mut array_join_col_idx: Option<usize> = None;
-        let mut all_cols: Vec<(String, DataType)> = Vec::new();
-
-        for (idx, item) in projection.iter().enumerate() {
-            match item {
-                SelectItem::Wildcard(opts) => {
-                    let except_cols = Self::get_except_columns(opts);
-                    for field in input_schema.fields() {
-                        if !except_cols.contains(&field.name.to_lowercase()) {
-                            all_cols.push((field.name.clone(), field.data_type.clone()));
-                        }
-                    }
-                }
-                SelectItem::QualifiedWildcard(name, opts) => {
-                    let table_name = name.to_string();
-                    let except_cols = Self::get_except_columns(opts);
-                    for field in input_schema.fields() {
-                        let matches_table = field
-                            .source_table
-                            .as_ref()
-                            .is_some_and(|t| t.eq_ignore_ascii_case(&table_name));
-                        if matches_table && !except_cols.contains(&field.name.to_lowercase()) {
-                            all_cols.push((field.name.clone(), field.data_type.clone()));
-                        }
-                    }
-                }
-                SelectItem::UnnamedExpr(expr) => {
-                    let sample_record = rows.first().cloned().unwrap_or_else(|| {
-                        Record::from_values(vec![Value::null(); input_schema.field_count()])
-                    });
-                    let val = evaluator
-                        .evaluate(expr, &sample_record)
-                        .unwrap_or(Value::null());
-                    let name = self.expr_to_alias(expr, idx);
-                    if self.expr_has_array_join(expr) {
-                        array_join_col_idx = Some(all_cols.len());
-                        let inner_type = match val.data_type() {
-                            DataType::Array(inner) => (*inner).clone(),
-                            _ => val.data_type(),
-                        };
-                        all_cols.push((name, inner_type));
-                    } else {
-                        all_cols.push((name, val.data_type()));
-                    }
-                }
-                SelectItem::ExprWithAlias { expr, alias } => {
-                    let sample_record = rows.first().cloned().unwrap_or_else(|| {
-                        Record::from_values(vec![Value::null(); input_schema.field_count()])
-                    });
-                    let val = evaluator
-                        .evaluate(expr, &sample_record)
-                        .unwrap_or(Value::null());
-                    if self.expr_has_array_join(expr) {
-                        array_join_col_idx = Some(all_cols.len());
-                        let inner_type = match val.data_type() {
-                            DataType::Array(inner) => (*inner).clone(),
-                            _ => val.data_type(),
-                        };
-                        all_cols.push((alias.value.clone(), inner_type));
-                    } else {
-                        all_cols.push((alias.value.clone(), val.data_type()));
-                    }
-                }
-            }
-        }
-
-        let fields: Vec<Field> = all_cols
-            .iter()
-            .map(|(name, dt)| Field::nullable(name.clone(), dt.clone()))
-            .collect();
-        let output_schema = Schema::from_fields(fields);
-
-        let mut output_rows = Vec::new();
-        for row in rows {
-            let mut base_values: Vec<Value> = Vec::new();
-            let mut array_values: Vec<Value> = Vec::new();
-
-            for item in projection {
-                match item {
-                    SelectItem::Wildcard(opts) => {
-                        let except_cols = Self::get_except_columns(opts);
-                        for (i, field) in input_schema.fields().iter().enumerate() {
-                            if !except_cols.contains(&field.name.to_lowercase()) {
-                                base_values.push(row.values()[i].clone());
-                            }
-                        }
-                    }
-                    SelectItem::QualifiedWildcard(name, opts) => {
-                        let table_name = name.to_string();
-                        let except_cols = Self::get_except_columns(opts);
-                        for (i, field) in input_schema.fields().iter().enumerate() {
-                            let matches_table = field
-                                .source_table
-                                .as_ref()
-                                .is_some_and(|t| t.eq_ignore_ascii_case(&table_name));
-                            if matches_table && !except_cols.contains(&field.name.to_lowercase()) {
-                                base_values.push(row.values()[i].clone());
-                            }
-                        }
-                    }
-                    SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                        let val = evaluator.evaluate(expr, row)?;
-                        if self.expr_has_array_join(expr) {
-                            if let Some(arr) = val.as_array() {
-                                array_values = arr.to_vec();
-                            } else {
-                                array_values = vec![val];
-                            }
-                            base_values.push(Value::null());
-                        } else {
-                            base_values.push(val);
-                        }
-                    }
-                }
-            }
-
-            if let Some(arr_idx) = array_join_col_idx {
-                if array_values.is_empty() {
-                    continue;
-                }
-                for arr_val in array_values {
-                    let mut new_values = base_values.clone();
-                    new_values[arr_idx] = arr_val;
-                    output_rows.push(Record::from_values(new_values));
-                }
-            } else {
-                output_rows.push(Record::from_values(base_values));
-            }
-        }
-
-        Ok((output_schema, output_rows))
     }
 
     fn sort_rows(&self, schema: &Schema, rows: &mut Vec<Record>, order_by: &OrderBy) -> Result<()> {
@@ -9237,18 +9045,6 @@ impl QueryExecutor {
                     results.push(Value::float64(cume));
                 }
             }
-            "RUNNINGACCUMULATE" => {
-                let mut running_sum: i64 = 0;
-                for &idx in sorted_indices {
-                    let val = self.extract_running_accumulate_value(func, evaluator, &rows[idx])?;
-                    if let Some(n) = val.as_i64() {
-                        running_sum += n;
-                    } else if let Some(f) = val.as_f64() {
-                        running_sum += f as i64;
-                    }
-                    results.push(Value::int64(running_sum));
-                }
-            }
             _ => {
                 for _ in 0..partition_size {
                     results.push(Value::null());
@@ -9338,37 +9134,6 @@ impl QueryExecutor {
             }
         }
         Ok(None)
-    }
-
-    fn extract_running_accumulate_value(
-        &self,
-        func: &ast::Function,
-        evaluator: &Evaluator,
-        row: &Record,
-    ) -> Result<Value> {
-        if let ast::FunctionArguments::List(arg_list) = &func.args {
-            if let Some(arg) = arg_list.args.first() {
-                if let ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr)) = arg {
-                    if let Expr::Function(inner_func) = expr {
-                        let inner_name = inner_func.name.to_string().to_uppercase();
-                        if inner_name == "SUMSTATE" {
-                            if let ast::FunctionArguments::List(inner_args) = &inner_func.args {
-                                if let Some(inner_arg) = inner_args.args.first() {
-                                    if let ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
-                                        inner_expr,
-                                    )) = inner_arg
-                                    {
-                                        return evaluator.evaluate(inner_expr, row);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    return evaluator.evaluate(expr, row);
-                }
-            }
-        }
-        Ok(Value::null())
     }
 
     fn extract_numeric_offset(&self, expr: &Expr) -> Option<usize> {
