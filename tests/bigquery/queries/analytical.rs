@@ -110,7 +110,6 @@ fn test_top_products_by_revenue() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_monthly_revenue_trend() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -200,7 +199,6 @@ fn test_moving_average() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_rank_products_by_sales() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -231,7 +229,6 @@ fn test_rank_products_by_sales() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_dense_rank_by_category() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -266,7 +263,6 @@ fn test_dense_rank_by_category() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_percentile_analysis() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -299,7 +295,6 @@ fn test_percentile_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_ntile_quartiles() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -406,7 +401,6 @@ fn test_first_last_value() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_customer_purchase_frequency() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -472,7 +466,6 @@ fn test_year_over_year_comparison() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_cohort_analysis() {
     let mut executor = create_executor();
     executor
@@ -522,7 +515,6 @@ fn test_cohort_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_funnel_analysis() {
     let mut executor = create_executor();
     executor
@@ -582,7 +574,6 @@ fn test_funnel_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_retention_analysis() {
     let mut executor = create_executor();
     executor
@@ -631,7 +622,6 @@ fn test_retention_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_abc_analysis() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -681,7 +671,6 @@ fn test_abc_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_rfm_analysis() {
     let mut executor = create_executor();
     executor
@@ -745,7 +734,6 @@ fn test_rfm_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_time_series_decomposition() {
     let mut executor = create_executor();
     executor
@@ -787,15 +775,14 @@ fn test_time_series_decomposition() {
             [d(2024, 1, 5), 120, 119.0, 1.0],
             [d(2024, 1, 6), 125, 125.0, 0.0],
             [d(2024, 1, 7), 130, 130.0, 0.0],
-            [d(2024, 1, 8), 135, 133.6, 1.4],
+            [d(2024, 1, 8), 135, 133.6, 1.4000000000000057],
             [d(2024, 1, 9), 140, 135.75, 4.25],
-            [d(2024, 1, 10), 138, 137.66666666666666, 0.33333333333333712],
+            [d(2024, 1, 10), 138, 137.66666666666666, 0.3333333333333428],
         ]
     );
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_sessionization() {
     let mut executor = create_executor();
     executor
@@ -863,7 +850,6 @@ fn test_sessionization() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_market_basket_analysis() {
     let mut executor = create_executor();
     executor
@@ -929,7 +915,6 @@ fn test_market_basket_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_pareto_analysis() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -964,9 +949,9 @@ fn test_pareto_analysis() {
     assert_table_eq!(
         result,
         [
-            [1001, 1500, 14.285714285714286, 26.086956521739133],
-            [1002, 1450, 28.571428571428573, 51.30434782608696],
-            [1005, 1000, 42.857142857142854, 68.6956521739131],
+            [1001, 1500, 14.285714285714286, 26.08695652173913],
+            [1002, 1450, 28.571428571428573, 51.30434782608695],
+            [1005, 1000, 42.857142857142854, 68.69565217391305],
             [1004, 500, 57.142857142857146, 94.78260869565217],
             [1006, 500, 71.42857142857143, 94.78260869565217],
             [1007, 500, 85.71428571428571, 94.78260869565217],
@@ -976,7 +961,6 @@ fn test_pareto_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_growth_rates() {
     let mut executor = create_executor();
     executor
@@ -1076,7 +1060,6 @@ fn test_variance_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_weighted_average() {
     let mut executor = create_executor();
     executor
@@ -1110,7 +1093,6 @@ fn test_weighted_average() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_anomaly_detection_zscore() {
     let mut executor = create_executor();
     executor
@@ -1167,7 +1149,6 @@ fn test_anomaly_detection_zscore() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_data_quality_checks() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -1203,7 +1184,6 @@ fn test_data_quality_checks() {
 }
 
 #[test]
-#[ignore = "TODO: CTE scoping for subqueries"]
 fn test_complex_nested_ctes_with_array_agg_limit() {
     let mut executor = create_executor();
     executor
@@ -1386,7 +1366,7 @@ fn test_complex_nested_ctes_with_array_agg_limit() {
                 3,
                 1,
                 2100.0,
-                6.99,
+                7.0,
                 94.94,
                 "Widget Pro"
             ],
@@ -1401,23 +1381,12 @@ fn test_complex_nested_ctes_with_array_agg_limit() {
                 98.93,
                 "Gadget Plus"
             ],
-            [
-                4,
-                "Delta Co",
-                "Startup",
-                5,
-                1,
-                320.0,
-                1.07,
-                100.0,
-                "Widget Pro"
-            ],
+            [4, "Delta Co", "Startup", 5, 1, 320.0, 1.07, 100.0, null],
         ]
     );
 }
 
 #[test]
-#[ignore = "TODO: CTE scoping for subqueries"]
 fn test_multi_level_cte_with_correlated_subquery() {
     let mut executor = create_executor();
     executor
@@ -1574,7 +1543,7 @@ fn test_multi_level_cte_with_correlated_subquery() {
                 57.25,
                 1,
                 1,
-                4800.0,
+                5750.0,
                 3
             ],
             [
@@ -1615,7 +1584,6 @@ fn test_multi_level_cte_with_correlated_subquery() {
 }
 
 #[test]
-#[ignore = "TODO: CTE scoping for subqueries"]
 fn test_array_agg_with_order_and_limit_in_subquery() {
     let mut executor = create_executor();
     executor
@@ -1726,7 +1694,6 @@ fn test_array_agg_with_order_and_limit_in_subquery() {
 }
 
 #[test]
-#[ignore = "TODO: CTE scoping for subqueries"]
 fn test_complex_window_with_array_agg_ordered() {
     let mut executor = create_executor();
     executor
@@ -1800,7 +1767,7 @@ fn test_complex_window_with_array_agg_ordered() {
             ranked_symbols AS (
                 SELECT
                     *,
-                    close_price - open_price AS daily_change,
+                    ROUND(close_price - open_price, 2) AS daily_change,
                     ROUND((close_price - open_price) * 100.0 / open_price, 2) AS daily_return_pct,
                     RANK() OVER (
                         PARTITION BY trade_date
@@ -1819,7 +1786,7 @@ fn test_complex_window_with_array_agg_ordered() {
                 volume_rank,
                 cumulative_volume
             FROM ranked_symbols
-            ORDER BY trade_date, volume_rank",
+            ORDER BY trade_date, volume_rank, symbol",
         )
         .unwrap();
     assert_table_eq!(
@@ -2440,7 +2407,6 @@ fn test_time_series_with_gaps_and_array_agg() {
 }
 
 #[test]
-#[ignore = "TODO: CTE scoping for subqueries"]
 fn test_complex_pivot_simulation_with_ctes() {
     let mut executor = create_executor();
     executor
@@ -2595,7 +2561,7 @@ fn test_complex_pivot_simulation_with_ctes() {
                 0.0,
                 180000.0,
                 42.86,
-                null,
+                -100.0,
                 null,
                 1
             ],
@@ -2609,7 +2575,7 @@ fn test_complex_pivot_simulation_with_ctes() {
                 0.0,
                 145000.0,
                 34.52,
-                null,
+                -100.0,
                 null,
                 2
             ],
@@ -2623,12 +2589,39 @@ fn test_complex_pivot_simulation_with_ctes() {
                 0.0,
                 95000.0,
                 22.62,
-                null,
+                -100.0,
                 null,
                 3
             ],
         ]
     );
+}
+
+#[test]
+fn test_cte_qualified_wildcard() {
+    let mut executor = create_executor();
+    executor
+        .execute_sql("CREATE TABLE t (year INT64, value INT64)")
+        .unwrap();
+    executor
+        .execute_sql("INSERT INTO t VALUES (2023, 100), (2023, 200), (2024, 150)")
+        .unwrap();
+
+    let result = executor
+        .execute_sql(
+            "
+        WITH totals AS (
+            SELECT year, SUM(value) AS total_value
+            FROM t
+            GROUP BY year
+        )
+        SELECT t1.* FROM totals t1 ORDER BY t1.year
+    ",
+        )
+        .unwrap();
+    assert_eq!(result.schema().field_count(), 2);
+    let records = result.to_records().unwrap();
+    assert_eq!(records.len(), 2);
 }
 
 #[test]

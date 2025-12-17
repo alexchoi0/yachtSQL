@@ -103,7 +103,6 @@ fn test_limit_larger_than_result() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_offset_larger_than_result() {
     let mut executor = create_executor();
     setup_table(&mut executor);
@@ -134,7 +133,6 @@ fn test_order_by_with_null_values() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_order_by_expression() {
     let mut executor = create_executor();
     setup_table(&mut executor);
