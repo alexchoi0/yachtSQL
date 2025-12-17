@@ -4,4 +4,3 @@
 #[macro_use]
 mod common;
 mod functions;
-mod queries;
