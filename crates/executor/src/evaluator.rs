@@ -1220,6 +1220,52 @@ impl<'a> Evaluator<'a> {
         Ok(current)
     }
 
+    pub fn apply_access_chain(
+        &self,
+        mut current: Value,
+        access_chain: &[sqlparser::ast::AccessExpr],
+        record: &Record,
+    ) -> Result<Value> {
+        for access in access_chain {
+            match access {
+                sqlparser::ast::AccessExpr::Subscript(subscript) => {
+                    current = self.apply_subscript(current, subscript, record)?;
+                }
+                sqlparser::ast::AccessExpr::Dot(field_expr) => match field_expr {
+                    Expr::Identifier(ident) => {
+                        if let Some(struct_val) = current.as_struct() {
+                            let field_name = ident.value.to_uppercase();
+                            current = struct_val
+                                .iter()
+                                .find(|(name, _)| name.to_uppercase() == field_name)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or_else(Value::null);
+                        } else if let Some(json_val) = current.as_json() {
+                            let field_name = &ident.value;
+                            match json_val {
+                                serde_json::Value::Object(obj) => {
+                                    let found = obj.get(field_name).cloned();
+                                    current = found.map(Value::json).unwrap_or_else(Value::null);
+                                }
+                                _ => {
+                                    return Ok(Value::null());
+                                }
+                            }
+                        } else {
+                            return Ok(Value::null());
+                        }
+                    }
+                    _ => {
+                        return Err(Error::UnsupportedFeature(
+                            "Non-identifier field access".to_string(),
+                        ));
+                    }
+                },
+            }
+        }
+        Ok(current)
+    }
+
     fn apply_subscript(
         &self,
         base_val: Value,
