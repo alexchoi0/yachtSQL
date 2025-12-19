@@ -74,7 +74,20 @@ impl<'a> IrEvaluator<'a> {
                 .parse::<i64>()
                 .map(Value::Int64)
                 .map_err(|_| Error::InvalidQuery(format!("Cannot cast '{}' to INT64", s))),
-            (Value::Float64(f), DataType::Int64) => Ok(Value::Int64(f.0 as i64)),
+            (Value::Float64(f), DataType::Int64) => {
+                if f.0.is_nan()
+                    || f.0.is_infinite()
+                    || f.0 > i64::MAX as f64
+                    || f.0 < i64::MIN as f64
+                {
+                    Err(Error::InvalidQuery(format!(
+                        "Cannot cast {} to INT64: value out of range",
+                        f.0
+                    )))
+                } else {
+                    Ok(Value::Int64(f.0 as i64))
+                }
+            }
             (Value::Int64(n), DataType::Float64) => Ok(Value::Float64(OrderedFloat(*n as f64))),
             (Value::String(s), DataType::Float64) => s
                 .parse::<f64>()
@@ -645,7 +658,20 @@ impl<'a> IrEvaluator<'a> {
                 .parse::<i64>()
                 .map(Value::Int64)
                 .map_err(|_| Error::InvalidQuery(format!("Cannot cast '{}' to INT64", s))),
-            (Value::Float64(f), DataType::Int64) => Ok(Value::Int64(f.0 as i64)),
+            (Value::Float64(f), DataType::Int64) => {
+                if f.0.is_nan()
+                    || f.0.is_infinite()
+                    || f.0 > i64::MAX as f64
+                    || f.0 < i64::MIN as f64
+                {
+                    Err(Error::InvalidQuery(format!(
+                        "Cannot cast {} to INT64: value out of range",
+                        f.0
+                    )))
+                } else {
+                    Ok(Value::Int64(f.0 as i64))
+                }
+            }
             (Value::Bool(b), DataType::Int64) => Ok(Value::Int64(if b { 1 } else { 0 })),
             (Value::Numeric(n), DataType::Int64) => n
                 .to_i64()
@@ -4468,6 +4494,7 @@ impl<'a> IrEvaluator<'a> {
             "NULLIFZERO" => self.fn_nullifzero(args),
             "REGEXP_SUBSTR" => self.fn_regexp_substr(args),
             "ARRAY_SLICE" => self.fn_array_slice(args),
+            "ARRAYENUMERATE" => self.fn_array_enumerate(args),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Scalar function Custom(\"{}\") not yet implemented in IR evaluator",
                 name
@@ -5926,9 +5953,7 @@ impl<'a> IrEvaluator<'a> {
         let json_val = match &args[0] {
             Value::Null => return Ok(Value::Null),
             Value::Json(j) => j.clone(),
-            Value::String(s) => {
-                serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
-            }
+            Value::String(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
             _ => return Ok(Value::Null),
         };
         let path = match &args[1] {
@@ -5975,9 +6000,7 @@ impl<'a> IrEvaluator<'a> {
         let json_val = match &args[0] {
             Value::Null => return Ok(Value::Null),
             Value::Json(j) => j.clone(),
-            Value::String(s) => {
-                serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
-            }
+            Value::String(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
             _ => return Ok(Value::Null),
         };
         let path = match &args[1] {
@@ -6243,10 +6266,8 @@ impl<'a> IrEvaluator<'a> {
                     Ok(p) => p,
                     Err(_) => return Ok(Value::Bool(false)),
                 };
-                let network_octets: Vec<u8> = parts[0]
-                    .split('.')
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
+                let network_octets: Vec<u8> =
+                    parts[0].split('.').filter_map(|s| s.parse().ok()).collect();
                 if network_octets.len() != 4 || ip_bytes.len() != 4 {
                     return Ok(Value::Bool(false));
                 }
@@ -6515,6 +6536,60 @@ impl<'a> IrEvaluator<'a> {
         }
         match (&args[0], &args[1]) {
             (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+            (Value::Range(range), Value::Interval(interval)) => {
+                use yachtsql_common::types::RangeValue;
+                let mut results = vec![];
+                let start = range.start.as_deref();
+                let end = range.end.as_deref();
+                match (start, end) {
+                    (Some(Value::Date(start_date)), Some(Value::Date(end_date))) => {
+                        let mut current = *start_date;
+                        while current < *end_date {
+                            let mut next = current;
+                            if interval.days != 0 {
+                                next = next + chrono::Duration::days(interval.days as i64);
+                            }
+                            if interval.months != 0 {
+                                let year = next.year();
+                                let month = next.month() as i32 + interval.months;
+                                let new_year = year + (month - 1) / 12;
+                                let new_month = ((month - 1) % 12 + 12) % 12 + 1;
+                                next = NaiveDate::from_ymd_opt(
+                                    new_year,
+                                    new_month as u32,
+                                    next.day().min(28),
+                                )
+                                .unwrap_or(next);
+                            }
+                            let range_end = if next > *end_date { *end_date } else { next };
+                            results.push(Value::Range(RangeValue {
+                                start: Some(Box::new(Value::Date(current))),
+                                end: Some(Box::new(Value::Date(range_end))),
+                            }));
+                            current = next;
+                        }
+                    }
+                    (Some(Value::Int64(start_val)), Some(Value::Int64(end_val))) => {
+                        let step = if interval.days != 0 {
+                            interval.days as i64
+                        } else {
+                            1
+                        };
+                        let mut current = *start_val;
+                        while current < *end_val {
+                            let next = current + step;
+                            let range_end = if next > *end_val { *end_val } else { next };
+                            results.push(Value::Range(RangeValue {
+                                start: Some(Box::new(Value::Int64(current))),
+                                end: Some(Box::new(Value::Int64(range_end))),
+                            }));
+                            current = next;
+                        }
+                    }
+                    _ => return Ok(Value::Array(vec![])),
+                }
+                Ok(Value::Array(results))
+            }
             _ => Ok(Value::Array(vec![])),
         }
     }
@@ -6718,6 +6793,19 @@ impl<'a> IrEvaluator<'a> {
             }
             _ => Err(Error::InvalidQuery(
                 "ARRAY_SLICE expects array and integer arguments".into(),
+            )),
+        }
+    }
+
+    fn fn_array_enumerate(&self, args: &[Value]) -> Result<Value> {
+        match args.first() {
+            Some(Value::Null) | None => Ok(Value::Null),
+            Some(Value::Array(arr)) => {
+                let indices: Vec<Value> = (1..=arr.len() as i64).map(Value::Int64).collect();
+                Ok(Value::Array(indices))
+            }
+            _ => Err(Error::InvalidQuery(
+                "arrayEnumerate expects an array argument".into(),
             )),
         }
     }
