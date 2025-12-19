@@ -4453,6 +4453,7 @@ impl<'a> IrEvaluator<'a> {
             "NET.IP_IS_PRIVATE" => self.fn_net_ip_is_private(args),
             "NET.IP_TRUNC" => self.fn_net_ip_trunc(args),
             "NET.IP_NET_MASK" => self.fn_net_ip_net_mask(args),
+            "NET.MAKE_NET" => self.fn_net_make_net(args),
             "RANGE_CONTAINS" => self.fn_range_contains(args),
             "RANGE_OVERLAPS" => self.fn_range_overlaps(args),
             "RANGE_START" => self.fn_range_start(args),
@@ -6179,7 +6180,37 @@ impl<'a> IrEvaluator<'a> {
         }
         match (&args[0], &args[1]) {
             (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-            (Value::Bytes(_), Value::String(_)) => Ok(Value::Bool(false)),
+            (Value::Bytes(ip_bytes), Value::String(network)) => {
+                let parts: Vec<&str> = network.split('/').collect();
+                if parts.len() != 2 {
+                    return Ok(Value::Bool(false));
+                }
+                let prefix_len: u8 = match parts[1].parse() {
+                    Ok(p) => p,
+                    Err(_) => return Ok(Value::Bool(false)),
+                };
+                let network_octets: Vec<u8> = parts[0]
+                    .split('.')
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if network_octets.len() != 4 || ip_bytes.len() != 4 {
+                    return Ok(Value::Bool(false));
+                }
+                let full_bytes = (prefix_len / 8) as usize;
+                let remaining_bits = prefix_len % 8;
+                for i in 0..full_bytes {
+                    if ip_bytes[i] != network_octets[i] {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                if remaining_bits > 0 && full_bytes < 4 {
+                    let mask = !((1u8 << (8 - remaining_bits)) - 1);
+                    if (ip_bytes[full_bytes] & mask) != (network_octets[full_bytes] & mask) {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
             _ => Err(Error::InvalidQuery(
                 "NET.IP_IN_NET expects bytes and string arguments".into(),
             )),
@@ -6259,6 +6290,36 @@ impl<'a> IrEvaluator<'a> {
             }
             _ => Err(Error::InvalidQuery(
                 "NET.IP_NET_MASK expects integer arguments".into(),
+            )),
+        }
+    }
+
+    fn fn_net_make_net(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            return Err(Error::InvalidQuery(
+                "NET.MAKE_NET requires IP and prefix length arguments".into(),
+            ));
+        }
+        match (&args[0], &args[1]) {
+            (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+            (Value::Bytes(bytes), Value::Int64(prefix_len)) => {
+                let ip_str = if bytes.len() == 4 {
+                    format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
+                } else if bytes.len() == 16 {
+                    let parts: Vec<String> = bytes
+                        .chunks(2)
+                        .map(|chunk| format!("{:x}{:02x}", chunk[0], chunk[1]))
+                        .collect();
+                    parts.join(":")
+                } else {
+                    return Err(Error::InvalidQuery(
+                        "NET.MAKE_NET expects 4 or 16 byte IP address".into(),
+                    ));
+                };
+                Ok(Value::String(format!("{}/{}", ip_str, prefix_len)))
+            }
+            _ => Err(Error::InvalidQuery(
+                "NET.MAKE_NET expects bytes and integer arguments".into(),
             )),
         }
     }
