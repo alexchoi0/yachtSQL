@@ -737,13 +737,15 @@ impl<'a> IrEvaluator<'a> {
                 .ok_or_else(|| Error::InvalidQuery("Cannot convert DATE to TIMESTAMP".into())),
             (Value::DateTime(dt), DataType::Timestamp) => Ok(Value::Timestamp(dt.and_utc())),
 
-            (Value::Int64(n), DataType::Numeric(_)) => {
+            (Value::Int64(n), DataType::Numeric(_) | DataType::BigNumeric) => {
                 Ok(Value::Numeric(rust_decimal::Decimal::from(n)))
             }
-            (Value::Float64(f), DataType::Numeric(_)) => rust_decimal::Decimal::try_from(f.0)
-                .map(Value::Numeric)
-                .map_err(|e| Error::InvalidQuery(format!("Cannot cast to NUMERIC: {}", e))),
-            (Value::String(s), DataType::Numeric(_)) => s
+            (Value::Float64(f), DataType::Numeric(_) | DataType::BigNumeric) => {
+                rust_decimal::Decimal::try_from(f.0)
+                    .map(Value::Numeric)
+                    .map_err(|e| Error::InvalidQuery(format!("Cannot cast to NUMERIC: {}", e)))
+            }
+            (Value::String(s), DataType::Numeric(_) | DataType::BigNumeric) => s
                 .parse::<rust_decimal::Decimal>()
                 .map(Value::Numeric)
                 .map_err(|e| Error::InvalidQuery(format!("Cannot cast to NUMERIC: {}", e))),

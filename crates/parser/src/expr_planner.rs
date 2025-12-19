@@ -972,12 +972,98 @@ impl ExprPlanner {
             });
         }
 
+        if name == "MAKE_INTERVAL" {
+            let args = Self::extract_make_interval_args(func, schema)?;
+            return Ok(Expr::ScalarFunction {
+                name: ScalarFunction::MakeInterval,
+                args,
+            });
+        }
+
         let args = Self::extract_function_args(func, schema)?;
         let scalar_func = Self::try_scalar_function(&name)?;
         Ok(Expr::ScalarFunction {
             name: scalar_func,
             args,
         })
+    }
+
+    fn extract_make_interval_args(func: &ast::Function, schema: &PlanSchema) -> Result<Vec<Expr>> {
+        let mut years: Option<Expr> = None;
+        let mut months: Option<Expr> = None;
+        let mut days: Option<Expr> = None;
+        let mut hours: Option<Expr> = None;
+        let mut minutes: Option<Expr> = None;
+        let mut seconds: Option<Expr> = None;
+
+        match &func.args {
+            ast::FunctionArguments::List(list) => {
+                for (i, arg) in list.args.iter().enumerate() {
+                    match arg {
+                        ast::FunctionArg::Named { name, arg, .. } => {
+                            let param_name = name.value.to_uppercase();
+                            if let ast::FunctionArgExpr::Expr(e) = arg {
+                                let expr = Self::plan_expr(e, schema)?;
+                                match param_name.as_str() {
+                                    "YEAR" | "YEARS" => years = Some(expr),
+                                    "MONTH" | "MONTHS" => months = Some(expr),
+                                    "DAY" | "DAYS" => days = Some(expr),
+                                    "HOUR" | "HOURS" => hours = Some(expr),
+                                    "MINUTE" | "MINUTES" => minutes = Some(expr),
+                                    "SECOND" | "SECONDS" => seconds = Some(expr),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        ast::FunctionArg::ExprNamed { name, arg, .. } => {
+                            let param_name = match name {
+                                ast::Expr::Identifier(ident) => ident.value.to_uppercase(),
+                                _ => continue,
+                            };
+                            if let ast::FunctionArgExpr::Expr(e) = arg {
+                                let expr = Self::plan_expr(e, schema)?;
+                                match param_name.as_str() {
+                                    "YEAR" | "YEARS" => years = Some(expr),
+                                    "MONTH" | "MONTHS" => months = Some(expr),
+                                    "DAY" | "DAYS" => days = Some(expr),
+                                    "HOUR" | "HOURS" => hours = Some(expr),
+                                    "MINUTE" | "MINUTES" => minutes = Some(expr),
+                                    "SECOND" | "SECONDS" => seconds = Some(expr),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
+                            let expr = Self::plan_expr(e, schema)?;
+                            match i {
+                                0 => years = Some(expr),
+                                1 => months = Some(expr),
+                                2 => days = Some(expr),
+                                3 => hours = Some(expr),
+                                4 => minutes = Some(expr),
+                                5 => seconds = Some(expr),
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ast::FunctionArguments::None => {}
+            ast::FunctionArguments::Subquery(_) => {
+                return Err(Error::unsupported("Subquery function arguments"));
+            }
+        }
+
+        let zero = Expr::Literal(Literal::Int64(0));
+        Ok(vec![
+            years.unwrap_or_else(|| zero.clone()),
+            months.unwrap_or_else(|| zero.clone()),
+            days.unwrap_or_else(|| zero.clone()),
+            hours.unwrap_or_else(|| zero.clone()),
+            minutes.unwrap_or_else(|| zero.clone()),
+            seconds.unwrap_or(zero),
+        ])
     }
 
     fn try_window_function(name: &str) -> Option<WindowFunction> {
