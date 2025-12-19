@@ -348,6 +348,50 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     Ok(plan)
                 }
             }
+            TableFactor::UNNEST {
+                alias,
+                array_exprs,
+                with_offset,
+                with_offset_alias,
+                ..
+            } => {
+                use yachtsql_ir::UnnestColumn;
+
+                if array_exprs.is_empty() {
+                    return Err(Error::invalid_query("UNNEST requires at least one array expression"));
+                }
+
+                let element_alias = alias
+                    .as_ref()
+                    .map(|a| a.name.value.clone())
+                    .unwrap_or_else(|| "element".to_string());
+                let offset_alias_str = with_offset_alias
+                    .as_ref()
+                    .map(|a| a.value.clone())
+                    .unwrap_or_else(|| "offset".to_string());
+
+                let empty_schema = PlanSchema::new();
+                let array_expr = ExprPlanner::plan_expr(&array_exprs[0], &empty_schema)?;
+
+                let unnest_column = UnnestColumn {
+                    expr: array_expr,
+                    alias: Some(element_alias.clone()),
+                    with_offset: *with_offset,
+                    offset_alias: if *with_offset { Some(offset_alias_str.clone()) } else { None },
+                };
+
+                let mut fields = vec![PlanField::new(element_alias, DataType::String)];
+                if *with_offset {
+                    fields.push(PlanField::new(offset_alias_str, DataType::Int64));
+                }
+                let schema = PlanSchema::from_fields(fields);
+
+                Ok(LogicalPlan::Unnest {
+                    input: Box::new(LogicalPlan::Empty { schema: PlanSchema::new() }),
+                    columns: vec![unnest_column],
+                    schema,
+                })
+            }
             _ => Err(Error::unsupported(format!(
                 "Unsupported table factor: {:?}",
                 factor
@@ -482,16 +526,18 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             }
         }
 
-        let mut window_exprs = Vec::new();
+        let mut window_funcs: Vec<Expr> = Vec::new();
         let mut window_expr_indices = Vec::new();
         for (i, expr) in expressions.iter().enumerate() {
             if Self::expr_has_window(expr) {
-                window_exprs.push(expr.clone());
-                window_expr_indices.push(i);
+                if let Some(wf) = Self::extract_window_function(expr) {
+                    window_funcs.push(wf);
+                    window_expr_indices.push(i);
+                }
             }
         }
 
-        if window_exprs.is_empty() {
+        if window_funcs.is_empty() {
             return Ok(LogicalPlan::Project {
                 input: Box::new(input),
                 expressions,
@@ -501,17 +547,18 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
 
         let input_field_count = input.schema().fields.len();
         let mut window_schema_fields = input.schema().fields.clone();
-        for (j, idx) in window_expr_indices.iter().enumerate() {
+        for j in 0..window_funcs.len() {
+            let idx = window_expr_indices[j];
             window_schema_fields.push(PlanField::new(
                 format!("__window_{}", j),
-                fields[*idx].data_type.clone(),
+                fields[idx].data_type.clone(),
             ));
         }
         let window_schema = PlanSchema::from_fields(window_schema_fields);
 
         let window_plan = LogicalPlan::Window {
             input: Box::new(input),
-            window_exprs,
+            window_exprs: window_funcs,
             schema: window_schema.clone(),
         };
 
@@ -520,11 +567,9 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         for (i, expr) in expressions.iter().enumerate() {
             if window_expr_indices.contains(&i) {
                 let col_idx = input_field_count + window_offset;
-                new_expressions.push(Expr::Column {
-                    table: None,
-                    name: format!("__window_{}", window_offset),
-                    index: Some(col_idx),
-                });
+                let col_name = format!("__window_{}", window_offset);
+                let replaced = Self::replace_window_with_column(expr.clone(), &col_name, col_idx);
+                new_expressions.push(Self::remap_column_indices(replaced, &window_schema));
                 window_offset += 1;
             } else {
                 new_expressions.push(Self::remap_column_indices(expr.clone(), &window_schema));
@@ -562,6 +607,105 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             Expr::ScalarFunction { args, .. } => args.iter().any(Self::expr_has_window),
             Expr::Alias { expr, .. } => Self::expr_has_window(expr),
             _ => false,
+        }
+    }
+
+    fn extract_window_function(expr: &Expr) -> Option<Expr> {
+        match expr {
+            Expr::Window { .. } | Expr::AggregateWindow { .. } => Some(expr.clone()),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::extract_window_function(left).or_else(|| Self::extract_window_function(right))
+            }
+            Expr::UnaryOp { expr, .. } => Self::extract_window_function(expr),
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => {
+                if let Some(op) = operand {
+                    if let Some(wf) = Self::extract_window_function(op) {
+                        return Some(wf);
+                    }
+                }
+                for clause in when_clauses {
+                    if let Some(wf) = Self::extract_window_function(&clause.condition) {
+                        return Some(wf);
+                    }
+                    if let Some(wf) = Self::extract_window_function(&clause.result) {
+                        return Some(wf);
+                    }
+                }
+                if let Some(e) = else_result {
+                    return Self::extract_window_function(e);
+                }
+                None
+            }
+            Expr::Cast { expr, .. } => Self::extract_window_function(expr),
+            Expr::ScalarFunction { args, .. } => {
+                for arg in args {
+                    if let Some(wf) = Self::extract_window_function(arg) {
+                        return Some(wf);
+                    }
+                }
+                None
+            }
+            Expr::Alias { expr, .. } => Self::extract_window_function(expr),
+            _ => None,
+        }
+    }
+
+    fn replace_window_with_column(expr: Expr, col_name: &str, col_idx: usize) -> Expr {
+        match expr {
+            Expr::Window { .. } | Expr::AggregateWindow { .. } => Expr::Column {
+                table: None,
+                name: col_name.to_string(),
+                index: Some(col_idx),
+            },
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(Self::replace_window_with_column(*left, col_name, col_idx)),
+                op,
+                right: Box::new(Self::replace_window_with_column(*right, col_name, col_idx)),
+            },
+            Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+                op,
+                expr: Box::new(Self::replace_window_with_column(*expr, col_name, col_idx)),
+            },
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => Expr::Case {
+                operand: operand.map(|e| Box::new(Self::replace_window_with_column(*e, col_name, col_idx))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|w| yachtsql_ir::WhenClause {
+                        condition: Self::replace_window_with_column(w.condition, col_name, col_idx),
+                        result: Self::replace_window_with_column(w.result, col_name, col_idx),
+                    })
+                    .collect(),
+                else_result: else_result.map(|e| Box::new(Self::replace_window_with_column(*e, col_name, col_idx))),
+            },
+            Expr::Cast {
+                expr,
+                data_type,
+                safe,
+            } => Expr::Cast {
+                expr: Box::new(Self::replace_window_with_column(*expr, col_name, col_idx)),
+                data_type,
+                safe,
+            },
+            Expr::ScalarFunction { name, args } => Expr::ScalarFunction {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|a| Self::replace_window_with_column(a, col_name, col_idx))
+                    .collect(),
+            },
+            Expr::Alias { expr, name } => Expr::Alias {
+                expr: Box::new(Self::replace_window_with_column(*expr, col_name, col_idx)),
+                name,
+            },
+            other => other,
         }
     }
 

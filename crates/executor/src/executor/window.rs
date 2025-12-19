@@ -104,6 +104,54 @@ impl<'a> PlanExecutor<'a> {
                 WindowFuncType::Aggregate(func.clone()),
             )),
             Expr::Alias { expr: inner, .. } => Self::extract_window_spec(inner),
+            Expr::BinaryOp { left, right, .. } => {
+                if let Ok(spec) = Self::extract_window_spec(left) {
+                    Ok(spec)
+                } else {
+                    Self::extract_window_spec(right)
+                }
+            }
+            Expr::UnaryOp { expr: inner, .. } => Self::extract_window_spec(inner),
+            Expr::Cast { expr: inner, .. } => Self::extract_window_spec(inner),
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => {
+                if let Some(op) = operand {
+                    if let Ok(spec) = Self::extract_window_spec(op) {
+                        return Ok(spec);
+                    }
+                }
+                for clause in when_clauses {
+                    if let Ok(spec) = Self::extract_window_spec(&clause.condition) {
+                        return Ok(spec);
+                    }
+                    if let Ok(spec) = Self::extract_window_spec(&clause.result) {
+                        return Ok(spec);
+                    }
+                }
+                if let Some(e) = else_result {
+                    if let Ok(spec) = Self::extract_window_spec(e) {
+                        return Ok(spec);
+                    }
+                }
+                Err(Error::InvalidQuery(format!(
+                    "Expected window expression, got {:?}",
+                    expr
+                )))
+            }
+            Expr::ScalarFunction { args, .. } => {
+                for arg in args {
+                    if let Ok(spec) = Self::extract_window_spec(arg) {
+                        return Ok(spec);
+                    }
+                }
+                Err(Error::InvalidQuery(format!(
+                    "Expected window expression, got {:?}",
+                    expr
+                )))
+            }
             _ => Err(Error::InvalidQuery(format!(
                 "Expected window expression, got {:?}",
                 expr
