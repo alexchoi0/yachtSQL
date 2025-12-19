@@ -1255,6 +1255,8 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                 | "MAX"
                 | "ARRAY_AGG"
                 | "STRING_AGG"
+                | "LISTAGG"
+                | "XMLAGG"
                 | "ANY_VALUE"
                 | "COUNTIF"
                 | "COUNT_IF"
@@ -1812,6 +1814,8 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                         | "MAX"
                         | "ARRAY_AGG"
                         | "STRING_AGG"
+                        | "LISTAGG"
+                        | "XMLAGG"
                         | "ANY_VALUE"
                         | "COUNTIF"
                         | "COUNT_IF"
@@ -1965,7 +1969,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     AggregateFunction::ArrayAgg | AggregateFunction::ApproxQuantiles => {
                         DataType::Array(Box::new(DataType::Unknown))
                     }
-                    AggregateFunction::StringAgg => DataType::String,
+                    AggregateFunction::StringAgg | AggregateFunction::XmlAgg => DataType::String,
                     AggregateFunction::AnyValue => DataType::Unknown,
                     AggregateFunction::LogicalAnd | AggregateFunction::LogicalOr => DataType::Bool,
                     AggregateFunction::BitAnd

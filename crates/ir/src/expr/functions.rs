@@ -9,6 +9,7 @@ pub enum AggregateFunction {
     Max,
     ArrayAgg,
     StringAgg,
+    XmlAgg,
     AnyValue,
     CountIf,
     SumIf,

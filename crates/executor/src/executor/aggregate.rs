@@ -511,6 +511,10 @@ impl Accumulator {
                     values: Vec::new(),
                     separator: extract_string_agg_separator(expr),
                 },
+                AggregateFunction::XmlAgg => Accumulator::StringAgg {
+                    values: Vec::new(),
+                    separator: String::new(),
+                },
                 AggregateFunction::AnyValue => Accumulator::First(None),
                 AggregateFunction::BitAnd => Accumulator::BitAnd(None),
                 AggregateFunction::BitOr => Accumulator::BitOr(None),
