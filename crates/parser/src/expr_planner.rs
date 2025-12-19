@@ -1472,6 +1472,15 @@ impl ExprPlanner {
             ast::DataType::Timestamp(..) => Ok(DataType::Timestamp),
             ast::DataType::JSON | ast::DataType::JSONB => Ok(DataType::Json),
             ast::DataType::Interval { .. } => Ok(DataType::Interval),
+            ast::DataType::Array(elem_def) => {
+                let inner = match elem_def {
+                    ast::ArrayElemTypeDef::AngleBracket(dt)
+                    | ast::ArrayElemTypeDef::SquareBracket(dt, _)
+                    | ast::ArrayElemTypeDef::Parenthesis(dt) => Self::plan_data_type(dt)?,
+                    ast::ArrayElemTypeDef::None => DataType::Unknown,
+                };
+                Ok(DataType::Array(Box::new(inner)))
+            }
             _ => Ok(DataType::Unknown),
         }
     }

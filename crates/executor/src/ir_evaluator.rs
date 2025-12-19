@@ -755,6 +755,15 @@ impl<'a> IrEvaluator<'a> {
                 .map(Value::String)
                 .map_err(|e| Error::InvalidQuery(format!("Cannot cast BYTES to STRING: {}", e))),
 
+            (Value::Array(arr), DataType::Array(elem_type)) => {
+                let mut new_arr = Vec::with_capacity(arr.len());
+                for elem in arr {
+                    let casted = Self::cast_value(elem, elem_type, safe)?;
+                    new_arr.push(casted);
+                }
+                Ok(Value::Array(new_arr))
+            }
+
             (v, _) if v.data_type() == *target_type => Ok(v),
 
             (v, t) => Err(Error::InvalidQuery(format!(
