@@ -3509,34 +3509,81 @@ impl<'a> IrEvaluator<'a> {
         match &args[0] {
             Value::Null => Ok(Value::Null),
             Value::String(fmt) => {
-                let mut result = fmt.clone();
-                for (i, arg) in args.iter().skip(1).enumerate() {
-                    let placeholder = format!("%{}", i + 1);
-                    let replacement = self.format_value_for_format(arg);
-                    result = result.replace(&placeholder, &replacement);
+                let format_args = &args[1..];
+                let mut arg_index = 0;
+                let mut result = String::new();
+                let mut chars = fmt.chars().peekable();
+
+                while let Some(c) = chars.next() {
+                    if c == '%' {
+                        if chars.peek() == Some(&'%') {
+                            chars.next();
+                            result.push('%');
+                            continue;
+                        }
+
+                        let mut precision: Option<usize> = None;
+                        if chars.peek() == Some(&'.') {
+                            chars.next();
+                            let mut prec_str = String::new();
+                            while let Some(&ch) = chars.peek() {
+                                if ch.is_ascii_digit() {
+                                    prec_str.push(ch);
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !prec_str.is_empty() {
+                                precision = prec_str.parse().ok();
+                            }
+                        }
+
+                        if let Some(&spec) = chars.peek() {
+                            chars.next();
+                            let val = format_args.get(arg_index);
+                            arg_index += 1;
+
+                            let formatted = match spec {
+                                's' => val
+                                    .map(|v| self.format_value_for_format(v))
+                                    .unwrap_or_default(),
+                                'd' | 'i' => val
+                                    .and_then(|v| v.as_i64())
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_default(),
+                                'f' | 'g' | 'e' => {
+                                    if let Some(v) = val {
+                                        let f_val = match v {
+                                            Value::Float64(f) => Some(f.0),
+                                            Value::Int64(n) => Some(*n as f64),
+                                            Value::Numeric(n) => n.to_string().parse().ok(),
+                                            _ => None,
+                                        };
+                                        if let Some(f) = f_val {
+                                            if let Some(prec) = precision {
+                                                format!("{:.prec$}", f, prec = prec)
+                                            } else {
+                                                f.to_string()
+                                            }
+                                        } else {
+                                            String::new()
+                                        }
+                                    } else {
+                                        String::new()
+                                    }
+                                }
+                                't' | 'T' => val
+                                    .map(|v| self.format_value_for_format(v))
+                                    .unwrap_or_default(),
+                                _ => format!("%{}", spec),
+                            };
+                            result.push_str(&formatted);
+                        }
+                    } else {
+                        result.push(c);
+                    }
                 }
-                result = result.replace(
-                    "%s",
-                    &args
-                        .get(1)
-                        .map(|v| self.format_value_for_format(v))
-                        .unwrap_or_default(),
-                );
-                result = result.replace(
-                    "%d",
-                    &args
-                        .get(1)
-                        .and_then(|v| v.as_i64())
-                        .map(|n| n.to_string())
-                        .unwrap_or_default(),
-                );
-                result = result.replace(
-                    "%t",
-                    &args
-                        .get(1)
-                        .map(|v| self.format_value_for_format(v))
-                        .unwrap_or_default(),
-                );
                 Ok(Value::String(result))
             }
             Value::Bool(_)

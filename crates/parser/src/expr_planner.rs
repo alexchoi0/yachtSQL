@@ -77,6 +77,18 @@ impl ExprPlanner {
             }
 
             ast::Expr::UnaryOp { op, expr } => {
+                if matches!(
+                    (op, expr.as_ref()),
+                    (
+                        ast::UnaryOperator::Minus,
+                        ast::Expr::Value(ast::ValueWithSpan {
+                            value: ast::Value::Number(n, _),
+                            ..
+                        })
+                    ) if n == "9223372036854775808"
+                ) {
+                    return Ok(Expr::Literal(Literal::Int64(i64::MIN)));
+                }
                 let expr = Self::plan_expr_full(expr, schema, subquery_planner, named_windows)?;
                 let op = Self::plan_unary_op(op)?;
                 Ok(Expr::UnaryOp {
