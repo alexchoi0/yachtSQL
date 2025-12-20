@@ -252,6 +252,17 @@ pub enum LogicalPlan {
     Break,
 
     Continue,
+
+    CreateSnapshot {
+        snapshot_name: String,
+        source_name: String,
+        if_not_exists: bool,
+    },
+
+    DropSnapshot {
+        snapshot_name: String,
+        if_exists: bool,
+    },
 }
 
 impl LogicalPlan {
@@ -299,6 +310,8 @@ impl LogicalPlan {
             LogicalPlan::Raise { .. } => &EMPTY_SCHEMA,
             LogicalPlan::Break => &EMPTY_SCHEMA,
             LogicalPlan::Continue => &EMPTY_SCHEMA,
+            LogicalPlan::CreateSnapshot { .. } => &EMPTY_SCHEMA,
+            LogicalPlan::DropSnapshot { .. } => &EMPTY_SCHEMA,
         }
     }
 
