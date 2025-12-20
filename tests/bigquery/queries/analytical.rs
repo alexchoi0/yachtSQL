@@ -110,7 +110,6 @@ fn test_top_products_by_revenue() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_monthly_revenue_trend() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
@@ -467,7 +466,6 @@ fn test_year_over_year_comparison() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_cohort_analysis() {
     let mut executor = create_executor();
     executor
@@ -1154,7 +1152,6 @@ fn test_anomaly_detection_zscore() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_data_quality_checks() {
     let mut executor = create_executor();
     setup_sales_data(&mut executor);
