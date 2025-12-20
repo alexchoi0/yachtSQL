@@ -13,14 +13,18 @@ use wkt::TryFromWkt;
 use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::{DataType, IntervalValue, Value};
 use yachtsql_ir::{
-    AggregateFunction, BinaryOp, DateTimeField, Expr, Literal, ScalarFunction, TrimWhere, UnaryOp,
-    WhenClause,
+    AggregateFunction, BinaryOp, DateTimeField, Expr, FunctionBody, Literal, ScalarFunction,
+    TrimWhere, UnaryOp, WhenClause,
 };
 use yachtsql_storage::{Record, Schema};
+
+use crate::catalog::UserFunction;
+use crate::js_udf::evaluate_js_function;
 
 pub struct IrEvaluator<'a> {
     schema: &'a Schema,
     variables: Option<&'a HashMap<String, Value>>,
+    user_functions: Option<&'a HashMap<String, UserFunction>>,
 }
 
 impl<'a> IrEvaluator<'a> {
@@ -28,11 +32,20 @@ impl<'a> IrEvaluator<'a> {
         Self {
             schema,
             variables: None,
+            user_functions: None,
         }
     }
 
     pub fn with_variables(mut self, variables: &'a HashMap<String, Value>) -> Self {
         self.variables = Some(variables);
+        self
+    }
+
+    pub fn with_user_functions(
+        mut self,
+        user_functions: &'a HashMap<String, UserFunction>,
+    ) -> Self {
+        self.user_functions = Some(user_functions);
         self
     }
 
@@ -4525,10 +4538,97 @@ impl<'a> IrEvaluator<'a> {
             "REGEXP_SUBSTR" => self.fn_regexp_substr(args),
             "ARRAY_SLICE" => self.fn_array_slice(args),
             "ARRAYENUMERATE" => self.fn_array_enumerate(args),
-            _ => Err(Error::UnsupportedFeature(format!(
-                "Scalar function Custom(\"{}\") not yet implemented in IR evaluator",
-                name
-            ))),
+            _ => {
+                if let Some(udf) = self.user_functions.and_then(|funcs| funcs.get(name)) {
+                    self.eval_user_function(udf, args)
+                } else {
+                    Err(Error::UnsupportedFeature(format!(
+                        "Scalar function Custom(\"{}\") not yet implemented in IR evaluator",
+                        name
+                    )))
+                }
+            }
+        }
+    }
+
+    fn eval_user_function(&self, udf: &UserFunction, args: &[Value]) -> Result<Value> {
+        if args.len() != udf.parameters.len() {
+            return Err(Error::InvalidQuery(format!(
+                "Function {} expects {} arguments, got {}",
+                udf.name,
+                udf.parameters.len(),
+                args.len()
+            )));
+        }
+
+        match &udf.body {
+            FunctionBody::Sql(body_expr) => {
+                let mut substituted = body_expr.as_ref().clone();
+                for (i, param) in udf.parameters.iter().enumerate() {
+                    let arg_val = &args[i];
+                    substituted = Self::substitute_param(&substituted, &param.name, arg_val);
+                }
+                let empty_schema = Schema::new();
+                let empty_record = Record::new();
+                let evaluator = IrEvaluator::new(&empty_schema);
+                evaluator.evaluate(&substituted, &empty_record)
+            }
+            FunctionBody::JavaScript(js_code) => {
+                let param_names: Vec<String> =
+                    udf.parameters.iter().map(|p| p.name.clone()).collect();
+                evaluate_js_function(js_code, &param_names, args)
+                    .map_err(|e| Error::InvalidQuery(format!("JavaScript UDF error: {}", e)))
+            }
+            FunctionBody::Language { name: lang, code } => {
+                if lang.eq_ignore_ascii_case("js") || lang.eq_ignore_ascii_case("javascript") {
+                    let param_names: Vec<String> =
+                        udf.parameters.iter().map(|p| p.name.clone()).collect();
+                    evaluate_js_function(code, &param_names, args)
+                        .map_err(|e| Error::InvalidQuery(format!("JavaScript UDF error: {}", e)))
+                } else {
+                    Err(Error::UnsupportedFeature(format!(
+                        "Language {} not supported for UDFs",
+                        lang
+                    )))
+                }
+            }
+        }
+    }
+
+    fn substitute_param(expr: &Expr, param_name: &str, value: &Value) -> Expr {
+        match expr {
+            Expr::Column { name, .. } if name.eq_ignore_ascii_case(param_name) => {
+                Expr::Literal(Self::value_to_literal(value))
+            }
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(Self::substitute_param(left, param_name, value)),
+                op: *op,
+                right: Box::new(Self::substitute_param(right, param_name, value)),
+            },
+            Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(Self::substitute_param(inner, param_name, value)),
+            },
+            Expr::ScalarFunction { name, args } => Expr::ScalarFunction {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| Self::substitute_param(a, param_name, value))
+                    .collect(),
+            },
+            _ => expr.clone(),
+        }
+    }
+
+    fn value_to_literal(value: &Value) -> Literal {
+        match value {
+            Value::Null => Literal::Null,
+            Value::Bool(b) => Literal::Bool(*b),
+            Value::Int64(n) => Literal::Int64(*n),
+            Value::Float64(f) => Literal::Float64(*f),
+            Value::String(s) => Literal::String(s.clone()),
+            Value::Numeric(d) => Literal::Numeric(*d),
+            _ => Literal::Null,
         }
     }
 
