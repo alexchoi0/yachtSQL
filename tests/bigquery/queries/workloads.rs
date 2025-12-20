@@ -374,7 +374,6 @@ fn test_customer_segmentation() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_conversion_funnel() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -465,7 +464,6 @@ fn test_daily_sales_trend() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_discount_impact_analysis() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -601,7 +599,6 @@ fn test_customer_acquisition_by_month() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_product_margin_analysis() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);
@@ -680,7 +677,6 @@ fn test_product_margin_analysis() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_order_size_distribution() {
     let mut executor = create_executor();
     setup_ecommerce_schema(&mut executor);

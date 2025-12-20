@@ -962,6 +962,18 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         let subquery_planner = |query: &ast::Query| self.plan_query(query);
         let mut grouping_sets: Option<Vec<Vec<usize>>> = None;
 
+        let select_aliases: Vec<(String, &ast::Expr)> = select
+            .projection
+            .iter()
+            .filter_map(|item| {
+                if let ast::SelectItem::ExprWithAlias { expr, alias } = item {
+                    Some((alias.value.to_uppercase(), expr))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         match &select.group_by {
             ast::GroupByExpr::All(_) => {}
             ast::GroupByExpr::Expressions(exprs, _) => {
@@ -1010,10 +1022,20 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                             }
                         }
                         _ => {
+                            let resolved_expr = if let ast::Expr::Identifier(ident) = expr {
+                                let name = ident.value.to_uppercase();
+                                select_aliases
+                                    .iter()
+                                    .find(|(alias, _)| alias == &name)
+                                    .map(|(_, e)| (*e).clone())
+                                    .unwrap_or_else(|| expr.clone())
+                            } else {
+                                expr.clone()
+                            };
                             let idx = self.add_group_expr_to_index_map(
                                 &mut all_exprs,
                                 &mut expr_indices,
-                                expr,
+                                &resolved_expr,
                             );
                             regular_indices.push(idx);
                         }
@@ -1162,6 +1184,32 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                                 index: Some(idx),
                             });
                             final_projection_fields.push(PlanField::new(output_name, data_type));
+                        } else {
+                            let planned = ExprPlanner::plan_expr_with_subquery(
+                                expr,
+                                input.schema(),
+                                Some(&subquery_planner),
+                            )?;
+                            if Self::is_constant_expr(&planned)
+                                || Self::only_references_fields(
+                                    &planned,
+                                    &agg_fields,
+                                    group_by_count,
+                                )
+                            {
+                                let remapped = Self::remap_to_group_by_indices(
+                                    planned,
+                                    &agg_fields,
+                                    group_by_count,
+                                );
+                                let data_type = self.infer_expr_type(
+                                    &remapped,
+                                    &PlanSchema::from_fields(agg_fields.clone()),
+                                );
+                                final_projection_exprs.push(remapped);
+                                final_projection_fields
+                                    .push(PlanField::new(output_name, data_type));
+                            }
                         }
                     }
                 }
@@ -2114,7 +2162,9 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     None => ExprPlanner::plan_expr(&order_expr.expr, input.schema())?,
                 }
             } else {
-                ExprPlanner::plan_expr(&order_expr.expr, input.schema())?
+                let planned = ExprPlanner::plan_expr(&order_expr.expr, input.schema())
+                    .or_else(|_| ExprPlanner::plan_expr(&order_expr.expr, projection_schema))?;
+                Self::resolve_order_by_aliases_in_ir(planned, projection_schema)
             };
 
             let asc = order_expr.options.asc.unwrap_or(true);
@@ -2130,6 +2180,85 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             input: Box::new(input),
             sort_exprs,
         })
+    }
+
+    fn resolve_order_by_aliases_in_ir(expr: Expr, projection_schema: &PlanSchema) -> Expr {
+        match expr {
+            Expr::Column { name, table, index } if index.is_none() => {
+                let upper_name = name.to_uppercase();
+                if let Some(idx) = projection_schema
+                    .fields
+                    .iter()
+                    .position(|f| f.name.to_uppercase() == upper_name)
+                {
+                    Expr::Column {
+                        name,
+                        table,
+                        index: Some(idx),
+                    }
+                } else {
+                    Expr::Column { name, table, index }
+                }
+            }
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => Expr::Case {
+                operand: operand
+                    .map(|e| Box::new(Self::resolve_order_by_aliases_in_ir(*e, projection_schema))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|w| yachtsql_ir::WhenClause {
+                        condition: Self::resolve_order_by_aliases_in_ir(
+                            w.condition,
+                            projection_schema,
+                        ),
+                        result: Self::resolve_order_by_aliases_in_ir(w.result, projection_schema),
+                    })
+                    .collect(),
+                else_result: else_result
+                    .map(|e| Box::new(Self::resolve_order_by_aliases_in_ir(*e, projection_schema))),
+            },
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(Self::resolve_order_by_aliases_in_ir(
+                    *left,
+                    projection_schema,
+                )),
+                op,
+                right: Box::new(Self::resolve_order_by_aliases_in_ir(
+                    *right,
+                    projection_schema,
+                )),
+            },
+            Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+                op,
+                expr: Box::new(Self::resolve_order_by_aliases_in_ir(
+                    *expr,
+                    projection_schema,
+                )),
+            },
+            Expr::ScalarFunction { name, args } => Expr::ScalarFunction {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|a| Self::resolve_order_by_aliases_in_ir(a, projection_schema))
+                    .collect(),
+            },
+            Expr::Cast {
+                expr,
+                data_type,
+                safe,
+            } => Expr::Cast {
+                expr: Box::new(Self::resolve_order_by_aliases_in_ir(
+                    *expr,
+                    projection_schema,
+                )),
+                data_type,
+                safe,
+            },
+            other => other,
+        }
     }
 
     fn plan_values(&self, values: &ast::Values) -> Result<LogicalPlan> {
@@ -3176,6 +3305,155 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                         .as_ref()
                         .is_some_and(|e| Self::check_aggregate_expr(e))
             }
+            _ => false,
+        }
+    }
+
+    fn only_references_fields(expr: &Expr, fields: &[PlanField], group_by_count: usize) -> bool {
+        match expr {
+            Expr::Literal(_) => true,
+            Expr::Column { name, table, .. } => fields[..group_by_count].iter().any(|f| {
+                f.name.eq_ignore_ascii_case(name)
+                    && match (&f.table, table) {
+                        (Some(t1), Some(t2)) => t1.eq_ignore_ascii_case(t2),
+                        (None, None) => true,
+                        (Some(_), None) => true,
+                        (None, Some(_)) => true,
+                    }
+            }),
+            Expr::Alias { expr, .. } => Self::only_references_fields(expr, fields, group_by_count),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::only_references_fields(left, fields, group_by_count)
+                    && Self::only_references_fields(right, fields, group_by_count)
+            }
+            Expr::UnaryOp { expr, .. } => {
+                Self::only_references_fields(expr, fields, group_by_count)
+            }
+            Expr::Cast { expr, .. } => Self::only_references_fields(expr, fields, group_by_count),
+            Expr::ScalarFunction { args, .. } => args
+                .iter()
+                .all(|a| Self::only_references_fields(a, fields, group_by_count)),
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => {
+                operand
+                    .as_ref()
+                    .is_none_or(|e| Self::only_references_fields(e, fields, group_by_count))
+                    && when_clauses.iter().all(|w| {
+                        Self::only_references_fields(&w.condition, fields, group_by_count)
+                            && Self::only_references_fields(&w.result, fields, group_by_count)
+                    })
+                    && else_result
+                        .as_ref()
+                        .is_none_or(|e| Self::only_references_fields(e, fields, group_by_count))
+            }
+            _ => false,
+        }
+    }
+
+    fn remap_to_group_by_indices(expr: Expr, fields: &[PlanField], group_by_count: usize) -> Expr {
+        match expr {
+            Expr::Column { name, table, .. } => {
+                if let Some(idx) = fields[..group_by_count].iter().position(|f| {
+                    f.name.eq_ignore_ascii_case(&name)
+                        && match (&f.table, &table) {
+                            (Some(t1), Some(t2)) => t1.eq_ignore_ascii_case(t2),
+                            _ => true,
+                        }
+                }) {
+                    Expr::Column {
+                        table,
+                        name,
+                        index: Some(idx),
+                    }
+                } else {
+                    Expr::Column {
+                        table,
+                        name,
+                        index: None,
+                    }
+                }
+            }
+            Expr::Alias { expr, name } => Expr::Alias {
+                expr: Box::new(Self::remap_to_group_by_indices(
+                    *expr,
+                    fields,
+                    group_by_count,
+                )),
+                name,
+            },
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(Self::remap_to_group_by_indices(
+                    *left,
+                    fields,
+                    group_by_count,
+                )),
+                op,
+                right: Box::new(Self::remap_to_group_by_indices(
+                    *right,
+                    fields,
+                    group_by_count,
+                )),
+            },
+            Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+                op,
+                expr: Box::new(Self::remap_to_group_by_indices(
+                    *expr,
+                    fields,
+                    group_by_count,
+                )),
+            },
+            Expr::Cast {
+                expr,
+                data_type,
+                safe,
+            } => Expr::Cast {
+                expr: Box::new(Self::remap_to_group_by_indices(
+                    *expr,
+                    fields,
+                    group_by_count,
+                )),
+                data_type,
+                safe,
+            },
+            Expr::ScalarFunction { name, args } => Expr::ScalarFunction {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|a| Self::remap_to_group_by_indices(a, fields, group_by_count))
+                    .collect(),
+            },
+            other => other,
+        }
+    }
+
+    fn is_constant_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(_) => true,
+            Expr::Alias { expr, .. } => Self::is_constant_expr(expr),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::is_constant_expr(left) && Self::is_constant_expr(right)
+            }
+            Expr::UnaryOp { expr, .. } => Self::is_constant_expr(expr),
+            Expr::Cast { expr, .. } => Self::is_constant_expr(expr),
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => {
+                operand.as_ref().is_none_or(|e| Self::is_constant_expr(e))
+                    && when_clauses.iter().all(|w| {
+                        Self::is_constant_expr(&w.condition) && Self::is_constant_expr(&w.result)
+                    })
+                    && else_result
+                        .as_ref()
+                        .is_none_or(|e| Self::is_constant_expr(e))
+            }
+            Expr::ScalarFunction { args, .. } => args.iter().all(Self::is_constant_expr),
+            Expr::Array { elements, .. } => elements.iter().all(Self::is_constant_expr),
+            Expr::Struct { fields, .. } => fields.iter().all(|(_, e)| Self::is_constant_expr(e)),
             _ => false,
         }
     }
