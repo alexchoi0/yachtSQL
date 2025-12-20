@@ -1476,5 +1476,16 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             body: body.iter().map(executor_plan_to_logical_plan).collect(),
             until_condition: until_condition.clone(),
         },
+        ExecutorPlan::LoadData {
+            table_name,
+            options,
+            temp_table,
+            temp_schema,
+        } => LogicalPlan::LoadData {
+            table_name: table_name.clone(),
+            options: options.clone(),
+            temp_table: *temp_table,
+            temp_schema: temp_schema.clone(),
+        },
     }
 }
