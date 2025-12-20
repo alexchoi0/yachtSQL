@@ -24,6 +24,13 @@ pub enum Expr {
         index: Option<usize>,
     },
 
+    OuterColumn {
+        table: Option<String>,
+        name: String,
+        index: usize,
+        depth: usize,
+    },
+
     BinaryOp {
         left: Box<Expr>,
         op: BinaryOp,
@@ -197,6 +204,8 @@ pub enum Expr {
     Subquery(Box<crate::plan::LogicalPlan>),
 
     ScalarSubquery(Box<crate::plan::LogicalPlan>),
+
+    ArraySubquery(Box<crate::plan::LogicalPlan>),
 
     Parameter {
         name: String,

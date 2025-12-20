@@ -18,6 +18,7 @@ use yachtsql_storage::{Record, Schema};
 pub struct IrEvaluator<'a> {
     schema: &'a Schema,
     variables: Option<&'a HashMap<String, Value>>,
+    outer_rows: Vec<&'a Record>,
 }
 
 impl<'a> IrEvaluator<'a> {
@@ -25,11 +26,17 @@ impl<'a> IrEvaluator<'a> {
         Self {
             schema,
             variables: None,
+            outer_rows: Vec::new(),
         }
     }
 
     pub fn with_variables(mut self, variables: &'a HashMap<String, Value>) -> Self {
         self.variables = Some(variables);
+        self
+    }
+
+    pub fn with_outer_row(mut self, record: &'a Record) -> Self {
+        self.outer_rows.push(record);
         self
     }
 
@@ -212,6 +219,9 @@ impl<'a> IrEvaluator<'a> {
             Expr::ScalarSubquery(_) => Err(Error::InvalidQuery(
                 "Scalar subqueries should be evaluated by plan executor".into(),
             )),
+            Expr::ArraySubquery(_) => Err(Error::InvalidQuery(
+                "Array subqueries should be evaluated by plan executor".into(),
+            )),
             Expr::Parameter { name } => {
                 Err(Error::InvalidQuery(format!("Unbound parameter: {}", name)))
             }
@@ -231,6 +241,25 @@ impl<'a> IrEvaluator<'a> {
             } => self.eval_at_time_zone(timestamp, time_zone, record),
             Expr::JsonAccess { expr, path } => self.eval_json_access(expr, path, record),
             Expr::Default => Ok(Value::Default),
+            Expr::OuterColumn { index, depth, .. } => {
+                if *depth >= self.outer_rows.len() {
+                    return Err(Error::InvalidQuery(format!(
+                        "Outer column depth {} exceeds available outer rows {}",
+                        depth,
+                        self.outer_rows.len()
+                    )));
+                }
+                let outer_record = self.outer_rows[self.outer_rows.len() - 1 - depth];
+                if *index < outer_record.values().len() {
+                    Ok(outer_record.values()[*index].clone())
+                } else {
+                    Err(Error::InvalidQuery(format!(
+                        "Outer column index {} out of bounds for outer record with {} values",
+                        index,
+                        outer_record.values().len()
+                    )))
+                }
+            }
         }
     }
 
@@ -4514,6 +4543,9 @@ impl<'a> IrEvaluator<'a> {
             "REGEXP_SUBSTR" => self.fn_regexp_substr(args),
             "ARRAY_SLICE" => self.fn_array_slice(args),
             "ARRAYENUMERATE" => self.fn_array_enumerate(args),
+            "MAP" => self.fn_map(args),
+            "MAPKEYS" => self.fn_map_keys(args),
+            "MAPVALUES" => self.fn_map_values(args),
             _ => Err(Error::UnsupportedFeature(format!(
                 "Scalar function Custom(\"{}\") not yet implemented in IR evaluator",
                 name
@@ -6825,6 +6857,63 @@ impl<'a> IrEvaluator<'a> {
             }
             _ => Err(Error::InvalidQuery(
                 "arrayEnumerate expects an array argument".into(),
+            )),
+        }
+    }
+
+    fn fn_map(&self, args: &[Value]) -> Result<Value> {
+        if args.len() % 2 != 0 {
+            return Err(Error::InvalidQuery(
+                "MAP requires an even number of arguments (key, value pairs)".into(),
+            ));
+        }
+
+        let mut entries: Vec<Value> = Vec::new();
+        for i in (0..args.len()).step_by(2) {
+            let key = args[i].clone();
+            let value = args[i + 1].clone();
+            entries.push(Value::Struct(vec![
+                ("key".to_string(), key),
+                ("value".to_string(), value),
+            ]));
+        }
+        Ok(Value::Array(entries))
+    }
+
+    fn fn_map_keys(&self, args: &[Value]) -> Result<Value> {
+        match args.first() {
+            Some(Value::Null) | None => Ok(Value::Null),
+            Some(Value::Array(entries)) => {
+                let keys: Vec<Value> = entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Value::Struct(fields) => fields.first().map(|(_, v)| v.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Value::Array(keys))
+            }
+            _ => Err(Error::InvalidQuery(
+                "mapKeys expects a map (ARRAY<STRUCT<key, value>>) argument".into(),
+            )),
+        }
+    }
+
+    fn fn_map_values(&self, args: &[Value]) -> Result<Value> {
+        match args.first() {
+            Some(Value::Null) | None => Ok(Value::Null),
+            Some(Value::Array(entries)) => {
+                let values: Vec<Value> = entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Value::Struct(fields) => fields.get(1).map(|(_, v)| v.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Value::Array(values))
+            }
+            _ => Err(Error::InvalidQuery(
+                "mapValues expects a map (ARRAY<STRUCT<key, value>>) argument".into(),
             )),
         }
     }

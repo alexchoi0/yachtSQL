@@ -132,6 +132,7 @@ fn extract_agg_arg(
         Expr::Alias { expr, .. } => extract_agg_arg(evaluator, expr, record),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -161,6 +162,7 @@ fn extract_agg_arg(
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -193,6 +195,7 @@ fn extract_conditional_agg_args(
         Expr::Alias { expr, .. } => extract_conditional_agg_args(evaluator, expr, record),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -222,6 +225,7 @@ fn extract_conditional_agg_args(
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -250,6 +254,7 @@ fn extract_bivariate_args(
         Expr::Alias { expr, .. } => extract_bivariate_args(evaluator, expr, record),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -279,6 +284,7 @@ fn extract_bivariate_args(
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -306,6 +312,7 @@ fn extract_order_by_keys(
         Expr::Alias { expr, .. } => extract_order_by_keys(evaluator, expr, record),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -335,6 +342,7 @@ fn extract_order_by_keys(
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -351,6 +359,7 @@ fn has_order_by(agg_expr: &Expr) -> bool {
         Expr::Alias { expr, .. } => has_order_by(expr),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -380,6 +389,7 @@ fn has_order_by(agg_expr: &Expr) -> bool {
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -396,6 +406,7 @@ fn get_agg_func(expr: &Expr) -> Option<&AggregateFunction> {
         Expr::Alias { expr, .. } => get_agg_func(expr),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -425,6 +436,7 @@ fn get_agg_func(expr: &Expr) -> Option<&AggregateFunction> {
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -441,6 +453,7 @@ fn is_distinct_aggregate(expr: &Expr) -> bool {
         Expr::Alias { expr, .. } => is_distinct_aggregate(expr),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -470,6 +483,7 @@ fn is_distinct_aggregate(expr: &Expr) -> bool {
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -486,6 +500,7 @@ fn has_ignore_nulls(expr: &Expr) -> bool {
         Expr::Alias { expr, .. } => has_ignore_nulls(expr),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -515,6 +530,7 @@ fn has_ignore_nulls(expr: &Expr) -> bool {
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }
@@ -538,6 +554,7 @@ fn extract_string_agg_separator(expr: &Expr) -> String {
         Expr::Alias { expr, .. } => extract_string_agg_separator(expr),
         Expr::Literal(_)
         | Expr::Column { .. }
+        | Expr::OuterColumn { .. }
         | Expr::BinaryOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::ScalarFunction { .. }
@@ -567,6 +584,7 @@ fn extract_string_agg_separator(expr: &Expr) -> String {
         | Expr::Wildcard { .. }
         | Expr::Subquery(_)
         | Expr::ScalarSubquery(_)
+        | Expr::ArraySubquery(_)
         | Expr::Parameter { .. }
         | Expr::Variable { .. }
         | Expr::Placeholder { .. }

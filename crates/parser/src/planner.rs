@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use sqlparser::ast::{self, SetExpr, Statement, TableFactor};
 use yachtsql_common::error::{Error, Result};
-use yachtsql_common::types::DataType;
+use yachtsql_common::types::{DataType, StructField};
 use yachtsql_ir::{
     AlterColumnAction, AlterTableOp, Assignment, BinaryOp, ColumnDef, CteDefinition, Expr,
     JoinType, Literal, LogicalPlan, PlanField, PlanSchema, SetOperationType, SortExpr,
@@ -16,6 +16,7 @@ use crate::expr_planner::ExprPlanner;
 pub struct Planner<'a, C: CatalogProvider> {
     catalog: &'a C,
     cte_schemas: RefCell<HashMap<String, PlanSchema>>,
+    outer_schemas: RefCell<Vec<PlanSchema>>,
 }
 
 impl<'a, C: CatalogProvider> Planner<'a, C> {
@@ -23,6 +24,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         Self {
             catalog,
             cte_schemas: RefCell::new(HashMap::new()),
+            outer_schemas: RefCell::new(Vec::new()),
         }
     }
 
@@ -262,10 +264,13 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
 
         if let Some(ref selection) = select.selection {
             let subquery_planner = |query: &ast::Query| self.plan_query(query);
-            let predicate = ExprPlanner::plan_expr_with_subquery(
+            let outer_schemas: Vec<_> = self.outer_schemas.borrow().clone();
+            let predicate = ExprPlanner::plan_expr_with_outer_schemas(
                 selection,
                 plan.schema(),
                 Some(&subquery_planner),
+                &[],
+                &outer_schemas,
             )?;
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
@@ -307,26 +312,41 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         }
 
         let first = &from[0];
-        let mut plan = self.plan_table_factor(&first.relation)?;
+        let mut plan = self.plan_table_factor(&first.relation, None)?;
 
         for join in &first.joins {
-            let right = self.plan_table_factor(&join.relation)?;
+            let right = self.plan_table_factor(&join.relation, Some(plan.schema()))?;
             plan = self.plan_join(plan, right, &join.join_operator)?;
         }
 
         for table_with_joins in from.iter().skip(1) {
-            let right = self.plan_table_factor(&table_with_joins.relation)?;
-            let combined_schema = plan.schema().clone().merge(right.schema().clone());
-            plan = LogicalPlan::Join {
-                left: Box::new(plan),
-                right: Box::new(right),
-                join_type: JoinType::Cross,
-                condition: None,
-                schema: combined_schema,
-            };
+            let right = self.plan_table_factor(&table_with_joins.relation, Some(plan.schema()))?;
+
+            if matches!(&right, LogicalPlan::Unnest { input, .. } if matches!(input.as_ref(), LogicalPlan::Empty { schema } if !schema.fields.is_empty()))
+            {
+                if let LogicalPlan::Unnest {
+                    columns, schema, ..
+                } = right
+                {
+                    plan = LogicalPlan::Unnest {
+                        input: Box::new(plan),
+                        columns,
+                        schema,
+                    };
+                }
+            } else {
+                let combined_schema = plan.schema().clone().merge(right.schema().clone());
+                plan = LogicalPlan::Join {
+                    left: Box::new(plan),
+                    right: Box::new(right),
+                    join_type: JoinType::Cross,
+                    condition: None,
+                    schema: combined_schema,
+                };
+            }
 
             for join in &table_with_joins.joins {
-                let right = self.plan_table_factor(&join.relation)?;
+                let right = self.plan_table_factor(&join.relation, Some(plan.schema()))?;
                 plan = self.plan_join(plan, right, &join.join_operator)?;
             }
         }
@@ -334,7 +354,11 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         Ok(plan)
     }
 
-    fn plan_table_factor(&self, factor: &TableFactor) -> Result<LogicalPlan> {
+    fn plan_table_factor(
+        &self,
+        factor: &TableFactor,
+        outer_schema: Option<&PlanSchema>,
+    ) -> Result<LogicalPlan> {
         match factor {
             TableFactor::Table { name, alias, .. } => {
                 let table_name = name.to_string();
@@ -421,11 +445,11 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     .map(|a| a.value.clone())
                     .unwrap_or_else(|| "offset".to_string());
 
-                let empty_schema = PlanSchema::new();
-                let array_expr = ExprPlanner::plan_expr(&array_exprs[0], &empty_schema)?;
+                let unnest_schema = outer_schema.cloned().unwrap_or_else(PlanSchema::new);
+                let array_expr = ExprPlanner::plan_expr(&array_exprs[0], &unnest_schema)?;
 
                 let unnest_column = UnnestColumn {
-                    expr: array_expr,
+                    expr: array_expr.clone(),
                     alias: Some(element_alias.clone()),
                     with_offset: *with_offset,
                     offset_alias: if *with_offset {
@@ -435,19 +459,38 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     },
                 };
 
-                let mut fields = vec![PlanField::new(element_alias, DataType::String)];
+                let array_type = Self::compute_expr_type(&array_expr, &unnest_schema);
+                let element_type = match array_type {
+                    DataType::Array(inner) => *inner,
+                    _ => DataType::Unknown,
+                };
+                let mut fields = vec![PlanField::new(element_alias, element_type)];
                 if *with_offset {
                     fields.push(PlanField::new(offset_alias_str, DataType::Int64));
                 }
-                let schema = PlanSchema::from_fields(fields);
+                let unnest_only_schema = PlanSchema::from_fields(fields.clone());
 
-                Ok(LogicalPlan::Unnest {
-                    input: Box::new(LogicalPlan::Empty {
-                        schema: PlanSchema::new(),
-                    }),
-                    columns: vec![unnest_column],
-                    schema,
-                })
+                let references_outer = Self::expr_references_schema(&array_expr, &unnest_schema);
+                if references_outer {
+                    let mut combined_fields = unnest_schema.fields.clone();
+                    combined_fields.extend(fields);
+                    let combined_schema = PlanSchema::from_fields(combined_fields);
+                    Ok(LogicalPlan::Unnest {
+                        input: Box::new(LogicalPlan::Empty {
+                            schema: unnest_schema,
+                        }),
+                        columns: vec![unnest_column],
+                        schema: combined_schema,
+                    })
+                } else {
+                    Ok(LogicalPlan::Unnest {
+                        input: Box::new(LogicalPlan::Empty {
+                            schema: PlanSchema::new(),
+                        }),
+                        columns: vec![unnest_column],
+                        schema: unnest_only_schema,
+                    })
+                }
             }
             _ => Err(Error::unsupported(format!(
                 "Unsupported table factor: {:?}",
@@ -530,7 +573,12 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
     ) -> Result<LogicalPlan> {
         let mut expressions = Vec::new();
         let mut fields = Vec::new();
-        let subquery_planner = |query: &ast::Query| self.plan_query(query);
+        let subquery_planner = |query: &ast::Query| {
+            self.outer_schemas.borrow_mut().push(input.schema().clone());
+            let result = self.plan_query(query);
+            self.outer_schemas.borrow_mut().pop();
+            result
+        };
 
         for item in items {
             match item {
@@ -2340,6 +2388,20 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                 DataType::Array(Box::new(element_type))
             }
             ast::DataType::Interval { .. } => DataType::Interval,
+            ast::DataType::Struct(fields, _) => {
+                let struct_fields: Vec<StructField> = fields
+                    .iter()
+                    .map(|f| StructField {
+                        name: f
+                            .field_name
+                            .as_ref()
+                            .map(|n| n.value.clone())
+                            .unwrap_or_default(),
+                        data_type: Self::convert_sql_type(&f.field_type),
+                    })
+                    .collect();
+                DataType::Struct(struct_fields)
+            }
             ast::DataType::Custom(name, _) => {
                 let type_name = name.to_string().to_uppercase();
                 match type_name.as_str() {
@@ -2496,6 +2558,28 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
 
     fn infer_expr_type(&self, expr: &Expr, schema: &PlanSchema) -> DataType {
         Self::compute_expr_type(expr, schema)
+    }
+
+    fn expr_references_schema(expr: &Expr, schema: &PlanSchema) -> bool {
+        match expr {
+            Expr::Column { name, table, .. } => schema
+                .field_index_qualified(name, table.as_deref())
+                .is_some(),
+            Expr::StructAccess { expr, .. } => Self::expr_references_schema(expr, schema),
+            Expr::ArrayAccess { array, index } => {
+                Self::expr_references_schema(array, schema)
+                    || Self::expr_references_schema(index, schema)
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::expr_references_schema(left, schema)
+                    || Self::expr_references_schema(right, schema)
+            }
+            Expr::ScalarFunction { args, .. } => {
+                args.iter().any(|a| Self::expr_references_schema(a, schema))
+            }
+            Expr::Alias { expr, .. } => Self::expr_references_schema(expr, schema),
+            _ => false,
+        }
     }
 
     fn compute_expr_type(expr: &Expr, schema: &PlanSchema) -> DataType {
@@ -2893,8 +2977,18 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             }
             Expr::Extract { .. } => DataType::Int64,
             Expr::TypedString { data_type, .. } => data_type.clone(),
-            Expr::Array { element_type, .. } => {
-                DataType::Array(Box::new(element_type.clone().unwrap_or(DataType::Unknown)))
+            Expr::Array {
+                element_type,
+                elements,
+            } => {
+                let inner_type = if let Some(et) = element_type {
+                    et.clone()
+                } else if let Some(first) = elements.first() {
+                    Self::compute_expr_type(first, schema)
+                } else {
+                    DataType::Unknown
+                };
+                DataType::Array(Box::new(inner_type))
             }
             Expr::ArrayAccess { array, .. } => {
                 let array_type = Self::compute_expr_type(array, schema);
