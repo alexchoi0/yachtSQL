@@ -4,12 +4,12 @@ use yachtsql_optimizer::SampleType;
 use yachtsql_storage::Table;
 
 use super::PlanExecutor;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 impl<'a> PlanExecutor<'a> {
     pub fn execute_sample(
         &mut self,
-        input: &ExecutorPlan,
+        input: &PhysicalPlan,
         sample_type: &SampleType,
         sample_value: i64,
     ) -> Result<Table> {

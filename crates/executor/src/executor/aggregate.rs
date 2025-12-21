@@ -6,9 +6,9 @@ use yachtsql_common::types::Value;
 use yachtsql_ir::{AggregateFunction, Expr, PlanSchema};
 use yachtsql_storage::Table;
 
-use super::{PlanExecutor, plan_schema_to_schema};
+use super::{plan_schema_to_schema, PlanExecutor};
 use crate::ir_evaluator::IrEvaluator;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 #[allow(clippy::wildcard_enum_match_arm)]
 fn get_simple_column_index(expr: &Expr) -> Option<usize> {
@@ -139,7 +139,7 @@ fn execute_columnar_aggregate(
 impl<'a> PlanExecutor<'a> {
     pub fn execute_aggregate(
         &mut self,
-        input: &ExecutorPlan,
+        input: &PhysicalPlan,
         group_by: &[Expr],
         aggregates: &[Expr],
         schema: &PlanSchema,

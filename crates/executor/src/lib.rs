@@ -12,12 +12,12 @@ mod session;
 
 pub use catalog::{Catalog, ColumnDefault, UserFunction, UserProcedure, ViewDef};
 pub use error::{Error, Result};
-pub use executor::{PlanExecutor, plan_schema_to_schema};
+pub use executor::{plan_schema_to_schema, PlanExecutor};
 pub use ir_evaluator::{IrEvaluator, UserFunctionDef};
-pub use plan::ExecutorPlan;
+pub use plan::PhysicalPlan;
 use serde::{Deserialize, Serialize};
 pub use session::Session;
-use yachtsql_optimizer::PhysicalPlan;
+use yachtsql_optimizer::OptimizedLogicalPlan;
 pub use yachtsql_storage::{Record, Table};
 
 #[derive(Serialize, Deserialize)]
@@ -41,7 +41,10 @@ impl QueryExecutor {
         executor.execute(&physical)
     }
 
-    pub fn execute(&mut self, plan: &PhysicalPlan) -> yachtsql_common::error::Result<Table> {
+    pub fn execute(
+        &mut self,
+        plan: &OptimizedLogicalPlan,
+    ) -> yachtsql_common::error::Result<Table> {
         let mut executor = PlanExecutor::new(&mut self.catalog, &mut self.session);
         executor.execute(plan)
     }
@@ -64,7 +67,7 @@ impl Default for QueryExecutor {
 pub fn execute(
     catalog: &mut Catalog,
     session: &mut Session,
-    plan: &PhysicalPlan,
+    plan: &OptimizedLogicalPlan,
 ) -> yachtsql_common::error::Result<Table> {
     let mut executor = PlanExecutor::new(catalog, session);
     executor.execute(plan)

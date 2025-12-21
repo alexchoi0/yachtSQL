@@ -38,12 +38,12 @@ pub use window::*;
 use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::Value;
 use yachtsql_ir::Expr;
-use yachtsql_optimizer::PhysicalPlan;
+use yachtsql_optimizer::OptimizedLogicalPlan;
 use yachtsql_storage::{Field, FieldMode, Schema, Table};
 
 use crate::catalog::Catalog;
 use crate::ir_evaluator::{IrEvaluator, UserFunctionDef};
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 use crate::session::Session;
 
 pub struct PlanExecutor<'a> {
@@ -98,40 +98,40 @@ impl<'a> PlanExecutor<'a> {
             .collect();
     }
 
-    pub fn execute(&mut self, plan: &PhysicalPlan) -> Result<Table> {
-        let executor_plan = ExecutorPlan::from_physical(plan);
+    pub fn execute(&mut self, plan: &OptimizedLogicalPlan) -> Result<Table> {
+        let executor_plan = PhysicalPlan::from_physical(plan);
         self.execute_plan(&executor_plan)
     }
 
-    pub fn execute_plan(&mut self, plan: &ExecutorPlan) -> Result<Table> {
+    pub fn execute_plan(&mut self, plan: &PhysicalPlan) -> Result<Table> {
         match plan {
-            ExecutorPlan::TableScan {
+            PhysicalPlan::TableScan {
                 table_name, schema, ..
             } => self.execute_scan(table_name, schema),
-            ExecutorPlan::Sample {
+            PhysicalPlan::Sample {
                 input,
                 sample_type,
                 sample_value,
             } => self.execute_sample(input, sample_type, *sample_value),
-            ExecutorPlan::Filter { input, predicate } => self.execute_filter(input, predicate),
-            ExecutorPlan::Project {
+            PhysicalPlan::Filter { input, predicate } => self.execute_filter(input, predicate),
+            PhysicalPlan::Project {
                 input,
                 expressions,
                 schema,
             } => self.execute_project(input, expressions, schema),
-            ExecutorPlan::NestedLoopJoin {
+            PhysicalPlan::NestedLoopJoin {
                 left,
                 right,
                 join_type,
                 condition,
                 schema,
             } => self.execute_nested_loop_join(left, right, join_type, condition.as_ref(), schema),
-            ExecutorPlan::CrossJoin {
+            PhysicalPlan::CrossJoin {
                 left,
                 right,
                 schema,
             } => self.execute_cross_join(left, right, schema),
-            ExecutorPlan::HashAggregate {
+            PhysicalPlan::HashAggregate {
                 input,
                 group_by,
                 aggregates,
@@ -140,49 +140,49 @@ impl<'a> PlanExecutor<'a> {
             } => {
                 self.execute_aggregate(input, group_by, aggregates, schema, grouping_sets.as_ref())
             }
-            ExecutorPlan::Sort { input, sort_exprs } => self.execute_sort(input, sort_exprs),
-            ExecutorPlan::Limit {
+            PhysicalPlan::Sort { input, sort_exprs } => self.execute_sort(input, sort_exprs),
+            PhysicalPlan::Limit {
                 input,
                 limit,
                 offset,
             } => self.execute_limit(input, *limit, *offset),
-            ExecutorPlan::TopN {
+            PhysicalPlan::TopN {
                 input,
                 sort_exprs,
                 limit,
             } => self.execute_topn(input, sort_exprs, *limit),
-            ExecutorPlan::Distinct { input } => self.execute_distinct(input),
-            ExecutorPlan::Union {
+            PhysicalPlan::Distinct { input } => self.execute_distinct(input),
+            PhysicalPlan::Union {
                 inputs,
                 all,
                 schema,
             } => self.execute_union(inputs, *all, schema),
-            ExecutorPlan::Intersect {
+            PhysicalPlan::Intersect {
                 left,
                 right,
                 all,
                 schema,
             } => self.execute_intersect(left, right, *all, schema),
-            ExecutorPlan::Except {
+            PhysicalPlan::Except {
                 left,
                 right,
                 all,
                 schema,
             } => self.execute_except(left, right, *all, schema),
-            ExecutorPlan::Window {
+            PhysicalPlan::Window {
                 input,
                 window_exprs,
                 schema,
             } => self.execute_window(input, window_exprs, schema),
-            ExecutorPlan::WithCte { ctes, body } => self.execute_cte(ctes, body),
-            ExecutorPlan::Unnest {
+            PhysicalPlan::WithCte { ctes, body } => self.execute_cte(ctes, body),
+            PhysicalPlan::Unnest {
                 input,
                 columns,
                 schema,
             } => self.execute_unnest(input, columns, schema),
-            ExecutorPlan::Qualify { input, predicate } => self.execute_qualify(input, predicate),
-            ExecutorPlan::Values { values, schema } => self.execute_values(values, schema),
-            ExecutorPlan::Empty { schema } => {
+            PhysicalPlan::Qualify { input, predicate } => self.execute_qualify(input, predicate),
+            PhysicalPlan::Values { values, schema } => self.execute_values(values, schema),
+            PhysicalPlan::Empty { schema } => {
                 let result_schema = plan_schema_to_schema(schema);
                 let mut table = Table::empty(result_schema.clone());
                 if result_schema.field_count() == 0 {
@@ -190,41 +190,41 @@ impl<'a> PlanExecutor<'a> {
                 }
                 Ok(table)
             }
-            ExecutorPlan::Insert {
+            PhysicalPlan::Insert {
                 table_name,
                 columns,
                 source,
             } => self.execute_insert(table_name, columns, source),
-            ExecutorPlan::Update {
+            PhysicalPlan::Update {
                 table_name,
                 assignments,
                 filter,
             } => self.execute_update(table_name, assignments, filter.as_ref()),
-            ExecutorPlan::Delete { table_name, filter } => {
+            PhysicalPlan::Delete { table_name, filter } => {
                 self.execute_delete(table_name, filter.as_ref())
             }
-            ExecutorPlan::Merge {
+            PhysicalPlan::Merge {
                 target_table,
                 source,
                 on,
                 clauses,
             } => self.execute_merge(target_table, source, on, clauses),
-            ExecutorPlan::CreateTable {
+            PhysicalPlan::CreateTable {
                 table_name,
                 columns,
                 if_not_exists,
                 or_replace,
             } => self.execute_create_table(table_name, columns, *if_not_exists, *or_replace),
-            ExecutorPlan::DropTable {
+            PhysicalPlan::DropTable {
                 table_names,
                 if_exists,
             } => self.execute_drop_tables(table_names, *if_exists),
-            ExecutorPlan::AlterTable {
+            PhysicalPlan::AlterTable {
                 table_name,
                 operation,
             } => self.execute_alter_table(table_name, operation),
-            ExecutorPlan::Truncate { table_name } => self.execute_truncate(table_name),
-            ExecutorPlan::CreateView {
+            PhysicalPlan::Truncate { table_name } => self.execute_truncate(table_name),
+            PhysicalPlan::CreateView {
                 name,
                 query: _,
                 query_sql,
@@ -238,18 +238,18 @@ impl<'a> PlanExecutor<'a> {
                 *or_replace,
                 *if_not_exists,
             ),
-            ExecutorPlan::DropView { name, if_exists } => self.execute_drop_view(name, *if_exists),
-            ExecutorPlan::CreateSchema {
+            PhysicalPlan::DropView { name, if_exists } => self.execute_drop_view(name, *if_exists),
+            PhysicalPlan::CreateSchema {
                 name,
                 if_not_exists,
             } => self.execute_create_schema(name, *if_not_exists),
-            ExecutorPlan::DropSchema {
+            PhysicalPlan::DropSchema {
                 name,
                 if_exists,
                 cascade,
             } => self.execute_drop_schema(name, *if_exists, *cascade),
-            ExecutorPlan::AlterSchema { name, options } => self.execute_alter_schema(name, options),
-            ExecutorPlan::CreateFunction {
+            PhysicalPlan::AlterSchema { name, options } => self.execute_alter_schema(name, options),
+            PhysicalPlan::CreateFunction {
                 name,
                 args,
                 return_type,
@@ -266,67 +266,67 @@ impl<'a> PlanExecutor<'a> {
                 *if_not_exists,
                 *is_temp,
             ),
-            ExecutorPlan::DropFunction { name, if_exists } => {
+            PhysicalPlan::DropFunction { name, if_exists } => {
                 self.execute_drop_function(name, *if_exists)
             }
-            ExecutorPlan::CreateProcedure {
+            PhysicalPlan::CreateProcedure {
                 name,
                 args,
                 body,
                 or_replace,
             } => self.execute_create_procedure(name, args, body, *or_replace),
-            ExecutorPlan::DropProcedure { name, if_exists } => {
+            PhysicalPlan::DropProcedure { name, if_exists } => {
                 self.execute_drop_procedure(name, *if_exists)
             }
-            ExecutorPlan::Call {
+            PhysicalPlan::Call {
                 procedure_name,
                 args,
             } => self.execute_call(procedure_name, args),
-            ExecutorPlan::ExportData { options, query } => self.execute_export(options, query),
-            ExecutorPlan::LoadData {
+            PhysicalPlan::ExportData { options, query } => self.execute_export(options, query),
+            PhysicalPlan::LoadData {
                 table_name,
                 options,
                 temp_table,
                 temp_schema,
             } => self.execute_load(table_name, options, *temp_table, temp_schema.as_ref()),
-            ExecutorPlan::Declare {
+            PhysicalPlan::Declare {
                 name,
                 data_type,
                 default,
             } => self.execute_declare(name, data_type, default.as_ref()),
-            ExecutorPlan::SetVariable { name, value } => self.execute_set_variable(name, value),
-            ExecutorPlan::If {
+            PhysicalPlan::SetVariable { name, value } => self.execute_set_variable(name, value),
+            PhysicalPlan::If {
                 condition,
                 then_branch,
                 else_branch,
             } => self.execute_if(condition, then_branch, else_branch.as_deref()),
-            ExecutorPlan::While { condition, body } => self.execute_while(condition, body),
-            ExecutorPlan::Loop { body, label } => self.execute_loop(body, label.as_deref()),
-            ExecutorPlan::Repeat {
+            PhysicalPlan::While { condition, body } => self.execute_while(condition, body),
+            PhysicalPlan::Loop { body, label } => self.execute_loop(body, label.as_deref()),
+            PhysicalPlan::Repeat {
                 body,
                 until_condition,
             } => self.execute_repeat(body, until_condition),
-            ExecutorPlan::For {
+            PhysicalPlan::For {
                 variable,
                 query,
                 body,
             } => self.execute_for(variable, query, body),
-            ExecutorPlan::Return { value } => {
+            PhysicalPlan::Return { value } => {
                 Err(Error::InvalidQuery("RETURN outside of function".into()))
             }
-            ExecutorPlan::Raise { message, level } => self.execute_raise(message.as_ref(), *level),
-            ExecutorPlan::Break => Err(Error::InvalidQuery("BREAK outside of loop".into())),
-            ExecutorPlan::Continue => Err(Error::InvalidQuery("CONTINUE outside of loop".into())),
-            ExecutorPlan::CreateSnapshot {
+            PhysicalPlan::Raise { message, level } => self.execute_raise(message.as_ref(), *level),
+            PhysicalPlan::Break => Err(Error::InvalidQuery("BREAK outside of loop".into())),
+            PhysicalPlan::Continue => Err(Error::InvalidQuery("CONTINUE outside of loop".into())),
+            PhysicalPlan::CreateSnapshot {
                 snapshot_name,
                 source_name,
                 if_not_exists,
             } => self.execute_create_snapshot(snapshot_name, source_name, *if_not_exists),
-            ExecutorPlan::DropSnapshot {
+            PhysicalPlan::DropSnapshot {
                 snapshot_name,
                 if_exists,
             } => self.execute_drop_snapshot(snapshot_name, *if_exists),
-            ExecutorPlan::Assert { condition, message } => {
+            PhysicalPlan::Assert { condition, message } => {
                 self.execute_assert(condition, message.as_ref())
             }
         }

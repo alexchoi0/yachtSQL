@@ -1078,11 +1078,9 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
 
         let input_field_count = input.schema().fields.len();
         let mut window_schema_fields = input.schema().fields.clone();
-        for (j, &idx) in window_expr_indices.iter().enumerate() {
-            window_schema_fields.push(PlanField::new(
-                format!("__window_{}", j),
-                fields[idx].data_type.clone(),
-            ));
+        for (j, wf) in window_funcs.iter().enumerate() {
+            let window_type = Self::compute_expr_type(wf, input.schema());
+            window_schema_fields.push(PlanField::new(format!("__window_{}", j), window_type));
         }
         let window_schema = PlanSchema::from_fields(window_schema_fields);
 
