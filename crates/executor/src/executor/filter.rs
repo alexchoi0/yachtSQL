@@ -232,7 +232,7 @@ impl<'a> PlanExecutor<'a> {
                 Ok(LogicalPlan::Join {
                     left: Box::new(new_left),
                     right: Box::new(new_right),
-                    join_type: join_type.clone(),
+                    join_type: *join_type,
                     condition: new_condition,
                     schema: schema.clone(),
                 })
@@ -318,20 +318,18 @@ impl<'a> PlanExecutor<'a> {
                     outer_schema
                         .fields()
                         .iter()
-                        .any(|f| f.source_table.as_ref().map_or(false, |t| t == tbl))
+                        .any(|f| f.source_table.as_ref() == Some(tbl))
                 } else {
                     outer_schema.field_index(name).is_some()
                 };
 
-                if should_substitute {
-                    if let Some(idx) = outer_schema.field_index(name) {
-                        let value = outer_record
-                            .values()
-                            .get(idx)
-                            .cloned()
-                            .unwrap_or(Value::Null);
-                        return Ok(Expr::Literal(Self::value_to_literal(value)));
-                    }
+                if should_substitute && let Some(idx) = outer_schema.field_index(name) {
+                    let value = outer_record
+                        .values()
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    return Ok(Expr::Literal(Self::value_to_literal(value)));
                 }
                 Ok(Expr::Column {
                     table: table.clone(),
@@ -346,7 +344,7 @@ impl<'a> PlanExecutor<'a> {
                     self.substitute_outer_refs_in_expr(right, outer_schema, outer_record)?;
                 Ok(Expr::BinaryOp {
                     left: Box::new(new_left),
-                    op: op.clone(),
+                    op: *op,
                     right: Box::new(new_right),
                 })
             }
