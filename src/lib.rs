@@ -35,6 +35,7 @@
 //! ```
 
 pub use yachtsql_common::error::{Error, Result};
+pub use yachtsql_common::result::{ColumnInfo, QueryResult, Row};
 pub use yachtsql_common::types::{DataType, Value};
 pub use yachtsql_executor::{Catalog, QueryExecutor, Record, Session, Table};
 pub use yachtsql_ir::LogicalPlan;
@@ -57,6 +58,16 @@ impl YachtSQLEngine {
 
     pub fn execute(&mut self, sql: &str) -> Result<Table> {
         self.executor.execute_sql(sql)
+    }
+
+    pub fn query(&mut self, sql: &str) -> Result<QueryResult> {
+        let table = self.executor.execute_sql(sql)?;
+        table.to_query_result()
+    }
+
+    pub fn run(&mut self, sql: &str) -> Result<u64> {
+        let table = self.executor.execute_sql(sql)?;
+        Ok(table.row_count() as u64)
     }
 
     pub fn session(&self) -> &Session {
