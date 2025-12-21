@@ -25,7 +25,6 @@ fn test_st_makeline() {
 }
 
 #[test]
-#[ignore = "Implement me!"]
 fn test_st_makepolygon() {
     let mut executor = create_executor();
     let result = executor

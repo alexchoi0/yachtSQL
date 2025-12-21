@@ -5385,30 +5385,41 @@ impl<'a> IrEvaluator<'a> {
     }
 
     fn fn_st_makeline(&self, args: &[Value]) -> Result<Value> {
-        if args.len() < 2 {
-            return Err(Error::InvalidQuery(
-                "ST_MAKELINE requires at least two geography arguments".into(),
-            ));
-        }
         let mut points = Vec::new();
-        for arg in args {
-            match arg {
-                Value::Null => continue,
-                Value::Geography(wkt) if wkt.starts_with("POINT(") => {
-                    let inner = &wkt[6..wkt.len() - 1];
-                    points.push(inner.to_string());
+
+        if args.len() == 1 {
+            if let Value::Array(arr) = &args[0] {
+                for elem in arr {
+                    if let Value::Geography(wkt) = elem {
+                        if wkt.starts_with("POINT(") {
+                            let inner = &wkt[6..wkt.len() - 1];
+                            points.push(inner.to_string());
+                        }
+                    }
                 }
-                _ => {}
+            }
+        } else {
+            for arg in args {
+                match arg {
+                    Value::Null => continue,
+                    Value::Geography(wkt) if wkt.starts_with("POINT(") => {
+                        let inner = &wkt[6..wkt.len() - 1];
+                        points.push(inner.to_string());
+                    }
+                    _ => {}
+                }
             }
         }
-        if points.is_empty() {
-            Ok(Value::Null)
-        } else {
-            Ok(Value::Geography(format!(
-                "LINESTRING({})",
-                points.join(", ")
-            )))
+
+        if points.len() < 2 {
+            return Err(Error::InvalidQuery(
+                "ST_MAKELINE requires at least two geography points".into(),
+            ));
         }
+        Ok(Value::Geography(format!(
+            "LINESTRING({})",
+            points.join(", ")
+        )))
     }
 
     fn fn_st_makepolygon(&self, args: &[Value]) -> Result<Value> {
