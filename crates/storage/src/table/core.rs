@@ -277,6 +277,25 @@ impl Table {
             row_count: self.row_count,
         }
     }
+
+    pub fn to_query_result(&self) -> Result<yachtsql_common::QueryResult> {
+        use yachtsql_common::{ColumnInfo, QueryResult};
+
+        let columns: Vec<ColumnInfo> = self
+            .schema
+            .fields()
+            .iter()
+            .map(|f| ColumnInfo::new(&f.name, f.data_type.to_bq_type()))
+            .collect();
+
+        let records = self.to_records()?;
+        let rows: Vec<Vec<serde_json::Value>> = records
+            .iter()
+            .map(|record| record.values().iter().map(|v| v.to_json()).collect())
+            .collect();
+
+        Ok(QueryResult::new(columns, rows))
+    }
 }
 
 pub trait TableSchemaOps {
