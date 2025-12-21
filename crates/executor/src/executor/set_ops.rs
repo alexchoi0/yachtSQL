@@ -5,13 +5,13 @@ use yachtsql_common::types::Value;
 use yachtsql_ir::PlanSchema;
 use yachtsql_storage::Table;
 
-use super::{PlanExecutor, plan_schema_to_schema};
-use crate::plan::ExecutorPlan;
+use super::{plan_schema_to_schema, PlanExecutor};
+use crate::plan::PhysicalPlan;
 
 impl<'a> PlanExecutor<'a> {
     pub fn execute_union(
         &mut self,
-        inputs: &[ExecutorPlan],
+        inputs: &[PhysicalPlan],
         all: bool,
         schema: &PlanSchema,
     ) -> Result<Table> {
@@ -43,8 +43,8 @@ impl<'a> PlanExecutor<'a> {
 
     pub fn execute_intersect(
         &mut self,
-        left: &ExecutorPlan,
-        right: &ExecutorPlan,
+        left: &PhysicalPlan,
+        right: &PhysicalPlan,
         all: bool,
         schema: &PlanSchema,
     ) -> Result<Table> {
@@ -91,8 +91,8 @@ impl<'a> PlanExecutor<'a> {
 
     pub fn execute_except(
         &mut self,
-        left: &ExecutorPlan,
-        right: &ExecutorPlan,
+        left: &PhysicalPlan,
+        right: &PhysicalPlan,
         all: bool,
         schema: &PlanSchema,
     ) -> Result<Table> {

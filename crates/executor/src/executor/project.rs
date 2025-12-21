@@ -4,14 +4,14 @@ use yachtsql_ir::{BinaryOp, Expr, LogicalPlan, PlanSchema};
 use yachtsql_optimizer::optimize;
 use yachtsql_storage::{Record, Schema, Table};
 
-use super::{PlanExecutor, plan_schema_to_schema};
+use super::{plan_schema_to_schema, PlanExecutor};
 use crate::ir_evaluator::IrEvaluator;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 impl<'a> PlanExecutor<'a> {
     pub fn execute_project(
         &mut self,
-        input: &ExecutorPlan,
+        input: &PhysicalPlan,
         expressions: &[Expr],
         schema: &PlanSchema,
     ) -> Result<Table> {
@@ -124,7 +124,7 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<Value> {
         let substituted = self.substitute_outer_refs_in_plan(plan, outer_schema, outer_record)?;
         let physical = optimize(&substituted)?;
-        let executor_plan = ExecutorPlan::from_physical(&physical);
+        let executor_plan = PhysicalPlan::from_physical(&physical);
         let result_table = self.execute_plan(&executor_plan)?;
 
         if result_table.is_empty() {
@@ -153,7 +153,7 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<bool> {
         let substituted = self.substitute_outer_refs_in_plan(plan, outer_schema, outer_record)?;
         let physical = optimize(&substituted)?;
-        let executor_plan = ExecutorPlan::from_physical(&physical);
+        let executor_plan = PhysicalPlan::from_physical(&physical);
         let result_table = self.execute_plan(&executor_plan)?;
         Ok(!result_table.is_empty())
     }
@@ -166,7 +166,7 @@ impl<'a> PlanExecutor<'a> {
     ) -> Result<Value> {
         let substituted = self.substitute_outer_refs_in_plan(plan, outer_schema, outer_record)?;
         let physical = optimize(&substituted)?;
-        let executor_plan = ExecutorPlan::from_physical(&physical);
+        let executor_plan = PhysicalPlan::from_physical(&physical);
         let result_table = self.execute_plan(&executor_plan)?;
 
         let result_schema = result_table.schema();

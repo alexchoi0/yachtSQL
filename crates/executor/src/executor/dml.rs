@@ -6,7 +6,7 @@ use yachtsql_storage::{Schema, Table};
 
 use super::PlanExecutor;
 use crate::ir_evaluator::IrEvaluator;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 fn coerce_value(value: Value, target_type: &DataType) -> Result<Value> {
     match (&value, target_type) {
@@ -59,7 +59,7 @@ impl<'a> PlanExecutor<'a> {
         &mut self,
         table_name: &str,
         columns: &[String],
-        source: &ExecutorPlan,
+        source: &PhysicalPlan,
     ) -> Result<Table> {
         let target_schema = self
             .catalog
@@ -84,7 +84,7 @@ impl<'a> PlanExecutor<'a> {
 
         let fields = target_schema.fields().to_vec();
 
-        if let ExecutorPlan::Values { values, .. } = source {
+        if let PhysicalPlan::Values { values, .. } = source {
             let target = self
                 .catalog
                 .get_table_mut(table_name)
@@ -310,7 +310,7 @@ impl<'a> PlanExecutor<'a> {
 
     fn execute_logical_plan(&mut self, plan: &LogicalPlan) -> Result<Table> {
         let physical_plan = yachtsql_optimizer::optimize(plan)?;
-        let executor_plan = ExecutorPlan::from_physical(&physical_plan);
+        let executor_plan = PhysicalPlan::from_physical(&physical_plan);
         self.execute_plan(&executor_plan)
     }
 
@@ -377,7 +377,7 @@ impl<'a> PlanExecutor<'a> {
     pub fn execute_merge(
         &mut self,
         target_table: &str,
-        source: &ExecutorPlan,
+        source: &PhysicalPlan,
         on: &Expr,
         clauses: &[MergeClause],
     ) -> Result<Table> {

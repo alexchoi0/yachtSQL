@@ -7,14 +7,14 @@ use yachtsql_ir::{
 };
 use yachtsql_storage::{Record, Table};
 
-use super::{PlanExecutor, plan_schema_to_schema};
+use super::{plan_schema_to_schema, PlanExecutor};
 use crate::ir_evaluator::IrEvaluator;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 impl<'a> PlanExecutor<'a> {
     pub fn execute_window(
         &mut self,
-        input: &ExecutorPlan,
+        input: &PhysicalPlan,
         window_exprs: &[Expr],
         schema: &PlanSchema,
     ) -> Result<Table> {

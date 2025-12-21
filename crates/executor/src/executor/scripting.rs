@@ -6,7 +6,7 @@ use yachtsql_storage::{Record, Schema, Table};
 
 use super::PlanExecutor;
 use crate::ir_evaluator::IrEvaluator;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 impl<'a> PlanExecutor<'a> {
     pub fn execute_call(&mut self, procedure_name: &str, args: &[Expr]) -> Result<Table> {
@@ -64,7 +64,7 @@ impl<'a> PlanExecutor<'a> {
 
         for body_plan in &proc.body {
             let physical_plan = optimize(body_plan)?;
-            let executor_plan = ExecutorPlan::from_physical(&physical_plan);
+            let executor_plan = PhysicalPlan::from_physical(&physical_plan);
             last_result = self.execute_plan(&executor_plan)?;
         }
 
@@ -123,8 +123,8 @@ impl<'a> PlanExecutor<'a> {
     pub fn execute_if(
         &mut self,
         condition: &Expr,
-        then_branch: &[ExecutorPlan],
-        else_branch: Option<&[ExecutorPlan]>,
+        then_branch: &[PhysicalPlan],
+        else_branch: Option<&[PhysicalPlan]>,
     ) -> Result<Table> {
         let empty_schema = Schema::new();
         let empty_record = Record::from_values(vec![]);
@@ -144,7 +144,7 @@ impl<'a> PlanExecutor<'a> {
         Ok(Table::empty(Schema::new()))
     }
 
-    pub fn execute_while(&mut self, condition: &Expr, body: &[ExecutorPlan]) -> Result<Table> {
+    pub fn execute_while(&mut self, condition: &Expr, body: &[PhysicalPlan]) -> Result<Table> {
         let empty_schema = Schema::new();
         let empty_record = Record::from_values(vec![]);
 
@@ -172,7 +172,7 @@ impl<'a> PlanExecutor<'a> {
         Ok(Table::empty(Schema::new()))
     }
 
-    pub fn execute_loop(&mut self, body: &[ExecutorPlan], _label: Option<&str>) -> Result<Table> {
+    pub fn execute_loop(&mut self, body: &[PhysicalPlan], _label: Option<&str>) -> Result<Table> {
         loop {
             for plan in body {
                 match self.execute_plan(plan) {
@@ -191,7 +191,7 @@ impl<'a> PlanExecutor<'a> {
 
     pub fn execute_repeat(
         &mut self,
-        body: &[ExecutorPlan],
+        body: &[PhysicalPlan],
         until_condition: &Expr,
     ) -> Result<Table> {
         let empty_schema = Schema::new();
@@ -224,8 +224,8 @@ impl<'a> PlanExecutor<'a> {
     pub fn execute_for(
         &mut self,
         variable: &str,
-        query: &ExecutorPlan,
-        body: &[ExecutorPlan],
+        query: &PhysicalPlan,
+        body: &[PhysicalPlan],
     ) -> Result<Table> {
         let result = self.execute_plan(query)?;
 

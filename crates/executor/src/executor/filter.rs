@@ -6,10 +6,10 @@ use yachtsql_storage::{Record, Schema, Table};
 
 use super::PlanExecutor;
 use crate::ir_evaluator::IrEvaluator;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 impl<'a> PlanExecutor<'a> {
-    pub fn execute_filter(&mut self, input: &ExecutorPlan, predicate: &Expr) -> Result<Table> {
+    pub fn execute_filter(&mut self, input: &PhysicalPlan, predicate: &Expr) -> Result<Table> {
         let input_table = self.execute_plan(input)?;
         let schema = input_table.schema().clone();
 
@@ -132,7 +132,7 @@ impl<'a> PlanExecutor<'a> {
         let substituted =
             self.substitute_outer_refs_in_plan(subquery, outer_schema, outer_record)?;
         let physical = optimize(&substituted)?;
-        let executor_plan = ExecutorPlan::from_physical(&physical);
+        let executor_plan = PhysicalPlan::from_physical(&physical);
         let result_table = self.execute_plan(&executor_plan)?;
         Ok(!result_table.is_empty())
     }
@@ -144,7 +144,7 @@ impl<'a> PlanExecutor<'a> {
         _outer_record: &Record,
     ) -> Result<Vec<Value>> {
         let physical = optimize(subquery)?;
-        let executor_plan = ExecutorPlan::from_physical(&physical);
+        let executor_plan = PhysicalPlan::from_physical(&physical);
         let result_table = self.execute_plan(&executor_plan)?;
 
         let mut values = Vec::new();
@@ -159,7 +159,7 @@ impl<'a> PlanExecutor<'a> {
 
     fn evaluate_scalar_subquery(&mut self, subquery: &LogicalPlan) -> Result<Value> {
         let physical = optimize(subquery)?;
-        let executor_plan = ExecutorPlan::from_physical(&physical);
+        let executor_plan = PhysicalPlan::from_physical(&physical);
         let result_table = self.execute_plan(&executor_plan)?;
 
         for record in result_table.rows()? {
@@ -400,7 +400,7 @@ impl<'a> PlanExecutor<'a> {
     }
 
     fn value_to_literal(value: Value) -> Literal {
-        use chrono::{Datelike, NaiveDate, Timelike};
+        use chrono::{NaiveDate, Timelike};
         const UNIX_EPOCH_DATE: NaiveDate = match NaiveDate::from_ymd_opt(1970, 1, 1) {
             Some(d) => d,
             None => panic!("Invalid date"),

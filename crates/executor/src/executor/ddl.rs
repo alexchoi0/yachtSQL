@@ -23,7 +23,7 @@ use yachtsql_storage::{Field, FieldMode, Schema, Table, TableSchemaOps};
 use super::PlanExecutor;
 use crate::catalog::{ColumnDefault, UserFunction, UserProcedure};
 use crate::ir_evaluator::IrEvaluator;
-use crate::plan::ExecutorPlan;
+use crate::plan::PhysicalPlan;
 
 impl<'a> PlanExecutor<'a> {
     pub fn execute_create_table(
@@ -285,7 +285,7 @@ impl<'a> PlanExecutor<'a> {
     pub fn execute_export(
         &mut self,
         options: &ExportOptions,
-        query: &ExecutorPlan,
+        query: &PhysicalPlan,
     ) -> Result<Table> {
         let data = self.execute_plan(query)?;
 
@@ -730,7 +730,7 @@ impl<'a> PlanExecutor<'a> {
     }
 
     fn load_parquet(&self, path: &str, schema: &Schema) -> Result<Vec<Vec<Value>>> {
-        use arrow::array::{Array, AsArray};
+        use arrow::array::Array;
 
         let file = File::open(path)
             .map_err(|e| Error::internal(format!("Failed to open file '{}': {}", path, e)))?;
@@ -1082,7 +1082,7 @@ impl<'a> PlanExecutor<'a> {
         &mut self,
         name: &str,
         args: &[ProcedureArg],
-        body: &[ExecutorPlan],
+        body: &[PhysicalPlan],
         or_replace: bool,
     ) -> Result<Table> {
         let body_plans = body
@@ -1113,10 +1113,10 @@ impl<'a> PlanExecutor<'a> {
     }
 }
 
-fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPlan {
+fn executor_plan_to_logical_plan(plan: &PhysicalPlan) -> yachtsql_ir::LogicalPlan {
     use yachtsql_ir::LogicalPlan;
     match plan {
-        ExecutorPlan::TableScan {
+        PhysicalPlan::TableScan {
             table_name,
             schema,
             projection,
@@ -1125,11 +1125,11 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             schema: schema.clone(),
             projection: projection.clone(),
         },
-        ExecutorPlan::Filter { input, predicate } => LogicalPlan::Filter {
+        PhysicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
             input: Box::new(executor_plan_to_logical_plan(input)),
             predicate: predicate.clone(),
         },
-        ExecutorPlan::Project {
+        PhysicalPlan::Project {
             input,
             expressions,
             schema,
@@ -1138,7 +1138,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             expressions: expressions.clone(),
             schema: schema.clone(),
         },
-        ExecutorPlan::NestedLoopJoin {
+        PhysicalPlan::NestedLoopJoin {
             left,
             right,
             join_type,
@@ -1151,7 +1151,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             condition: condition.clone(),
             schema: schema.clone(),
         },
-        ExecutorPlan::CrossJoin {
+        PhysicalPlan::CrossJoin {
             left,
             right,
             schema,
@@ -1162,7 +1162,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             condition: None,
             schema: schema.clone(),
         },
-        ExecutorPlan::HashAggregate {
+        PhysicalPlan::HashAggregate {
             input,
             group_by,
             aggregates,
@@ -1175,11 +1175,11 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             schema: schema.clone(),
             grouping_sets: grouping_sets.clone(),
         },
-        ExecutorPlan::Sort { input, sort_exprs } => LogicalPlan::Sort {
+        PhysicalPlan::Sort { input, sort_exprs } => LogicalPlan::Sort {
             input: Box::new(executor_plan_to_logical_plan(input)),
             sort_exprs: sort_exprs.clone(),
         },
-        ExecutorPlan::Limit {
+        PhysicalPlan::Limit {
             input,
             limit,
             offset,
@@ -1188,7 +1188,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             limit: *limit,
             offset: *offset,
         },
-        ExecutorPlan::TopN {
+        PhysicalPlan::TopN {
             input,
             sort_exprs,
             limit,
@@ -1200,10 +1200,10 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             limit: Some(*limit),
             offset: None,
         },
-        ExecutorPlan::Distinct { input } => LogicalPlan::Distinct {
+        PhysicalPlan::Distinct { input } => LogicalPlan::Distinct {
             input: Box::new(executor_plan_to_logical_plan(input)),
         },
-        ExecutorPlan::Union {
+        PhysicalPlan::Union {
             inputs,
             all,
             schema,
@@ -1223,7 +1223,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
                 schema: schema.clone(),
             })
         }
-        ExecutorPlan::Intersect {
+        PhysicalPlan::Intersect {
             left,
             right,
             all,
@@ -1235,7 +1235,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             all: *all,
             schema: schema.clone(),
         },
-        ExecutorPlan::Except {
+        PhysicalPlan::Except {
             left,
             right,
             all,
@@ -1247,7 +1247,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             all: *all,
             schema: schema.clone(),
         },
-        ExecutorPlan::Window {
+        PhysicalPlan::Window {
             input,
             window_exprs,
             schema,
@@ -1256,7 +1256,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             window_exprs: window_exprs.clone(),
             schema: schema.clone(),
         },
-        ExecutorPlan::Unnest {
+        PhysicalPlan::Unnest {
             input,
             columns,
             schema,
@@ -1265,22 +1265,22 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             columns: columns.clone(),
             schema: schema.clone(),
         },
-        ExecutorPlan::Qualify { input, predicate } => LogicalPlan::Qualify {
+        PhysicalPlan::Qualify { input, predicate } => LogicalPlan::Qualify {
             input: Box::new(executor_plan_to_logical_plan(input)),
             predicate: predicate.clone(),
         },
-        ExecutorPlan::WithCte { ctes, body } => LogicalPlan::WithCte {
+        PhysicalPlan::WithCte { ctes, body } => LogicalPlan::WithCte {
             ctes: ctes.clone(),
             body: Box::new(executor_plan_to_logical_plan(body)),
         },
-        ExecutorPlan::Values { values, schema } => LogicalPlan::Values {
+        PhysicalPlan::Values { values, schema } => LogicalPlan::Values {
             values: values.clone(),
             schema: schema.clone(),
         },
-        ExecutorPlan::Empty { schema } => LogicalPlan::Empty {
+        PhysicalPlan::Empty { schema } => LogicalPlan::Empty {
             schema: schema.clone(),
         },
-        ExecutorPlan::Insert {
+        PhysicalPlan::Insert {
             table_name,
             columns,
             source,
@@ -1289,7 +1289,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             columns: columns.clone(),
             source: Box::new(executor_plan_to_logical_plan(source)),
         },
-        ExecutorPlan::Update {
+        PhysicalPlan::Update {
             table_name,
             assignments,
             filter,
@@ -1298,11 +1298,11 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             assignments: assignments.clone(),
             filter: filter.clone(),
         },
-        ExecutorPlan::Delete { table_name, filter } => LogicalPlan::Delete {
+        PhysicalPlan::Delete { table_name, filter } => LogicalPlan::Delete {
             table_name: table_name.clone(),
             filter: filter.clone(),
         },
-        ExecutorPlan::Merge {
+        PhysicalPlan::Merge {
             target_table,
             source,
             on,
@@ -1313,7 +1313,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             on: on.clone(),
             clauses: clauses.clone(),
         },
-        ExecutorPlan::CreateTable {
+        PhysicalPlan::CreateTable {
             table_name,
             columns,
             if_not_exists,
@@ -1324,24 +1324,24 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             if_not_exists: *if_not_exists,
             or_replace: *or_replace,
         },
-        ExecutorPlan::DropTable {
+        PhysicalPlan::DropTable {
             table_names,
             if_exists,
         } => LogicalPlan::DropTable {
             table_names: table_names.clone(),
             if_exists: *if_exists,
         },
-        ExecutorPlan::AlterTable {
+        PhysicalPlan::AlterTable {
             table_name,
             operation,
         } => LogicalPlan::AlterTable {
             table_name: table_name.clone(),
             operation: operation.clone(),
         },
-        ExecutorPlan::Truncate { table_name } => LogicalPlan::Truncate {
+        PhysicalPlan::Truncate { table_name } => LogicalPlan::Truncate {
             table_name: table_name.clone(),
         },
-        ExecutorPlan::CreateView {
+        PhysicalPlan::CreateView {
             name,
             query,
             query_sql,
@@ -1356,18 +1356,18 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             or_replace: *or_replace,
             if_not_exists: *if_not_exists,
         },
-        ExecutorPlan::DropView { name, if_exists } => LogicalPlan::DropView {
+        PhysicalPlan::DropView { name, if_exists } => LogicalPlan::DropView {
             name: name.clone(),
             if_exists: *if_exists,
         },
-        ExecutorPlan::CreateSchema {
+        PhysicalPlan::CreateSchema {
             name,
             if_not_exists,
         } => LogicalPlan::CreateSchema {
             name: name.clone(),
             if_not_exists: *if_not_exists,
         },
-        ExecutorPlan::DropSchema {
+        PhysicalPlan::DropSchema {
             name,
             if_exists,
             cascade,
@@ -1376,11 +1376,11 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             if_exists: *if_exists,
             cascade: *cascade,
         },
-        ExecutorPlan::AlterSchema { name, options } => LogicalPlan::AlterSchema {
+        PhysicalPlan::AlterSchema { name, options } => LogicalPlan::AlterSchema {
             name: name.clone(),
             options: options.clone(),
         },
-        ExecutorPlan::CreateFunction {
+        PhysicalPlan::CreateFunction {
             name,
             args,
             return_type,
@@ -1397,11 +1397,11 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             if_not_exists: *if_not_exists,
             is_temp: *is_temp,
         },
-        ExecutorPlan::DropFunction { name, if_exists } => LogicalPlan::DropFunction {
+        PhysicalPlan::DropFunction { name, if_exists } => LogicalPlan::DropFunction {
             name: name.clone(),
             if_exists: *if_exists,
         },
-        ExecutorPlan::CreateProcedure {
+        PhysicalPlan::CreateProcedure {
             name,
             args,
             body,
@@ -1412,22 +1412,22 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             body: body.iter().map(executor_plan_to_logical_plan).collect(),
             or_replace: *or_replace,
         },
-        ExecutorPlan::DropProcedure { name, if_exists } => LogicalPlan::DropProcedure {
+        PhysicalPlan::DropProcedure { name, if_exists } => LogicalPlan::DropProcedure {
             name: name.clone(),
             if_exists: *if_exists,
         },
-        ExecutorPlan::Call {
+        PhysicalPlan::Call {
             procedure_name,
             args,
         } => LogicalPlan::Call {
             procedure_name: procedure_name.clone(),
             args: args.clone(),
         },
-        ExecutorPlan::ExportData { options, query } => LogicalPlan::ExportData {
+        PhysicalPlan::ExportData { options, query } => LogicalPlan::ExportData {
             options: options.clone(),
             query: Box::new(executor_plan_to_logical_plan(query)),
         },
-        ExecutorPlan::Declare {
+        PhysicalPlan::Declare {
             name,
             data_type,
             default,
@@ -1436,11 +1436,11 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             data_type: data_type.clone(),
             default: default.clone(),
         },
-        ExecutorPlan::SetVariable { name, value } => LogicalPlan::SetVariable {
+        PhysicalPlan::SetVariable { name, value } => LogicalPlan::SetVariable {
             name: name.clone(),
             value: value.clone(),
         },
-        ExecutorPlan::If {
+        PhysicalPlan::If {
             condition,
             then_branch,
             else_branch,
@@ -1454,15 +1454,15 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
                 .as_ref()
                 .map(|b| b.iter().map(executor_plan_to_logical_plan).collect()),
         },
-        ExecutorPlan::While { condition, body } => LogicalPlan::While {
+        PhysicalPlan::While { condition, body } => LogicalPlan::While {
             condition: condition.clone(),
             body: body.iter().map(executor_plan_to_logical_plan).collect(),
         },
-        ExecutorPlan::Loop { body, label } => LogicalPlan::Loop {
+        PhysicalPlan::Loop { body, label } => LogicalPlan::Loop {
             body: body.iter().map(executor_plan_to_logical_plan).collect(),
             label: label.clone(),
         },
-        ExecutorPlan::For {
+        PhysicalPlan::For {
             variable,
             query,
             body,
@@ -1471,16 +1471,16 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             query: Box::new(executor_plan_to_logical_plan(query)),
             body: body.iter().map(executor_plan_to_logical_plan).collect(),
         },
-        ExecutorPlan::Return { value } => LogicalPlan::Return {
+        PhysicalPlan::Return { value } => LogicalPlan::Return {
             value: value.clone(),
         },
-        ExecutorPlan::Raise { message, level } => LogicalPlan::Raise {
+        PhysicalPlan::Raise { message, level } => LogicalPlan::Raise {
             message: message.clone(),
             level: *level,
         },
-        ExecutorPlan::Break => LogicalPlan::Break,
-        ExecutorPlan::Continue => LogicalPlan::Continue,
-        ExecutorPlan::CreateSnapshot {
+        PhysicalPlan::Break => LogicalPlan::Break,
+        PhysicalPlan::Continue => LogicalPlan::Continue,
+        PhysicalPlan::CreateSnapshot {
             snapshot_name,
             source_name,
             if_not_exists,
@@ -1489,21 +1489,21 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             source_name: source_name.clone(),
             if_not_exists: *if_not_exists,
         },
-        ExecutorPlan::DropSnapshot {
+        PhysicalPlan::DropSnapshot {
             snapshot_name,
             if_exists,
         } => LogicalPlan::DropSnapshot {
             snapshot_name: snapshot_name.clone(),
             if_exists: *if_exists,
         },
-        ExecutorPlan::Repeat {
+        PhysicalPlan::Repeat {
             body,
             until_condition,
         } => LogicalPlan::Repeat {
             body: body.iter().map(executor_plan_to_logical_plan).collect(),
             until_condition: until_condition.clone(),
         },
-        ExecutorPlan::LoadData {
+        PhysicalPlan::LoadData {
             table_name,
             options,
             temp_table,
@@ -1514,7 +1514,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             temp_table: *temp_table,
             temp_schema: temp_schema.clone(),
         },
-        ExecutorPlan::Sample {
+        PhysicalPlan::Sample {
             input,
             sample_type,
             sample_value,
@@ -1526,7 +1526,7 @@ fn executor_plan_to_logical_plan(plan: &ExecutorPlan) -> yachtsql_ir::LogicalPla
             },
             sample_value: *sample_value,
         },
-        ExecutorPlan::Assert { condition, message } => LogicalPlan::Assert {
+        PhysicalPlan::Assert { condition, message } => LogicalPlan::Assert {
             condition: condition.clone(),
             message: message.clone(),
         },

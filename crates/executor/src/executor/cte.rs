@@ -3,13 +3,13 @@ use yachtsql_common::error::Result;
 use yachtsql_ir::{CteDefinition, LogicalPlan, SetOperationType};
 use yachtsql_storage::Table;
 
-use super::{PlanExecutor, plan_schema_to_schema};
-use crate::plan::ExecutorPlan;
+use super::{plan_schema_to_schema, PlanExecutor};
+use crate::plan::PhysicalPlan;
 
 const MAX_RECURSION_DEPTH: usize = 500;
 
 impl<'a> PlanExecutor<'a> {
-    pub fn execute_cte(&mut self, ctes: &[CteDefinition], body: &ExecutorPlan) -> Result<Table> {
+    pub fn execute_cte(&mut self, ctes: &[CteDefinition], body: &PhysicalPlan) -> Result<Table> {
         for cte in ctes {
             if cte.recursive {
                 self.execute_recursive_cte(cte)?;
