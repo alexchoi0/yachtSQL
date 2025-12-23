@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use geo::{BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance, GeodesicLength, Intersects, SimplifyVw};
+use geo::{
+    BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance,
+    GeodesicLength, Intersects, SimplifyVw,
+};
 use geo_types::{Coord, Geometry, LineString, MultiPolygon, Point, Polygon};
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;

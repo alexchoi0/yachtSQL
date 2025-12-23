@@ -1,5 +1,5 @@
 use crate::assert_table_eq;
-use crate::common::{create_executor, d, dt, tm, ts};
+use crate::common::{create_executor, d, dt, tm, ts, ts_ms};
 
 #[test]
 fn test_current_date() {
@@ -519,4 +519,24 @@ fn test_datetime_constructor_from_string() {
         .execute_sql("SELECT DATETIME('2024-06-15 14:30:00')")
         .unwrap();
     assert_table_eq!(result, [[dt(2024, 6, 15, 14, 30, 0)]]);
+}
+
+#[test]
+fn test_timestamp_add_millisecond() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql(
+            "SELECT TIMESTAMP_ADD(TIMESTAMP '2024-01-15 10:00:00', INTERVAL 500 MILLISECOND)",
+        )
+        .unwrap();
+    assert_table_eq!(result, [[ts_ms(2024, 1, 15, 10, 0, 0, 500)]]);
+}
+
+#[test]
+fn test_timestamp_diff_negative() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT TIMESTAMP_DIFF(TIMESTAMP '2024-01-15 10:00:00', TIMESTAMP '2024-01-15 12:00:00', HOUR)")
+        .unwrap();
+    assert_table_eq!(result, [[-2]]);
 }
