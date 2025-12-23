@@ -1,6 +1,7 @@
 mod cte;
 mod ddl;
 mod dml;
+mod gap_fill;
 mod query;
 mod scripting;
 mod set_ops;
@@ -10,6 +11,7 @@ mod window;
 pub use cte::*;
 pub use ddl::*;
 pub use dml::*;
+pub use gap_fill::*;
 pub use query::*;
 pub use scripting::*;
 use serde::{Deserialize, Serialize};
@@ -120,6 +122,12 @@ pub enum LogicalPlan {
     Qualify {
         input: Box<LogicalPlan>,
         predicate: Expr,
+    },
+
+    GapFill {
+        input: Box<LogicalPlan>,
+        config: GapFillConfig,
+        schema: PlanSchema,
     },
 
     Insert {
@@ -342,6 +350,7 @@ impl LogicalPlan {
             LogicalPlan::WithCte { body, .. } => body.schema(),
             LogicalPlan::Unnest { schema, .. } => schema,
             LogicalPlan::Qualify { input, .. } => input.schema(),
+            LogicalPlan::GapFill { schema, .. } => schema,
             LogicalPlan::Insert { .. } => &EMPTY_SCHEMA,
             LogicalPlan::Update { .. } => &EMPTY_SCHEMA,
             LogicalPlan::Delete { .. } => &EMPTY_SCHEMA,

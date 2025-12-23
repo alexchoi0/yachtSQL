@@ -6,6 +6,7 @@ mod ddl;
 mod distinct;
 mod dml;
 mod filter;
+mod gap_fill;
 mod join;
 mod limit;
 mod project;
@@ -183,6 +184,11 @@ impl<'a> PlanExecutor<'a> {
                 schema,
             } => self.execute_unnest(input, columns, schema),
             PhysicalPlan::Qualify { input, predicate } => self.execute_qualify(input, predicate),
+            PhysicalPlan::GapFill {
+                input,
+                config,
+                schema,
+            } => self.execute_gap_fill(input, config, schema),
             PhysicalPlan::Values { values, schema } => self.execute_values(values, schema),
             PhysicalPlan::Empty { schema } => {
                 let result_schema = plan_schema_to_schema(schema);

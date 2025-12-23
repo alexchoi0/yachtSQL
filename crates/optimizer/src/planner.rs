@@ -225,6 +225,19 @@ impl PhysicalPlanner {
                 })
             }
 
+            LogicalPlan::GapFill {
+                input,
+                config,
+                schema,
+            } => {
+                let input = self.plan(input)?;
+                Ok(OptimizedLogicalPlan::GapFill {
+                    input: Box::new(input),
+                    config: config.clone(),
+                    schema: schema.clone(),
+                })
+            }
+
             LogicalPlan::Insert {
                 table_name,
                 columns,
@@ -752,6 +765,15 @@ impl OptimizedLogicalPlan {
             OptimizedLogicalPlan::Qualify { input, predicate } => LogicalPlan::Qualify {
                 input: Box::new(input.into_logical()),
                 predicate,
+            },
+            OptimizedLogicalPlan::GapFill {
+                input,
+                config,
+                schema,
+            } => LogicalPlan::GapFill {
+                input: Box::new(input.into_logical()),
+                config,
+                schema,
             },
             OptimizedLogicalPlan::WithCte { ctes, body } => LogicalPlan::WithCte {
                 ctes,

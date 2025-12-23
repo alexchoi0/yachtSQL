@@ -1270,6 +1270,15 @@ fn executor_plan_to_logical_plan(plan: &PhysicalPlan) -> yachtsql_ir::LogicalPla
             input: Box::new(executor_plan_to_logical_plan(input)),
             predicate: predicate.clone(),
         },
+        PhysicalPlan::GapFill {
+            input,
+            config,
+            schema,
+        } => LogicalPlan::GapFill {
+            input: Box::new(executor_plan_to_logical_plan(input)),
+            config: config.clone(),
+            schema: schema.clone(),
+        },
         PhysicalPlan::WithCte { ctes, body } => LogicalPlan::WithCte {
             ctes: ctes.clone(),
             body: Box::new(executor_plan_to_logical_plan(body)),

@@ -9,8 +9,9 @@ use yachtsql_common::types::{DataType, StructField};
 use yachtsql_ir::{
     AlterColumnAction, AlterTableOp, Assignment, BinaryOp, ColumnDef, ConstraintType,
     CteDefinition, DclResourceType, ExportFormat, ExportOptions, Expr, FunctionArg, FunctionBody,
-    JoinType, Literal, LogicalPlan, MergeClause, PlanField, PlanSchema, ProcedureArg,
-    ProcedureArgMode, SampleType, SetOperationType, SortExpr, TableConstraint,
+    GapFillConfig, GapFillMethod, GapFillValueColumn, JoinType, Literal, LogicalPlan, MergeClause,
+    PlanField, PlanSchema, ProcedureArg, ProcedureArgMode, SampleType, SetOperationType, SortExpr,
+    TableConstraint,
 };
 use yachtsql_storage::Schema;
 
@@ -736,10 +737,17 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                 name,
                 alias,
                 sample,
+                args,
                 ..
             } => {
                 let table_name = object_name_to_raw_string(name);
                 let table_name_upper = table_name.to_uppercase();
+
+                if table_name_upper == "GAP_FILL"
+                    && let Some(table_args) = args
+                {
+                    return self.plan_gap_fill(&table_args.args, alias);
+                }
 
                 let base_plan = if let Some(cte_schema) =
                     self.cte_schemas.borrow().get(&table_name_upper)
@@ -919,10 +927,207 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     schema,
                 })
             }
+            TableFactor::Function {
+                name, args, alias, ..
+            } => {
+                let func_name = name.to_string().to_uppercase();
+                if func_name == "GAP_FILL" {
+                    self.plan_gap_fill(args, alias)
+                } else {
+                    Err(Error::unsupported(format!(
+                        "Unsupported table function: {}",
+                        name
+                    )))
+                }
+            }
             _ => Err(Error::unsupported(format!(
                 "Unsupported table factor: {:?}",
                 factor
             ))),
+        }
+    }
+
+    fn plan_gap_fill(
+        &self,
+        args: &[ast::FunctionArg],
+        _alias: &Option<ast::TableAlias>,
+    ) -> Result<LogicalPlan> {
+        let mut table_expr: Option<&ast::Expr> = None;
+        let mut ts_column: Option<String> = None;
+        let mut bucket_width_seconds: Option<i64> = None;
+        let mut partitioning_columns: Vec<String> = Vec::new();
+        let mut value_columns: Vec<GapFillValueColumn> = Vec::new();
+
+        for arg in args {
+            match arg {
+                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(ast::Expr::Function(
+                    func,
+                ))) if func.name.to_string().to_uppercase() == "TABLE" => {
+                    if let ast::FunctionArguments::List(arg_list) = &func.args
+                        && let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e))) =
+                            arg_list.args.first()
+                    {
+                        table_expr = Some(e);
+                    }
+                }
+                ast::FunctionArg::Named { name, arg, .. } => {
+                    let arg_name = name.value.to_uppercase();
+                    match arg_name.as_str() {
+                        "TS_COLUMN" => {
+                            if let ast::FunctionArgExpr::Expr(ast::Expr::Value(v)) = arg {
+                                ts_column = Some(Self::extract_string_value_with_span(v)?);
+                            }
+                        }
+                        "BUCKET_WIDTH" => {
+                            if let ast::FunctionArgExpr::Expr(e) = arg {
+                                bucket_width_seconds = Some(Self::convert_interval_to_seconds(e)?);
+                            }
+                        }
+                        "PARTITIONING_COLUMNS" => {
+                            if let ast::FunctionArgExpr::Expr(ast::Expr::Array(arr)) = arg {
+                                for elem in &arr.elem {
+                                    if let ast::Expr::Value(v) = elem {
+                                        partitioning_columns
+                                            .push(Self::extract_string_value_with_span(v)?);
+                                    }
+                                }
+                            }
+                        }
+                        "VALUE_COLUMNS" => {
+                            if let ast::FunctionArgExpr::Expr(ast::Expr::Array(arr)) = arg {
+                                for elem in &arr.elem {
+                                    if let ast::Expr::Tuple(tuple_elems) = elem
+                                        && tuple_elems.len() >= 2
+                                    {
+                                        let col_name = if let ast::Expr::Value(v) = &tuple_elems[0]
+                                        {
+                                            Self::extract_string_value_with_span(v)?
+                                        } else {
+                                            continue;
+                                        };
+                                        let method_str =
+                                            if let ast::Expr::Value(v) = &tuple_elems[1] {
+                                                Self::extract_string_value_with_span(v)?
+                                            } else {
+                                                continue;
+                                            };
+                                        let method = match method_str.to_uppercase().as_str() {
+                                            "NULL" => GapFillMethod::Null,
+                                            "LOCF" => GapFillMethod::Locf,
+                                            "LINEAR" => GapFillMethod::Linear,
+                                            _ => {
+                                                return Err(Error::invalid_query(format!(
+                                                    "GAP_FILL: invalid fill method '{}'",
+                                                    method_str
+                                                )));
+                                            }
+                                        };
+                                        value_columns.push(GapFillValueColumn {
+                                            column_name: col_name,
+                                            method,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let table_name = table_expr
+            .ok_or_else(|| Error::invalid_query("GAP_FILL: TABLE argument is required"))?;
+        let table_name_str = match table_name {
+            ast::Expr::Identifier(ident) => ident.value.clone(),
+            ast::Expr::CompoundIdentifier(idents) => idents
+                .iter()
+                .map(|i| i.value.clone())
+                .collect::<Vec<_>>()
+                .join("."),
+            _ => {
+                return Err(Error::invalid_query(
+                    "GAP_FILL: TABLE argument must be a table name",
+                ));
+            }
+        };
+
+        let ts_column = ts_column
+            .ok_or_else(|| Error::invalid_query("GAP_FILL: ts_column argument is required"))?;
+        let bucket_width_seconds = bucket_width_seconds
+            .ok_or_else(|| Error::invalid_query("GAP_FILL: bucket_width argument is required"))?;
+
+        let table_schema = self
+            .catalog
+            .get_table_schema(&table_name_str)
+            .ok_or_else(|| Error::table_not_found(&table_name_str))?;
+        let plan_schema = self.storage_schema_to_plan_schema(&table_schema, None);
+
+        let input_plan = LogicalPlan::Scan {
+            table_name: table_name_str,
+            schema: plan_schema.clone(),
+            projection: None,
+        };
+
+        let config = GapFillConfig {
+            ts_column,
+            bucket_width_seconds,
+            partitioning_columns,
+            value_columns,
+        };
+
+        Ok(LogicalPlan::GapFill {
+            input: Box::new(input_plan),
+            config,
+            schema: plan_schema,
+        })
+    }
+
+    fn extract_string_value_with_span(v: &ast::ValueWithSpan) -> Result<String> {
+        match &v.value {
+            ast::Value::SingleQuotedString(s) | ast::Value::DoubleQuotedString(s) => Ok(s.clone()),
+            _ => Err(Error::invalid_query("Expected a string value")),
+        }
+    }
+
+    fn convert_interval_to_seconds(expr: &ast::Expr) -> Result<i64> {
+        match expr {
+            ast::Expr::Interval(interval) => {
+                let value = match interval.value.as_ref() {
+                    ast::Expr::Value(v) => match &v.value {
+                        ast::Value::Number(n, _) => n.parse::<i64>().map_err(|_| {
+                            Error::invalid_query(format!("Invalid interval value: {}", n))
+                        })?,
+                        _ => {
+                            return Err(Error::invalid_query("Interval value must be a number"));
+                        }
+                    },
+                    _ => {
+                        return Err(Error::invalid_query("Interval value must be a number"));
+                    }
+                };
+                let unit = interval
+                    .leading_field
+                    .as_ref()
+                    .map(|f| format!("{:?}", f))
+                    .unwrap_or_else(|| "Second".to_string());
+
+                let seconds = match unit.to_uppercase().as_str() {
+                    "SECOND" => value,
+                    "MINUTE" => value * 60,
+                    "HOUR" => value * 3600,
+                    "DAY" => value * 86400,
+                    _ => {
+                        return Err(Error::invalid_query(format!(
+                            "Unsupported interval unit: {}",
+                            unit
+                        )));
+                    }
+                };
+                Ok(seconds)
+            }
+            _ => Err(Error::invalid_query("Expected an interval expression")),
         }
     }
 

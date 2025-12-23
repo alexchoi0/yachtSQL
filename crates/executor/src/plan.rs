@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use yachtsql_common::types::DataType;
 use yachtsql_ir::{
     AlterTableOp, Assignment, ColumnDef, CteDefinition, DclResourceType, ExportOptions, Expr,
-    FunctionArg, FunctionBody, JoinType, LoadOptions, MergeClause, PlanSchema, ProcedureArg,
-    RaiseLevel, SortExpr, UnnestColumn,
+    FunctionArg, FunctionBody, GapFillConfig, JoinType, LoadOptions, MergeClause, PlanSchema,
+    ProcedureArg, RaiseLevel, SortExpr, UnnestColumn,
 };
 use yachtsql_optimizer::{OptimizedLogicalPlan, SampleType};
 
@@ -142,6 +142,12 @@ pub enum PhysicalPlan {
     Qualify {
         input: Box<PhysicalPlan>,
         predicate: Expr,
+    },
+
+    GapFill {
+        input: Box<PhysicalPlan>,
+        config: GapFillConfig,
+        schema: PlanSchema,
     },
 
     WithCte {
@@ -521,6 +527,16 @@ impl PhysicalPlan {
             OptimizedLogicalPlan::Qualify { input, predicate } => PhysicalPlan::Qualify {
                 input: Box::new(Self::from_physical(input)),
                 predicate: predicate.clone(),
+            },
+
+            OptimizedLogicalPlan::GapFill {
+                input,
+                config,
+                schema,
+            } => PhysicalPlan::GapFill {
+                input: Box::new(Self::from_physical(input)),
+                config: config.clone(),
+                schema: schema.clone(),
             },
 
             OptimizedLogicalPlan::WithCte { ctes, body } => PhysicalPlan::WithCte {

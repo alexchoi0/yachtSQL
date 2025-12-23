@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use yachtsql_common::types::DataType;
 use yachtsql_ir::{
     AlterTableOp, Assignment, ColumnDef, CteDefinition, DclResourceType, ExportOptions, Expr,
-    FunctionArg, FunctionBody, JoinType, LoadOptions, MergeClause, PlanSchema, ProcedureArg,
-    RaiseLevel, SortExpr, UnnestColumn,
+    FunctionArg, FunctionBody, GapFillConfig, JoinType, LoadOptions, MergeClause, PlanSchema,
+    ProcedureArg, RaiseLevel, SortExpr, UnnestColumn,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -115,6 +115,12 @@ pub enum OptimizedLogicalPlan {
     Qualify {
         input: Box<OptimizedLogicalPlan>,
         predicate: Expr,
+    },
+
+    GapFill {
+        input: Box<OptimizedLogicalPlan>,
+        config: GapFillConfig,
+        schema: PlanSchema,
     },
 
     WithCte {
@@ -353,6 +359,7 @@ impl OptimizedLogicalPlan {
             OptimizedLogicalPlan::Window { schema, .. } => schema,
             OptimizedLogicalPlan::Unnest { schema, .. } => schema,
             OptimizedLogicalPlan::Qualify { input, .. } => input.schema(),
+            OptimizedLogicalPlan::GapFill { schema, .. } => schema,
             OptimizedLogicalPlan::WithCte { body, .. } => body.schema(),
             OptimizedLogicalPlan::Values { schema, .. } => schema,
             OptimizedLogicalPlan::Empty { schema } => schema,
