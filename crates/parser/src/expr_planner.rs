@@ -556,47 +556,6 @@ impl ExprPlanner {
         }
     }
 
-    fn resolve_compound_identifier(parts: &[ast::Ident], schema: &PlanSchema) -> Result<Expr> {
-        if parts.is_empty() {
-            return Err(Error::InvalidQuery("Empty compound identifier".to_string()));
-        }
-
-        if parts.len() == 1 {
-            return Self::resolve_column(&parts[0].value, None, schema);
-        }
-
-        let first_name = &parts[0].value;
-        if let Some(field_idx) = schema.field_index(first_name) {
-            let field = &schema.fields[field_idx];
-            if matches!(field.data_type, yachtsql_common::types::DataType::Struct(_)) {
-                let mut result = Expr::Column {
-                    table: None,
-                    name: first_name.clone(),
-                    index: Some(field_idx),
-                };
-                for part in &parts[1..] {
-                    result = Expr::StructAccess {
-                        expr: Box::new(result),
-                        field: part.value.clone(),
-                    };
-                }
-                return Ok(result);
-            }
-        }
-
-        let (table, name) = (
-            Some(
-                parts[..parts.len() - 1]
-                    .iter()
-                    .map(|p| p.value.clone())
-                    .collect::<Vec<_>>()
-                    .join("."),
-            ),
-            parts.last().map(|p| p.value.clone()).unwrap_or_default(),
-        );
-        Self::resolve_column(&name, table.as_deref(), schema)
-    }
-
     fn resolve_column(name: &str, table: Option<&str>, schema: &PlanSchema) -> Result<Expr> {
         let index = schema.field_index_qualified(name, table);
 
