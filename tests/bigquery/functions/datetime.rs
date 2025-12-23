@@ -520,3 +520,21 @@ fn test_datetime_constructor_from_string() {
         .unwrap();
     assert_table_eq!(result, [[dt(2024, 6, 15, 14, 30, 0)]]);
 }
+
+#[test]
+fn test_extract_date_from_timestamp() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT EXTRACT(DATE FROM TIMESTAMP '2024-06-15 14:30:00')")
+        .unwrap();
+    assert_table_eq!(result, [[d(2024, 6, 15)]]);
+}
+
+#[test]
+fn test_extract_time_from_timestamp() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT EXTRACT(TIME FROM TIMESTAMP '2024-06-15 14:30:00')")
+        .unwrap();
+    assert_table_eq!(result, [[tm(14, 30, 0)]]);
+}

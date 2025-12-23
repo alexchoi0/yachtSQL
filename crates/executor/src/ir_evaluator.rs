@@ -6906,7 +6906,14 @@ fn extract_from_datetime(dt: &chrono::NaiveDateTime, field: DateTimeField) -> Re
         }
         DateTimeField::DayOfYear => Ok(Value::Int64(dt.ordinal() as i64)),
         DateTimeField::Quarter => Ok(Value::Int64(((dt.month() - 1) / 3 + 1) as i64)),
-        _ => Err(Error::InvalidQuery(format!(
+        DateTimeField::Date => Ok(Value::Date(dt.date())),
+        DateTimeField::Time => Ok(Value::Time(dt.time())),
+        DateTimeField::IsoYear
+        | DateTimeField::IsoWeek
+        | DateTimeField::Datetime
+        | DateTimeField::Timezone
+        | DateTimeField::TimezoneHour
+        | DateTimeField::TimezoneMinute => Err(Error::InvalidQuery(format!(
             "Cannot extract {:?} from timestamp",
             field
         ))),
