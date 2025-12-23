@@ -293,6 +293,14 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     schema,
                 })
             }
+            SetExpr::Insert(Statement::Insert(insert)) => self.plan_insert(insert),
+            SetExpr::Update(Statement::Update {
+                table,
+                assignments,
+                selection,
+                ..
+            }) => self.plan_update(table, assignments, selection.as_ref()),
+            SetExpr::Delete(Statement::Delete(delete)) => self.plan_delete(delete),
             _ => Err(Error::unsupported(format!(
                 "Unsupported set expression: {:?}",
                 set_expr
@@ -2026,11 +2034,16 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
     fn plan_values(&self, values: &ast::Values) -> Result<LogicalPlan> {
         let mut rows = Vec::new();
         let empty_schema = PlanSchema::new();
+        let subquery_planner = |query: &ast::Query| self.plan_query(query);
 
         for row in &values.rows {
             let mut exprs = Vec::new();
             for expr in row {
-                exprs.push(ExprPlanner::plan_expr(expr, &empty_schema)?);
+                exprs.push(ExprPlanner::plan_expr_with_subquery(
+                    expr,
+                    &empty_schema,
+                    Some(&subquery_planner),
+                )?);
             }
             rows.push(exprs);
         }
