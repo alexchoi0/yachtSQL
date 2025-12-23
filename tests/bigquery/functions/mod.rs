@@ -18,3 +18,4 @@ mod statistical;
 mod string;
 mod timeseries;
 mod udf;
+mod utility;
