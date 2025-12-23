@@ -83,6 +83,24 @@ fn test_sqrt() {
 }
 
 #[test]
+fn test_cbrt() {
+    let mut session = create_session();
+
+    let result = session.execute_sql("SELECT CBRT(27)").unwrap();
+
+    assert_table_eq!(result, [[3.0]]);
+}
+
+#[test]
+fn test_cbrt_negative() {
+    let mut session = create_session();
+
+    let result = session.execute_sql("SELECT CBRT(-8)").unwrap();
+
+    assert_table_eq!(result, [[-2.0]]);
+}
+
+#[test]
 fn test_sign() {
     let mut session = create_session();
 
@@ -314,7 +332,6 @@ fn test_tanh() {
 }
 
 #[test]
-#[ignore]
 fn test_asinh() {
     let mut session = create_session();
 
@@ -324,7 +341,6 @@ fn test_asinh() {
 }
 
 #[test]
-#[ignore]
 fn test_acosh() {
     let mut session = create_session();
 
@@ -334,7 +350,6 @@ fn test_acosh() {
 }
 
 #[test]
-#[ignore]
 fn test_atanh() {
     let mut session = create_session();
 
@@ -344,7 +359,6 @@ fn test_atanh() {
 }
 
 #[test]
-#[ignore]
 fn test_cot() {
     let mut session = create_session();
 
@@ -364,7 +378,6 @@ fn test_coth() {
 }
 
 #[test]
-#[ignore]
 fn test_csc() {
     let mut session = create_session();
 
@@ -384,7 +397,6 @@ fn test_csch() {
 }
 
 #[test]
-#[ignore]
 fn test_sec() {
     let mut session = create_session();
 
@@ -527,26 +539,6 @@ fn test_trunc_negative_precision() {
     let result = session.execute_sql("SELECT TRUNC(123.456, -1)").unwrap();
 
     assert_table_eq!(result, [[n("120")]]);
-}
-
-#[test]
-#[ignore]
-fn test_cbrt() {
-    let mut session = create_session();
-
-    let result = session.execute_sql("SELECT ROUND(CBRT(27), 5)").unwrap();
-
-    assert_table_eq!(result, [[3.0]]);
-}
-
-#[test]
-#[ignore]
-fn test_cbrt_negative() {
-    let mut session = create_session();
-
-    let result = session.execute_sql("SELECT ROUND(CBRT(-8), 5)").unwrap();
-
-    assert_table_eq!(result, [[-2.0]]);
 }
 
 #[test]

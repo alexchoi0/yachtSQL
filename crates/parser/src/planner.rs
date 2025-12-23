@@ -8,8 +8,8 @@ use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::{DataType, StructField};
 use yachtsql_ir::{
     AlterColumnAction, AlterTableOp, Assignment, BinaryOp, ColumnDef, ConstraintType,
-    CteDefinition, DclResourceType, ExportFormat, ExportOptions, Expr, FunctionArg, FunctionBody,
-    JoinType, Literal, LogicalPlan, MergeClause, PlanField, PlanSchema, ProcedureArg,
+    CteDefinition, DateTimeField, DclResourceType, ExportFormat, ExportOptions, Expr, FunctionArg,
+    FunctionBody, JoinType, Literal, LogicalPlan, MergeClause, PlanField, PlanSchema, ProcedureArg,
     ProcedureArgMode, SampleType, SetOperationType, SortExpr, TableConstraint,
 };
 use yachtsql_storage::Schema;
@@ -2771,11 +2771,16 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
     fn plan_values(&self, values: &ast::Values) -> Result<LogicalPlan> {
         let mut rows = Vec::new();
         let empty_schema = PlanSchema::new();
+        let subquery_planner = |query: &ast::Query| self.plan_query(query);
 
         for row in &values.rows {
             let mut exprs = Vec::new();
             for expr in row {
-                exprs.push(ExprPlanner::plan_expr(expr, &empty_schema)?);
+                exprs.push(ExprPlanner::plan_expr_with_subquery(
+                    expr,
+                    &empty_schema,
+                    Some(&subquery_planner),
+                )?);
             }
             rows.push(exprs);
         }
@@ -4308,6 +4313,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
 
                     ScalarFunction::Abs
                     | ScalarFunction::Sqrt
+                    | ScalarFunction::Cbrt
                     | ScalarFunction::Power
                     | ScalarFunction::Pow
                     | ScalarFunction::Exp
@@ -4527,7 +4533,29 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     DataType::Unknown
                 }
             }
-            Expr::Extract { .. } => DataType::Int64,
+            Expr::Extract { field, .. } => match field {
+                DateTimeField::Date => DataType::Date,
+                DateTimeField::Time => DataType::Time,
+                DateTimeField::Year
+                | DateTimeField::IsoYear
+                | DateTimeField::Quarter
+                | DateTimeField::Month
+                | DateTimeField::Week(_)
+                | DateTimeField::IsoWeek
+                | DateTimeField::Day
+                | DateTimeField::DayOfWeek
+                | DateTimeField::DayOfYear
+                | DateTimeField::Hour
+                | DateTimeField::Minute
+                | DateTimeField::Second
+                | DateTimeField::Millisecond
+                | DateTimeField::Microsecond
+                | DateTimeField::Nanosecond
+                | DateTimeField::Datetime
+                | DateTimeField::Timezone
+                | DateTimeField::TimezoneHour
+                | DateTimeField::TimezoneMinute => DataType::Int64,
+            },
             Expr::TypedString { data_type, .. } => data_type.clone(),
             Expr::Array {
                 elements,
