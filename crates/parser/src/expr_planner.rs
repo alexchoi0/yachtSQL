@@ -1371,6 +1371,8 @@ impl ExprPlanner {
             "DATETIME_TRUNC" => Ok(ScalarFunction::DatetimeTrunc),
             "TIMESTAMP_TRUNC" => Ok(ScalarFunction::TimestampTrunc),
             "TIME_TRUNC" => Ok(ScalarFunction::TimeTrunc),
+            "DATETIME_BUCKET" => Ok(ScalarFunction::DatetimeBucket),
+            "TIMESTAMP_BUCKET" => Ok(ScalarFunction::TimestampBucket),
             "FORMAT_DATE" => Ok(ScalarFunction::FormatDate),
             "FORMAT_TIMESTAMP" => Ok(ScalarFunction::FormatTimestamp),
             "FORMAT_DATETIME" => Ok(ScalarFunction::FormatDatetime),

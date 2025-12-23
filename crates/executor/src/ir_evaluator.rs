@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use geo::{BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance, GeodesicLength, Intersects, SimplifyVw};
+use geo::{
+    BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance,
+    GeodesicLength, Intersects, SimplifyVw,
+};
 use geo_types::{Coord, Geometry, LineString, MultiPolygon, Point, Polygon};
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
@@ -546,6 +549,8 @@ impl<'a> IrEvaluator<'a> {
             ScalarFunction::DatetimeTrunc => self.fn_datetime_trunc(&arg_values),
             ScalarFunction::TimestampTrunc => self.fn_timestamp_trunc(&arg_values),
             ScalarFunction::TimeTrunc => self.fn_time_trunc(&arg_values),
+            ScalarFunction::DatetimeBucket => self.fn_datetime_bucket(&arg_values),
+            ScalarFunction::TimestampBucket => self.fn_timestamp_bucket(&arg_values),
             ScalarFunction::DateFromUnixDate => self.fn_date_from_unix_date(&arg_values),
             ScalarFunction::UnixDate => self.fn_unix_date(&arg_values),
             ScalarFunction::UnixMicros => self.fn_unix_micros(&arg_values),
@@ -3107,6 +3112,92 @@ impl<'a> IrEvaluator<'a> {
             }
             _ => Err(Error::InvalidQuery(
                 "TIME_TRUNC requires a time argument".into(),
+            )),
+        }
+    }
+
+    fn fn_datetime_bucket(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            return Err(Error::InvalidQuery(
+                "DATETIME_BUCKET requires at least 2 arguments".into(),
+            ));
+        }
+        match &args[0] {
+            Value::Null => Ok(Value::Null),
+            Value::DateTime(dt) => {
+                let interval = match &args[1] {
+                    Value::Interval(i) => i,
+                    Value::Null => return Ok(Value::Null),
+                    _ => {
+                        return Err(Error::InvalidQuery(
+                            "DATETIME_BUCKET requires interval as second argument".into(),
+                        ));
+                    }
+                };
+                let origin = if args.len() > 2 {
+                    match &args[2] {
+                        Value::DateTime(o) => *o,
+                        Value::Null => return Ok(Value::Null),
+                        _ => {
+                            return Err(Error::InvalidQuery(
+                                "DATETIME_BUCKET origin must be a datetime".into(),
+                            ));
+                        }
+                    }
+                } else {
+                    NaiveDate::from_ymd_opt(1970, 1, 1)
+                        .unwrap()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                };
+                let bucketed = bucket_datetime(dt, interval, &origin)?;
+                Ok(Value::DateTime(bucketed))
+            }
+            _ => Err(Error::InvalidQuery(
+                "DATETIME_BUCKET requires a datetime argument".into(),
+            )),
+        }
+    }
+
+    fn fn_timestamp_bucket(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            return Err(Error::InvalidQuery(
+                "TIMESTAMP_BUCKET requires at least 2 arguments".into(),
+            ));
+        }
+        match &args[0] {
+            Value::Null => Ok(Value::Null),
+            Value::Timestamp(ts) => {
+                let interval = match &args[1] {
+                    Value::Interval(i) => i,
+                    Value::Null => return Ok(Value::Null),
+                    _ => {
+                        return Err(Error::InvalidQuery(
+                            "TIMESTAMP_BUCKET requires interval as second argument".into(),
+                        ));
+                    }
+                };
+                let origin = if args.len() > 2 {
+                    match &args[2] {
+                        Value::Timestamp(o) => o.naive_utc(),
+                        Value::Null => return Ok(Value::Null),
+                        _ => {
+                            return Err(Error::InvalidQuery(
+                                "TIMESTAMP_BUCKET origin must be a timestamp".into(),
+                            ));
+                        }
+                    }
+                } else {
+                    NaiveDate::from_ymd_opt(1970, 1, 1)
+                        .unwrap()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                };
+                let bucketed = bucket_datetime(&ts.naive_utc(), interval, &origin)?;
+                Ok(Value::Timestamp(bucketed.and_utc()))
+            }
+            _ => Err(Error::InvalidQuery(
+                "TIMESTAMP_BUCKET requires a timestamp argument".into(),
             )),
         }
     }
@@ -7945,6 +8036,42 @@ fn trunc_time(time: &NaiveTime, part: &str) -> Result<NaiveTime> {
             .ok_or_else(|| Error::InvalidQuery("Invalid time".into())),
         _ => Ok(*time),
     }
+}
+
+fn bucket_datetime(
+    dt: &NaiveDateTime,
+    interval: &IntervalValue,
+    origin: &NaiveDateTime,
+) -> Result<NaiveDateTime> {
+    let interval_nanos = interval_to_nanos(interval)?;
+    if interval_nanos <= 0 {
+        return Err(Error::InvalidQuery(
+            "Bucket interval must be positive".into(),
+        ));
+    }
+    let diff_nanos = dt
+        .signed_duration_since(*origin)
+        .num_nanoseconds()
+        .ok_or_else(|| Error::InvalidQuery("Datetime difference overflow".into()))?;
+    let bucket_num = if diff_nanos >= 0 {
+        diff_nanos / interval_nanos
+    } else {
+        (diff_nanos - interval_nanos + 1) / interval_nanos
+    };
+    let bucket_offset_nanos = bucket_num * interval_nanos;
+    let result = *origin + chrono::Duration::nanoseconds(bucket_offset_nanos);
+    Ok(result)
+}
+
+fn interval_to_nanos(interval: &IntervalValue) -> Result<i64> {
+    if interval.months != 0 {
+        return Err(Error::InvalidQuery(
+            "DATETIME_BUCKET/TIMESTAMP_BUCKET does not support month-based intervals".into(),
+        ));
+    }
+    let day_nanos = interval.days as i64 * 24 * 60 * 60 * 1_000_000_000;
+    let total_nanos = day_nanos + interval.nanos;
+    Ok(total_nanos)
 }
 
 fn format_date_with_pattern(date: &NaiveDate, pattern: &str) -> Result<String> {

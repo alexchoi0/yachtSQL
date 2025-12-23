@@ -520,3 +520,39 @@ fn test_datetime_constructor_from_string() {
         .unwrap();
     assert_table_eq!(result, [[dt(2024, 6, 15, 14, 30, 0)]]);
 }
+
+#[test]
+fn test_datetime_bucket_12_hour() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT DATETIME_BUCKET(DATETIME '2024-06-15 14:30:00', INTERVAL 12 HOUR)")
+        .unwrap();
+    assert_table_eq!(result, [[dt(2024, 6, 15, 12, 0, 0)]]);
+}
+
+#[test]
+fn test_datetime_bucket_with_origin() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT DATETIME_BUCKET(DATETIME '2024-06-15 14:30:00', INTERVAL 12 HOUR, DATETIME '2024-06-15 06:00:00')")
+        .unwrap();
+    assert_table_eq!(result, [[dt(2024, 6, 15, 6, 0, 0)]]);
+}
+
+#[test]
+fn test_timestamp_bucket_12_hour() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT TIMESTAMP_BUCKET(TIMESTAMP '2024-06-15 14:30:00', INTERVAL 12 HOUR)")
+        .unwrap();
+    assert_table_eq!(result, [[ts(2024, 6, 15, 12, 0, 0)]]);
+}
+
+#[test]
+fn test_timestamp_bucket_with_origin() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT TIMESTAMP_BUCKET(TIMESTAMP '2024-06-15 14:30:00', INTERVAL 12 HOUR, TIMESTAMP '2024-06-15 06:00:00')")
+        .unwrap();
+    assert_table_eq!(result, [[ts(2024, 6, 15, 6, 0, 0)]]);
+}

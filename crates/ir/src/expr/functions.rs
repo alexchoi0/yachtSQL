@@ -146,6 +146,8 @@ pub enum ScalarFunction {
     DatetimeTrunc,
     TimestampTrunc,
     TimeTrunc,
+    DatetimeBucket,
+    TimestampBucket,
     FormatDate,
     FormatTimestamp,
     FormatDatetime,
