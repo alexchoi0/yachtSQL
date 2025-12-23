@@ -17,3 +17,4 @@ mod security;
 mod statistical;
 mod string;
 mod udf;
+mod utility;
