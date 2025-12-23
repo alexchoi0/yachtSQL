@@ -21,8 +21,8 @@ fn test_generate_uuid_uniqueness() {
 
 #[test]
 fn test_generate_uuid_lowercase() {
-    let mut executor = create_executor();
-    let result = executor
+    let mut session = create_session();
+    let result = session
         .execute_sql("SELECT uuid = LOWER(uuid) FROM (SELECT GENERATE_UUID() AS uuid)")
         .unwrap();
     assert_table_eq!(result, [[true]]);
@@ -30,8 +30,8 @@ fn test_generate_uuid_lowercase() {
 
 #[test]
 fn test_generate_uuid_hyphen_positions() {
-    let mut executor = create_executor();
-    let result = executor
+    let mut session = create_session();
+    let result = session
         .execute_sql(
             "SELECT
                 LENGTH(uuid) = 36
