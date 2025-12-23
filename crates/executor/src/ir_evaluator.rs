@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use geo::{BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance, GeodesicLength, Intersects, SimplifyVw};
+use geo::{
+    BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance,
+    GeodesicLength, Intersects, SimplifyVw,
+};
 use geo_types::{Coord, Geometry, LineString, MultiPolygon, Point, Polygon};
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
@@ -14,7 +17,7 @@ use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::{DataType, IntervalValue, Value};
 use yachtsql_ir::{
     AggregateFunction, BinaryOp, DateTimeField, Expr, Literal, ScalarFunction, TrimWhere, UnaryOp,
-    WhenClause,
+    WeekStartDay, WhenClause,
 };
 use yachtsql_storage::{Record, Schema};
 
@@ -3383,7 +3386,7 @@ impl<'a> IrEvaluator<'a> {
             "DAYOFWEEK" => DateTimeField::DayOfWeek,
             "DAYOFYEAR" => DateTimeField::DayOfYear,
             "QUARTER" => DateTimeField::Quarter,
-            "WEEK" => DateTimeField::Week,
+            "WEEK" => DateTimeField::Week(WeekStartDay::Sunday),
             _ => {
                 return Err(Error::InvalidQuery(format!(
                     "Unknown EXTRACT field: {}",
@@ -7405,12 +7408,37 @@ fn extract_datetime_field(val: &Value, field: DateTimeField) -> Result<Value> {
     }
 }
 
+fn week_number_from_date(date: &NaiveDate, start_day: WeekStartDay) -> i64 {
+    let year_start = NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap();
+    let start_weekday = match start_day {
+        WeekStartDay::Sunday => chrono::Weekday::Sun,
+        WeekStartDay::Monday => chrono::Weekday::Mon,
+        WeekStartDay::Tuesday => chrono::Weekday::Tue,
+        WeekStartDay::Wednesday => chrono::Weekday::Wed,
+        WeekStartDay::Thursday => chrono::Weekday::Thu,
+        WeekStartDay::Friday => chrono::Weekday::Fri,
+        WeekStartDay::Saturday => chrono::Weekday::Sat,
+    };
+    let days_until_first_start_day = (start_weekday.num_days_from_sunday() as i32
+        - year_start.weekday().num_days_from_sunday() as i32
+        + 7)
+        % 7;
+    let first_week_start = year_start + chrono::Duration::days(days_until_first_start_day as i64);
+    if *date < first_week_start {
+        0
+    } else {
+        let days_since_first_week = (*date - first_week_start).num_days();
+        days_since_first_week / 7 + 1
+    }
+}
+
 fn extract_from_date(date: &NaiveDate, field: DateTimeField) -> Result<Value> {
     match field {
         DateTimeField::Year => Ok(Value::Int64(date.year() as i64)),
         DateTimeField::Month => Ok(Value::Int64(date.month() as i64)),
         DateTimeField::Day => Ok(Value::Int64(date.day() as i64)),
-        DateTimeField::Week => Ok(Value::Int64(date.iso_week().week() as i64)),
+        DateTimeField::Week(start_day) => Ok(Value::Int64(week_number_from_date(date, start_day))),
+        DateTimeField::IsoWeek => Ok(Value::Int64(date.iso_week().week() as i64)),
         DateTimeField::DayOfWeek => Ok(Value::Int64(
             date.weekday().num_days_from_sunday() as i64 + 1,
         )),
@@ -7434,7 +7462,10 @@ fn extract_from_datetime(dt: &chrono::NaiveDateTime, field: DateTimeField) -> Re
         DateTimeField::Millisecond => Ok(Value::Int64((dt.nanosecond() / 1_000_000) as i64)),
         DateTimeField::Microsecond => Ok(Value::Int64((dt.nanosecond() / 1000) as i64)),
         DateTimeField::Nanosecond => Ok(Value::Int64(dt.nanosecond() as i64)),
-        DateTimeField::Week => Ok(Value::Int64(dt.iso_week().week() as i64)),
+        DateTimeField::Week(start_day) => {
+            Ok(Value::Int64(week_number_from_date(&dt.date(), start_day)))
+        }
+        DateTimeField::IsoWeek => Ok(Value::Int64(dt.iso_week().week() as i64)),
         DateTimeField::DayOfWeek => {
             Ok(Value::Int64(dt.weekday().num_days_from_sunday() as i64 + 1))
         }

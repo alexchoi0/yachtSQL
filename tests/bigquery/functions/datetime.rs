@@ -447,7 +447,43 @@ fn test_extract_week() {
     let result = executor
         .execute_sql("SELECT EXTRACT(WEEK FROM DATE '2024-06-15')")
         .unwrap();
+    assert_table_eq!(result, [[23]]);
+}
+
+#[test]
+fn test_extract_week_sunday() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT EXTRACT(WEEK(SUNDAY) FROM DATE '2024-06-15')")
+        .unwrap();
+    assert_table_eq!(result, [[23]]);
+}
+
+#[test]
+fn test_extract_week_monday() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT EXTRACT(WEEK(MONDAY) FROM DATE '2024-06-15')")
+        .unwrap();
     assert_table_eq!(result, [[24]]);
+}
+
+#[test]
+fn test_extract_isoweek() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT EXTRACT(ISOWEEK FROM DATE '2024-06-15')")
+        .unwrap();
+    assert_table_eq!(result, [[24]]);
+}
+
+#[test]
+fn test_extract_week_zero() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT EXTRACT(WEEK FROM DATE '2024-01-01')")
+        .unwrap();
+    assert_table_eq!(result, [[0]]);
 }
 
 #[test]
