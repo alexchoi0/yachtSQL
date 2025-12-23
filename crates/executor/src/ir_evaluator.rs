@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use geo::{BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance, GeodesicLength, Intersects, SimplifyVw};
+use geo::{
+    BooleanOps, BoundingRect, Centroid, Contains, ConvexHull, GeodesicArea, GeodesicDistance,
+    GeodesicLength, Intersects, SimplifyVw,
+};
 use geo_types::{Coord, Geometry, LineString, MultiPolygon, Point, Polygon};
 use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
@@ -2571,6 +2574,28 @@ impl<'a> IrEvaluator<'a> {
     }
 
     fn fn_timestamp(&self, args: &[Value]) -> Result<Value> {
+        if args.len() == 2 {
+            match (&args[0], &args[1]) {
+                (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                (Value::String(s), Value::String(tz_name)) => {
+                    let ndt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+                        .map_err(|e| Error::InvalidQuery(format!("Invalid timestamp: {}", e)))?;
+                    let tz: chrono_tz::Tz = tz_name.parse().map_err(|_| {
+                        Error::InvalidQuery(format!("Invalid timezone: {}", tz_name))
+                    })?;
+                    let local_dt = ndt.and_local_timezone(tz).single().ok_or_else(|| {
+                        Error::InvalidQuery("Ambiguous or invalid local time".into())
+                    })?;
+                    return Ok(Value::Timestamp(local_dt.with_timezone(&Utc)));
+                }
+                _ => {
+                    return Err(Error::InvalidQuery(
+                        "TIMESTAMP with timezone requires (string, string) arguments".into(),
+                    ));
+                }
+            }
+        }
         match args.first() {
             Some(Value::Null) => Ok(Value::Null),
             Some(Value::String(s)) => {
@@ -2587,8 +2612,14 @@ impl<'a> IrEvaluator<'a> {
                 Ok(Value::Timestamp(dt))
             }
             Some(Value::DateTime(dt)) => Ok(Value::Timestamp(dt.and_utc())),
+            Some(Value::Date(d)) => {
+                let ndt = d.and_hms_opt(0, 0, 0).ok_or_else(|| {
+                    Error::InvalidQuery("Failed to create timestamp from date".into())
+                })?;
+                Ok(Value::Timestamp(ndt.and_utc()))
+            }
             _ => Err(Error::InvalidQuery(
-                "TIMESTAMP requires timestamp/string argument".into(),
+                "TIMESTAMP requires timestamp/string/date argument".into(),
             )),
         }
     }

@@ -6,8 +6,8 @@ use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::{DataType, StructField};
 use yachtsql_ir::{
     AlterColumnAction, AlterTableOp, Assignment, BinaryOp, ColumnDef, ConstraintType,
-    CteDefinition, ExportFormat, ExportOptions, Expr, FunctionArg, FunctionBody, JoinType,
-    Literal, LogicalPlan, MergeClause, PlanField, PlanSchema, ProcedureArg, ProcedureArgMode,
+    CteDefinition, ExportFormat, ExportOptions, Expr, FunctionArg, FunctionBody, JoinType, Literal,
+    LogicalPlan, MergeClause, PlanField, PlanSchema, ProcedureArg, ProcedureArgMode,
     SetOperationType, SortExpr, TableConstraint,
 };
 use yachtsql_storage::Schema;
@@ -2951,7 +2951,6 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         if_not_exists: bool,
     ) -> Result<LogicalPlan> {
         let view_name = name.to_string();
-        let query_sql = query.to_string();
         let query_plan = self.plan_query(query)?;
         let query_sql = query.to_string();
         let column_aliases: Vec<String> = columns.iter().map(|c| c.name.value.clone()).collect();

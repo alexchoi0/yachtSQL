@@ -520,3 +520,30 @@ fn test_datetime_constructor_from_string() {
         .unwrap();
     assert_table_eq!(result, [[dt(2024, 6, 15, 14, 30, 0)]]);
 }
+
+#[test]
+fn test_timestamp_constructor_from_string() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT TIMESTAMP('2024-06-15 14:30:00')")
+        .unwrap();
+    assert_table_eq!(result, [[ts(2024, 6, 15, 14, 30, 0)]]);
+}
+
+#[test]
+fn test_timestamp_constructor_from_string_with_timezone() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT TIMESTAMP('2024-06-15 14:30:00', 'America/Los_Angeles')")
+        .unwrap();
+    assert_table_eq!(result, [[ts(2024, 6, 15, 21, 30, 0)]]);
+}
+
+#[test]
+fn test_timestamp_constructor_from_date() {
+    let mut executor = create_executor();
+    let result = executor
+        .execute_sql("SELECT TIMESTAMP(DATE '2024-06-15')")
+        .unwrap();
+    assert_table_eq!(result, [[ts(2024, 6, 15, 0, 0, 0)]]);
+}
