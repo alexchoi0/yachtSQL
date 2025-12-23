@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use yachtsql_common::types::Value;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Session {
     variables: HashMap<String, Value>,
     system_variables: HashMap<String, Value>,
@@ -49,11 +50,7 @@ impl Session {
         self.variables.clear();
     }
 
-    pub fn get_all_variables(&self) -> impl Iterator<Item = (&String, &Value)> {
-        self.variables.iter()
-    }
-
-    pub fn get_all_system_variables(&self) -> impl Iterator<Item = (&String, &Value)> {
-        self.system_variables.iter()
+    pub fn variables(&self) -> &HashMap<String, Value> {
+        &self.variables
     }
 }
