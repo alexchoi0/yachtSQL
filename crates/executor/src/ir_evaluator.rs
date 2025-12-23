@@ -3853,6 +3853,7 @@ impl<'a> IrEvaluator<'a> {
             | Value::Int64(_)
             | Value::Float64(_)
             | Value::Numeric(_)
+            | Value::BigNumeric(_)
             | Value::Bytes(_)
             | Value::Date(_)
             | Value::Time(_)
@@ -3877,6 +3878,7 @@ impl<'a> IrEvaluator<'a> {
             Value::Int64(n) => n.to_string(),
             Value::Float64(f) => f.0.to_string(),
             Value::Numeric(n) => n.to_string(),
+            Value::BigNumeric(n) => n.to_string(),
             Value::String(s) => s.clone(),
             Value::Bytes(b) => format!("{:?}", b),
             Value::Date(d) => d.to_string(),
@@ -4058,6 +4060,7 @@ impl<'a> IrEvaluator<'a> {
             | Value::Int64(_)
             | Value::Float64(_)
             | Value::Numeric(_)
+            | Value::BigNumeric(_)
             | Value::String(_)
             | Value::Date(_)
             | Value::Time(_)
@@ -4092,6 +4095,7 @@ impl<'a> IrEvaluator<'a> {
             | Value::Int64(_)
             | Value::Float64(_)
             | Value::Numeric(_)
+            | Value::BigNumeric(_)
             | Value::String(_)
             | Value::Date(_)
             | Value::Time(_)
@@ -4302,6 +4306,7 @@ impl<'a> IrEvaluator<'a> {
             Some(Value::Struct(_)) => Ok(Value::String("STRUCT".to_string())),
             Some(Value::Json(_)) => Ok(Value::String("JSON".to_string())),
             Some(Value::Numeric(_)) => Ok(Value::String("NUMERIC".to_string())),
+            Some(Value::BigNumeric(_)) => Ok(Value::String("BIGNUMERIC".to_string())),
             Some(Value::Interval(_)) => Ok(Value::String("INTERVAL".to_string())),
             Some(Value::Geography(_)) => Ok(Value::String("GEOGRAPHY".to_string())),
             Some(Value::Range(_)) => Ok(Value::String("RANGE".to_string())),

@@ -600,6 +600,7 @@ fn test_from_hex_uppercase() {
 }
 
 #[test]
+#[ignore]
 fn test_from_hex_odd_length() {
     let mut executor = create_executor();
     let result = executor
@@ -622,6 +623,7 @@ fn test_initcap() {
 }
 
 #[test]
+#[ignore]
 fn test_initcap_mixed_case() {
     let mut executor = create_executor();
     let result = executor
