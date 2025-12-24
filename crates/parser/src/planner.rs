@@ -198,6 +198,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             Statement::If(if_stmt) => self.plan_if(if_stmt),
             Statement::While(while_stmt) => self.plan_while(while_stmt),
             Statement::Loop(loop_stmt) => self.plan_loop(loop_stmt),
+            Statement::For(for_stmt) => self.plan_for(for_stmt),
             Statement::Case(case_stmt) => self.plan_case(case_stmt),
             Statement::Leave { .. } | Statement::Break { .. } => Ok(LogicalPlan::Break),
             Statement::Iterate { .. } | Statement::Continue { .. } => Ok(LogicalPlan::Continue),
@@ -227,6 +228,21 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             .map(|s| self.plan_statement(s))
             .collect::<Result<Vec<_>>>()?;
         Ok(LogicalPlan::Loop { body, label: None })
+    }
+
+    fn plan_for(&self, for_stmt: &ast::ForStatement) -> Result<LogicalPlan> {
+        let variable = for_stmt.variable.value.clone();
+        let query = self.plan_query(&for_stmt.query)?;
+        let body = for_stmt
+            .body
+            .iter()
+            .map(|s| self.plan_statement(s))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(LogicalPlan::For {
+            variable,
+            query: Box::new(query),
+            body,
+        })
     }
 
     fn plan_assert(
