@@ -211,12 +211,17 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
 
     fn plan_if(&self, if_stmt: &ast::IfStatement) -> Result<LogicalPlan> {
         let empty_schema = PlanSchema::new();
+        let subquery_planner = |query: &ast::Query| self.plan_query(query);
         let condition = if_stmt
             .if_block
             .condition
             .as_ref()
             .ok_or_else(|| Error::parse_error("IF statement missing condition"))?;
-        let cond_expr = ExprPlanner::plan_expr(condition, &empty_schema)?;
+        let cond_expr = ExprPlanner::plan_expr_with_subquery(
+            condition,
+            &empty_schema,
+            Some(&subquery_planner),
+        )?;
 
         let then_branch = self.plan_statement_sequence(&if_stmt.if_block.conditional_statements)?;
 
@@ -228,7 +233,11 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
 
         for elseif_block in if_stmt.elseif_blocks.iter().rev() {
             if let Some(elseif_cond) = &elseif_block.condition {
-                let elseif_cond_expr = ExprPlanner::plan_expr(elseif_cond, &empty_schema)?;
+                let elseif_cond_expr = ExprPlanner::plan_expr_with_subquery(
+                    elseif_cond,
+                    &empty_schema,
+                    Some(&subquery_planner),
+                )?;
                 let elseif_then =
                     self.plan_statement_sequence(&elseif_block.conditional_statements)?;
                 let nested_if = LogicalPlan::If {
@@ -2865,6 +2874,8 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             None => (None, target_schema.clone()),
         };
 
+        let subquery_planner = |query: &ast::Query| self.plan_query(query);
+
         let mut plan_assignments = Vec::new();
         for assign in assignments {
             let column = match &assign.target {
@@ -2875,11 +2886,13 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     .collect::<Vec<_>>()
                     .join(", "),
             };
-            let value = ExprPlanner::plan_expr(&assign.value, &combined_schema)?;
+            let value = ExprPlanner::plan_expr_with_subquery(
+                &assign.value,
+                &combined_schema,
+                Some(&subquery_planner),
+            )?;
             plan_assignments.push(Assignment { column, value });
         }
-
-        let subquery_planner = |query: &ast::Query| self.plan_query(query);
         let filter = selection
             .map(|s| {
                 ExprPlanner::plan_expr_with_subquery(s, &combined_schema, Some(&subquery_planner))
@@ -2996,7 +3009,9 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             .clone()
             .merge(source_schema_with_alias.clone());
 
-        let on_expr = ExprPlanner::plan_expr(on, &combined_schema)?;
+        let subquery_planner = |query: &ast::Query| self.plan_query(query);
+        let on_expr =
+            ExprPlanner::plan_expr_with_subquery(on, &combined_schema, Some(&subquery_planner))?;
 
         let mut merge_clauses = Vec::new();
         for clause in clauses {
@@ -3005,6 +3020,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                 &combined_schema,
                 &target_schema,
                 &source_schema_with_alias,
+                &subquery_planner,
             )?;
             merge_clauses.push(planned_clause);
         }
@@ -3017,17 +3033,23 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         })
     }
 
-    fn plan_merge_clause(
+    fn plan_merge_clause<F>(
         &self,
         clause: &ast::MergeClause,
         combined_schema: &PlanSchema,
         target_schema: &PlanSchema,
         _source_schema: &PlanSchema,
-    ) -> Result<MergeClause> {
+        subquery_planner: &F,
+    ) -> Result<MergeClause>
+    where
+        F: Fn(&ast::Query) -> Result<LogicalPlan>,
+    {
         let condition = clause
             .predicate
             .as_ref()
-            .map(|p| ExprPlanner::plan_expr(p, combined_schema))
+            .map(|p| {
+                ExprPlanner::plan_expr_with_subquery(p, combined_schema, Some(subquery_planner))
+            })
             .transpose()?;
 
         match &clause.clause_kind {
@@ -3043,7 +3065,11 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         };
-                        let value = ExprPlanner::plan_expr(&assign.value, combined_schema)?;
+                        let value = ExprPlanner::plan_expr_with_subquery(
+                            &assign.value,
+                            combined_schema,
+                            Some(subquery_planner),
+                        )?;
                         plan_assignments.push(Assignment { column, value });
                     }
                     Ok(MergeClause::MatchedUpdate {
@@ -3071,7 +3097,13 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                                 if let Some(first_row) = vals.rows.first() {
                                     first_row
                                         .iter()
-                                        .map(|e| ExprPlanner::plan_expr(e, combined_schema))
+                                        .map(|e| {
+                                            ExprPlanner::plan_expr_with_subquery(
+                                                e,
+                                                combined_schema,
+                                                Some(subquery_planner),
+                                            )
+                                        })
                                         .collect::<Result<Vec<_>>>()?
                                 } else {
                                     Vec::new()
@@ -3102,7 +3134,11 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         };
-                        let value = ExprPlanner::plan_expr(&assign.value, target_schema)?;
+                        let value = ExprPlanner::plan_expr_with_subquery(
+                            &assign.value,
+                            target_schema,
+                            Some(subquery_planner),
+                        )?;
                         plan_assignments.push(Assignment { column, value });
                     }
                     Ok(MergeClause::NotMatchedBySource {
@@ -3655,7 +3691,8 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             }
             _ => {
                 let empty_schema = PlanSchema::new();
-                ExprPlanner::plan_expr(expr, &empty_schema)
+                let subquery_planner = |subquery: &ast::Query| self.plan_query(subquery);
+                ExprPlanner::plan_expr_with_subquery(expr, &empty_schema, Some(&subquery_planner))
             }
         }
     }

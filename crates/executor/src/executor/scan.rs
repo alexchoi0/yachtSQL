@@ -19,6 +19,10 @@ impl<'a> PlanExecutor<'a> {
     }
 
     fn apply_planned_schema(&self, source_table: &Table, planned_schema: &PlanSchema) -> Table {
+        if planned_schema.fields.is_empty() {
+            return source_table.clone();
+        }
+
         let mut new_schema = Schema::new();
         for plan_field in &planned_schema.fields {
             let mode = if plan_field.nullable {

@@ -1089,7 +1089,6 @@ fn test_create_or_replace_table_clone() {
 }
 
 #[test]
-#[ignore]
 fn test_create_table_clone_isolation() {
     let mut session = create_session();
 

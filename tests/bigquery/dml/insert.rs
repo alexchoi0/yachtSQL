@@ -380,7 +380,6 @@ fn test_insert_select_with_cte() {
 }
 
 #[test]
-#[ignore]
 fn test_insert_with_nested_struct_simple() {
     let mut session = create_session();
 

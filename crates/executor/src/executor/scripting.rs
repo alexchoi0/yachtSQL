@@ -160,10 +160,7 @@ impl<'a> PlanExecutor<'a> {
         then_branch: &[PhysicalPlan],
         else_branch: Option<&[PhysicalPlan]>,
     ) -> Result<Table> {
-        let empty_schema = Schema::new();
-        let empty_record = Record::from_values(vec![]);
-        let evaluator = IrEvaluator::new(&empty_schema).with_variables(&self.variables);
-        let cond_val = evaluator.evaluate(condition, &empty_record)?;
+        let cond_val = self.evaluate_scripting_expr(condition)?;
 
         if cond_val.as_bool().unwrap_or(false) {
             for plan in then_branch {
@@ -178,13 +175,56 @@ impl<'a> PlanExecutor<'a> {
         Ok(Table::empty(Schema::new()))
     }
 
-    pub fn execute_while(&mut self, condition: &Expr, body: &[PhysicalPlan]) -> Result<Table> {
+    fn evaluate_scripting_expr(&mut self, expr: &Expr) -> Result<Value> {
         let empty_schema = Schema::new();
         let empty_record = Record::from_values(vec![]);
+        match expr {
+            Expr::Exists { subquery, negated } => {
+                let physical = optimize(subquery)?;
+                let plan = PhysicalPlan::from_physical(&physical);
+                let result = self.execute_plan(&plan)?;
+                let has_rows = !result.is_empty();
+                Ok(Value::Bool(if *negated { !has_rows } else { has_rows }))
+            }
+            Expr::BinaryOp { left, op, right } => {
+                let left_val = self.evaluate_scripting_expr(left)?;
+                let right_val = self.evaluate_scripting_expr(right)?;
+                use yachtsql_ir::BinaryOp;
+                match op {
+                    BinaryOp::And => {
+                        let l = left_val.as_bool().unwrap_or(false);
+                        let r = right_val.as_bool().unwrap_or(false);
+                        Ok(Value::Bool(l && r))
+                    }
+                    BinaryOp::Or => {
+                        let l = left_val.as_bool().unwrap_or(false);
+                        let r = right_val.as_bool().unwrap_or(false);
+                        Ok(Value::Bool(l || r))
+                    }
+                    _ => {
+                        let evaluator =
+                            IrEvaluator::new(&empty_schema).with_variables(&self.variables);
+                        evaluator.evaluate(expr, &empty_record)
+                    }
+                }
+            }
+            Expr::UnaryOp {
+                op: yachtsql_ir::UnaryOp::Not,
+                expr: inner,
+            } => {
+                let val = self.evaluate_scripting_expr(inner)?;
+                Ok(Value::Bool(!val.as_bool().unwrap_or(false)))
+            }
+            _ => {
+                let evaluator = IrEvaluator::new(&empty_schema).with_variables(&self.variables);
+                evaluator.evaluate(expr, &empty_record)
+            }
+        }
+    }
 
+    pub fn execute_while(&mut self, condition: &Expr, body: &[PhysicalPlan]) -> Result<Table> {
         loop {
-            let evaluator = IrEvaluator::new(&empty_schema).with_variables(&self.variables);
-            let cond_val = evaluator.evaluate(condition, &empty_record)?;
+            let cond_val = self.evaluate_scripting_expr(condition)?;
             if !cond_val.as_bool().unwrap_or(false) {
                 break;
             }

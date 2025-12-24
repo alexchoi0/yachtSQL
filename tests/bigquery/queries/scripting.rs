@@ -62,7 +62,6 @@ fn test_set_variable() {
 }
 
 #[test]
-#[ignore]
 fn test_set_from_query() {
     let mut session = create_session();
     session
@@ -1347,7 +1346,6 @@ fn test_complex_while_loop() {
 }
 
 #[test]
-#[ignore]
 fn test_if_with_subquery_condition() {
     let mut session = create_session();
 
