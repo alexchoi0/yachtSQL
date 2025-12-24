@@ -241,7 +241,6 @@ fn test_view_with_options() {
 }
 
 #[test]
-#[ignore]
 fn test_view_with_multiple_options() {
     let mut session = create_session();
     setup_base_table(&mut session);
@@ -544,7 +543,6 @@ fn test_alter_materialized_view_set_options() {
 }
 
 #[test]
-#[ignore]
 fn test_view_with_qualified_name() {
     let mut session = create_session();
 

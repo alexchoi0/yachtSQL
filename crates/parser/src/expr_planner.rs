@@ -1147,13 +1147,12 @@ impl ExprPlanner {
             ast::Expr::Identifier(ident) => Ok(ident.value.to_uppercase()),
             ast::Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
-                if let ast::FunctionArguments::List(list) = &func.args {
-                    if let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
+                if let ast::FunctionArguments::List(list) = &func.args
+                    && let Some(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
                         ast::Expr::Identifier(day_ident),
                     ))) = list.args.first()
-                    {
-                        return Ok(format!("{}_{}", name, day_ident.value.to_uppercase()));
-                    }
+                {
+                    return Ok(format!("{}_{}", name, day_ident.value.to_uppercase()));
                 }
                 Ok(name)
             }

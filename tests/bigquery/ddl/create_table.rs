@@ -576,7 +576,6 @@ fn test_create_table_with_complex_nested_types() {
 }
 
 #[test]
-#[ignore]
 fn test_create_table_ctas_preserves_types() {
     let mut session = create_session();
 

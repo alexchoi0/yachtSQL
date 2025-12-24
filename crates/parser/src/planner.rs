@@ -3404,11 +3404,38 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
     ) -> Result<LogicalPlan> {
         let table_name = object_name_to_raw_string(name);
 
+        if operations.len() > 1 {
+            let mut plans: Vec<LogicalPlan> = Vec::new();
+            for operation in operations {
+                let op = self.plan_single_alter_op(operation)?;
+                plans.push(LogicalPlan::AlterTable {
+                    table_name: table_name.clone(),
+                    operation: op,
+                    if_exists,
+                });
+            }
+            return Ok(LogicalPlan::If {
+                condition: yachtsql_ir::Expr::Literal(yachtsql_ir::Literal::Bool(true)),
+                then_branch: plans,
+                else_branch: None,
+            });
+        }
+
         let operation = operations
             .first()
             .ok_or_else(|| Error::parse_error("ALTER TABLE requires an operation"))?;
 
-        let op = match operation {
+        let op = self.plan_single_alter_op(operation)?;
+
+        Ok(LogicalPlan::AlterTable {
+            table_name,
+            operation: op,
+            if_exists,
+        })
+    }
+
+    fn plan_single_alter_op(&self, operation: &ast::AlterTableOperation) -> Result<AlterTableOp> {
+        match operation {
             ast::AlterTableOperation::AddColumn {
                 column_def,
                 if_not_exists,
@@ -3426,7 +3453,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     }
                     _ => None,
                 });
-                AlterTableOp::AddColumn {
+                Ok(AlterTableOp::AddColumn {
                     column: ColumnDef {
                         name: column_def.name.value.clone(),
                         data_type,
@@ -3434,7 +3461,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                         default_value,
                     },
                     if_not_exists: *if_not_exists,
-                }
+                })
             }
             ast::AlterTableOperation::DropColumn {
                 column_names,
@@ -3445,18 +3472,18 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                     .first()
                     .map(|c| c.value.clone())
                     .unwrap_or_default();
-                AlterTableOp::DropColumn {
+                Ok(AlterTableOp::DropColumn {
                     name,
                     if_exists: *if_exists,
-                }
+                })
             }
             ast::AlterTableOperation::RenameColumn {
                 old_column_name,
                 new_column_name,
-            } => AlterTableOp::RenameColumn {
+            } => Ok(AlterTableOp::RenameColumn {
                 old_name: old_column_name.value.clone(),
                 new_name: new_column_name.value.clone(),
-            },
+            }),
             ast::AlterTableOperation::RenameTable {
                 table_name: new_name,
             } => {
@@ -3465,9 +3492,9 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                         object_name_to_raw_string(name)
                     }
                 };
-                AlterTableOp::RenameTable {
+                Ok(AlterTableOp::RenameTable {
                     new_name: new_name_str,
-                }
+                })
             }
             ast::AlterTableOperation::AlterColumn { column_name, op } => {
                 let action = match op {
@@ -3490,30 +3517,22 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                         )));
                     }
                 };
-                AlterTableOp::AlterColumn {
+                Ok(AlterTableOp::AlterColumn {
                     name: column_name.value.clone(),
                     action,
-                }
+                })
             }
             ast::AlterTableOperation::AddConstraint { constraint, .. } => {
                 let table_constraint = self.plan_table_constraint(constraint)?;
-                AlterTableOp::AddConstraint {
+                Ok(AlterTableOp::AddConstraint {
                     constraint: table_constraint,
-                }
+                })
             }
-            _ => {
-                return Err(Error::unsupported(format!(
-                    "Unsupported ALTER TABLE operation: {:?}",
-                    operation
-                )));
-            }
-        };
-
-        Ok(LogicalPlan::AlterTable {
-            table_name,
-            operation: op,
-            if_exists,
-        })
+            _ => Err(Error::unsupported(format!(
+                "Unsupported ALTER TABLE operation: {:?}",
+                operation
+            ))),
+        }
     }
 
     fn plan_create_view(

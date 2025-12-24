@@ -217,7 +217,6 @@ fn test_alter_table_add_multiple_columns() {
 }
 
 #[test]
-#[ignore]
 fn test_alter_table_alter_column_set_default() {
     let mut session = create_session();
 
@@ -238,7 +237,6 @@ fn test_alter_table_alter_column_set_default() {
 }
 
 #[test]
-#[ignore]
 fn test_alter_table_alter_column_drop_default() {
     let mut session = create_session();
 
@@ -421,7 +419,6 @@ fn test_alter_table_drop_column_if_exists() {
 }
 
 #[test]
-#[ignore]
 fn test_alter_table_rename_multiple_columns() {
     let mut session = create_session();
 

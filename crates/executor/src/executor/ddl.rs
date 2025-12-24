@@ -196,9 +196,37 @@ impl<'a> PlanExecutor<'a> {
                     AlterColumnAction::DropNotNull => {
                         table.set_column_nullable(name)?;
                     }
-                    AlterColumnAction::SetDefault { .. }
-                    | AlterColumnAction::DropDefault
-                    | AlterColumnAction::SetDataType { .. } => {
+                    AlterColumnAction::SetDefault { default } => {
+                        let empty_schema = yachtsql_storage::Schema::new();
+                        let evaluator = IrEvaluator::new(&empty_schema);
+                        let empty_record = yachtsql_storage::Record::new();
+                        let default_value = evaluator.evaluate(default, &empty_record)?;
+                        table.set_column_default(name, default_value)?;
+
+                        let mut defaults = self
+                            .catalog
+                            .get_table_defaults(table_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        defaults.retain(|d| d.column_name.to_uppercase() != name.to_uppercase());
+                        defaults.push(ColumnDefault {
+                            column_name: name.clone(),
+                            default_expr: default.clone(),
+                        });
+                        self.catalog.set_table_defaults(table_name, defaults);
+                    }
+                    AlterColumnAction::DropDefault => {
+                        table.drop_column_default(name)?;
+
+                        let mut defaults = self
+                            .catalog
+                            .get_table_defaults(table_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        defaults.retain(|d| d.column_name.to_uppercase() != name.to_uppercase());
+                        self.catalog.set_table_defaults(table_name, defaults);
+                    }
+                    AlterColumnAction::SetDataType { .. } => {
                         return Err(Error::UnsupportedFeature(format!(
                             "ALTER COLUMN {:?} not yet implemented",
                             action
