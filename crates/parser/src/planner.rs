@@ -3443,35 +3443,43 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             return Err(Error::parse_error("DECLARE requires at least one variable"));
         }
 
-        let decl = &stmts[0];
-        let name = decl
-            .names
-            .first()
-            .ok_or_else(|| Error::parse_error("DECLARE requires a variable name"))?
-            .value
-            .clone();
+        let mut all_plans: Vec<LogicalPlan> = Vec::new();
 
-        let data_type = match &decl.data_type {
-            Some(dt) => self.sql_type_to_data_type(dt),
-            None => DataType::Unknown,
-        };
+        for decl in stmts {
+            let data_type = match &decl.data_type {
+                Some(dt) => self.sql_type_to_data_type(dt),
+                None => DataType::Unknown,
+            };
 
-        let empty_schema = PlanSchema::new();
-        let default = match &decl.assignment {
-            Some(ast::DeclareAssignment::Default(expr))
-            | Some(ast::DeclareAssignment::Expr(expr))
-            | Some(ast::DeclareAssignment::For(expr))
-            | Some(ast::DeclareAssignment::DuckAssignment(expr))
-            | Some(ast::DeclareAssignment::MsSqlAssignment(expr)) => {
-                Some(ExprPlanner::plan_expr(expr, &empty_schema)?)
+            let empty_schema = PlanSchema::new();
+            let default = match &decl.assignment {
+                Some(ast::DeclareAssignment::Default(expr))
+                | Some(ast::DeclareAssignment::Expr(expr))
+                | Some(ast::DeclareAssignment::For(expr))
+                | Some(ast::DeclareAssignment::DuckAssignment(expr))
+                | Some(ast::DeclareAssignment::MsSqlAssignment(expr)) => {
+                    Some(ExprPlanner::plan_expr(expr, &empty_schema)?)
+                }
+                None => None,
+            };
+
+            for name_ident in &decl.names {
+                all_plans.push(LogicalPlan::Declare {
+                    name: name_ident.value.clone(),
+                    data_type: data_type.clone(),
+                    default: default.clone(),
+                });
             }
-            None => None,
-        };
+        }
 
-        Ok(LogicalPlan::Declare {
-            name,
-            data_type,
-            default,
+        if all_plans.len() == 1 {
+            return Ok(all_plans.remove(0));
+        }
+
+        Ok(LogicalPlan::If {
+            condition: yachtsql_ir::Expr::Literal(yachtsql_ir::Literal::Bool(true)),
+            then_branch: all_plans,
+            else_branch: None,
         })
     }
 
@@ -3669,6 +3677,33 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                 Ok(LogicalPlan::SetVariable {
                     name: var_name,
                     value,
+                })
+            }
+            ast::Set::ParenthesizedAssignments { variables, values } => {
+                if variables.len() != values.len() {
+                    return Err(Error::parse_error(
+                        "SET: number of variables must match number of values",
+                    ));
+                }
+
+                let mut plans: Vec<LogicalPlan> = Vec::new();
+                for (var, val) in variables.iter().zip(values.iter()) {
+                    let var_name = var.to_string();
+                    let value = self.plan_set_value(val)?;
+                    plans.push(LogicalPlan::SetVariable {
+                        name: var_name,
+                        value,
+                    });
+                }
+
+                if plans.len() == 1 {
+                    return Ok(plans.remove(0));
+                }
+
+                Ok(LogicalPlan::If {
+                    condition: yachtsql_ir::Expr::Literal(yachtsql_ir::Literal::Bool(true)),
+                    then_branch: plans,
+                    else_branch: None,
                 })
             }
             _ => Err(Error::unsupported(format!(

@@ -15166,6 +15166,12 @@ impl<'a> Parser<'a> {
             Ok(Action::Ownership)
         } else if self.parse_keyword(Keyword::DROP) {
             Ok(Action::Drop)
+        } else if matches!(
+            &self.peek_token().token,
+            Token::Word(w) if w.quote_style.is_some()
+        ) {
+            let role = self.parse_object_name(false)?;
+            Ok(Action::Role { role })
         } else {
             self.expected("a privilege keyword", self.peek_token())?
         }

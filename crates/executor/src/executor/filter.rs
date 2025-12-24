@@ -813,9 +813,7 @@ impl<'a> PlanExecutor<'a> {
                 Self::expr_contains_subquery(left) || Self::expr_contains_subquery(right)
             }
             Expr::UnaryOp { expr, .. } => Self::expr_contains_subquery(expr),
-            Expr::ScalarFunction { args, .. } => {
-                args.iter().any(|a| Self::expr_contains_subquery(a))
-            }
+            Expr::ScalarFunction { args, .. } => args.iter().any(Self::expr_contains_subquery),
             _ => false,
         }
     }

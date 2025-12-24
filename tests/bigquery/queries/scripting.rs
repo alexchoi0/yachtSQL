@@ -574,7 +574,6 @@ fn test_declare_array() {
 }
 
 #[test]
-#[ignore]
 fn test_declare_multiple_with_default() {
     let mut session = create_session();
 
@@ -587,7 +586,6 @@ fn test_declare_multiple_with_default() {
 }
 
 #[test]
-#[ignore]
 fn test_set_multiple_variables() {
     let mut session = create_session();
 
