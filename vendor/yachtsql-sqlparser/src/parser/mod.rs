@@ -624,6 +624,7 @@ impl<'a> Parser<'a> {
                 Keyword::CREATE => self.parse_create(),
                 Keyword::CACHE => self.parse_cache_table(),
                 Keyword::DROP => self.parse_drop(),
+                Keyword::UNDROP => self.parse_undrop(),
                 Keyword::DISCARD => self.parse_discard(),
                 Keyword::DECLARE => self.parse_declare(),
                 Keyword::FETCH => self.parse_fetch_statement(),
@@ -6796,6 +6797,19 @@ impl<'a> Parser<'a> {
             temporary,
             table,
         })
+    }
+
+    pub fn parse_undrop(&mut self) -> Result<Statement, ParserError> {
+        if self.parse_keyword(Keyword::SCHEMA) {
+            let if_not_exists = self.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+            let schema_name = self.parse_object_name(false)?;
+            Ok(Statement::UndropSchema {
+                if_not_exists,
+                schema_name,
+            })
+        } else {
+            self.expected("SCHEMA after UNDROP", self.peek_token())
+        }
     }
 
     fn parse_optional_drop_behavior(&mut self) -> Option<DropBehavior> {

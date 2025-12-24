@@ -197,6 +197,11 @@ pub enum LogicalPlan {
         cascade: bool,
     },
 
+    UndropSchema {
+        name: String,
+        if_not_exists: bool,
+    },
+
     AlterSchema {
         name: String,
         options: Vec<(String, String)>,
@@ -359,6 +364,7 @@ impl LogicalPlan {
             LogicalPlan::DropView { .. } => &EMPTY_SCHEMA,
             LogicalPlan::CreateSchema { .. } => &EMPTY_SCHEMA,
             LogicalPlan::DropSchema { .. } => &EMPTY_SCHEMA,
+            LogicalPlan::UndropSchema { .. } => &EMPTY_SCHEMA,
             LogicalPlan::AlterSchema { .. } => &EMPTY_SCHEMA,
             LogicalPlan::CreateFunction { .. } => &EMPTY_SCHEMA,
             LogicalPlan::DropFunction { .. } => &EMPTY_SCHEMA,

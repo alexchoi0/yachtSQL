@@ -294,6 +294,11 @@ impl<'a> PlanExecutor<'a> {
         Ok(Table::empty(Schema::new()))
     }
 
+    pub fn execute_undrop_schema(&mut self, name: &str, if_not_exists: bool) -> Result<Table> {
+        self.catalog.undrop_schema(name, if_not_exists)?;
+        Ok(Table::empty(Schema::new()))
+    }
+
     pub fn execute_alter_schema(
         &mut self,
         name: &str,
@@ -1449,6 +1454,13 @@ fn executor_plan_to_logical_plan(plan: &PhysicalPlan) -> yachtsql_ir::LogicalPla
             name: name.clone(),
             if_exists: *if_exists,
             cascade: *cascade,
+        },
+        PhysicalPlan::UndropSchema {
+            name,
+            if_not_exists,
+        } => LogicalPlan::UndropSchema {
+            name: name.clone(),
+            if_not_exists: *if_not_exists,
         },
         PhysicalPlan::AlterSchema { name, options } => LogicalPlan::AlterSchema {
             name: name.clone(),

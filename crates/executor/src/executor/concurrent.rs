@@ -239,6 +239,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 if_exists,
                 cascade,
             } => self.execute_drop_schema(name, *if_exists, *cascade),
+            PhysicalPlan::UndropSchema {
+                name,
+                if_not_exists,
+            } => self.execute_undrop_schema(name, *if_not_exists),
             PhysicalPlan::AlterSchema { name, options } => self.execute_alter_schema(name, options),
             PhysicalPlan::CreateFunction {
                 name,
@@ -1189,6 +1193,15 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         cascade: bool,
     ) -> Result<Table> {
         self.catalog.drop_schema(name, if_exists, cascade)?;
+        Ok(Table::empty(Schema::new()))
+    }
+
+    pub(crate) fn execute_undrop_schema(
+        &mut self,
+        name: &str,
+        if_not_exists: bool,
+    ) -> Result<Table> {
+        self.catalog.undrop_schema(name, if_not_exists)?;
         Ok(Table::empty(Schema::new()))
     }
 

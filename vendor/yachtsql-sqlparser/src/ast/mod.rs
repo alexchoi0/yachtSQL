@@ -3759,6 +3759,14 @@ pub enum Statement {
         name: Ident,
     },
     /// ```sql
+    /// UNDROP SCHEMA schema_name
+    /// ```
+    /// BigQuery-specific statement to restore a dropped schema
+    UndropSchema {
+        if_not_exists: bool,
+        schema_name: ObjectName,
+    },
+    /// ```sql
     /// DECLARE
     /// ```
     /// Declare Cursor Variables
@@ -5854,6 +5862,17 @@ impl fmt::Display for Statement {
                     f,
                     "DROP CONNECTOR {if_exists}{name}",
                     if_exists = if *if_exists { "IF EXISTS " } else { "" }
+                )?;
+                Ok(())
+            }
+            Statement::UndropSchema {
+                if_not_exists,
+                schema_name,
+            } => {
+                write!(
+                    f,
+                    "UNDROP SCHEMA {if_not_exists}{schema_name}",
+                    if_not_exists = if *if_not_exists { "IF NOT EXISTS " } else { "" }
                 )?;
                 Ok(())
             }

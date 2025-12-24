@@ -205,6 +205,11 @@ pub enum OptimizedLogicalPlan {
         cascade: bool,
     },
 
+    UndropSchema {
+        name: String,
+        if_not_exists: bool,
+    },
+
     AlterSchema {
         name: String,
         options: Vec<(String, String)>,
@@ -372,6 +377,7 @@ impl OptimizedLogicalPlan {
             OptimizedLogicalPlan::DropView { .. } => &EMPTY_SCHEMA,
             OptimizedLogicalPlan::CreateSchema { .. } => &EMPTY_SCHEMA,
             OptimizedLogicalPlan::DropSchema { .. } => &EMPTY_SCHEMA,
+            OptimizedLogicalPlan::UndropSchema { .. } => &EMPTY_SCHEMA,
             OptimizedLogicalPlan::AlterSchema { .. } => &EMPTY_SCHEMA,
             OptimizedLogicalPlan::CreateFunction { .. } => &EMPTY_SCHEMA,
             OptimizedLogicalPlan::DropFunction { .. } => &EMPTY_SCHEMA,

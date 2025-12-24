@@ -214,6 +214,20 @@ impl ConcurrentCatalog {
         Ok(())
     }
 
+    pub fn undrop_schema(&self, name: &str, if_not_exists: bool) -> Result<()> {
+        let key = name.to_uppercase();
+        if self.schemas.contains_key(&key) {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(Error::invalid_query(format!(
+                "Schema already exists: {}",
+                name
+            )));
+        }
+        Ok(())
+    }
+
     pub fn schema_exists(&self, name: &str) -> bool {
         self.schemas.contains_key(&name.to_uppercase())
     }

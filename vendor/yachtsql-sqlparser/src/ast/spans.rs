@@ -538,6 +538,7 @@ impl Spanned for Statement {
             Statement::AlterConnector { .. } => Span::empty(),
             Statement::DropPolicy { .. } => Span::empty(),
             Statement::DropConnector { .. } => Span::empty(),
+            Statement::UndropSchema { .. } => Span::empty(),
             Statement::ShowDatabases { .. } => Span::empty(),
             Statement::ShowSchemas { .. } => Span::empty(),
             Statement::ShowObjects { .. } => Span::empty(),

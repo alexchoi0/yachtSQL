@@ -162,6 +162,7 @@ fn collect_union_terms(
         | LogicalPlan::DropView { .. }
         | LogicalPlan::CreateSchema { .. }
         | LogicalPlan::DropSchema { .. }
+        | LogicalPlan::UndropSchema { .. }
         | LogicalPlan::CreateFunction { .. }
         | LogicalPlan::DropFunction { .. }
         | LogicalPlan::Call { .. }
@@ -237,6 +238,7 @@ fn references_table(plan: &LogicalPlan, table_name: &str) -> bool {
         LogicalPlan::DropView { .. } => false,
         LogicalPlan::CreateSchema { .. } => false,
         LogicalPlan::DropSchema { .. } => false,
+        LogicalPlan::UndropSchema { .. } => false,
         LogicalPlan::CreateFunction { .. } => false,
         LogicalPlan::DropFunction { .. } => false,
         LogicalPlan::Call { .. } => false,

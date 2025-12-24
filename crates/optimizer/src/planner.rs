@@ -365,6 +365,14 @@ impl PhysicalPlanner {
                 cascade: *cascade,
             }),
 
+            LogicalPlan::UndropSchema {
+                name,
+                if_not_exists,
+            } => Ok(OptimizedLogicalPlan::UndropSchema {
+                name: name.clone(),
+                if_not_exists: *if_not_exists,
+            }),
+
             LogicalPlan::AlterSchema { name, options } => Ok(OptimizedLogicalPlan::AlterSchema {
                 name: name.clone(),
                 options: options.clone(),
@@ -885,6 +893,13 @@ impl OptimizedLogicalPlan {
                 name,
                 if_exists,
                 cascade,
+            },
+            OptimizedLogicalPlan::UndropSchema {
+                name,
+                if_not_exists,
+            } => LogicalPlan::UndropSchema {
+                name,
+                if_not_exists,
             },
             OptimizedLogicalPlan::AlterSchema { name, options } => {
                 LogicalPlan::AlterSchema { name, options }

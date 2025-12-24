@@ -232,6 +232,11 @@ pub enum PhysicalPlan {
         cascade: bool,
     },
 
+    UndropSchema {
+        name: String,
+        if_not_exists: bool,
+    },
+
     AlterSchema {
         name: String,
         options: Vec<(String, String)>,
@@ -657,6 +662,14 @@ impl PhysicalPlan {
                 cascade: *cascade,
             },
 
+            OptimizedLogicalPlan::UndropSchema {
+                name,
+                if_not_exists,
+            } => PhysicalPlan::UndropSchema {
+                name: name.clone(),
+                if_not_exists: *if_not_exists,
+            },
+
             OptimizedLogicalPlan::AlterSchema { name, options } => PhysicalPlan::AlterSchema {
                 name: name.clone(),
                 options: options.clone(),
@@ -985,6 +998,7 @@ impl PhysicalPlan {
             | PhysicalPlan::DropView { .. }
             | PhysicalPlan::CreateSchema { .. }
             | PhysicalPlan::DropSchema { .. }
+            | PhysicalPlan::UndropSchema { .. }
             | PhysicalPlan::AlterSchema { .. }
             | PhysicalPlan::CreateFunction { .. }
             | PhysicalPlan::DropFunction { .. }

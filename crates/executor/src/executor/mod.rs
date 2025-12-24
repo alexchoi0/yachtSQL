@@ -260,6 +260,10 @@ impl<'a> PlanExecutor<'a> {
                 if_exists,
                 cascade,
             } => self.execute_drop_schema(name, *if_exists, *cascade),
+            PhysicalPlan::UndropSchema {
+                name,
+                if_not_exists,
+            } => self.execute_undrop_schema(name, *if_not_exists),
             PhysicalPlan::AlterSchema { name, options } => self.execute_alter_schema(name, options),
             PhysicalPlan::CreateFunction {
                 name,

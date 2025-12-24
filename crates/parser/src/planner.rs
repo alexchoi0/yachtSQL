@@ -81,6 +81,16 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
                 ..
             } => self.plan_create_schema(schema_name, *if_not_exists),
             Statement::AlterSchema(alter_schema) => self.plan_alter_schema(alter_schema),
+            Statement::UndropSchema {
+                if_not_exists,
+                schema_name,
+            } => {
+                let name = object_name_to_raw_string(schema_name);
+                Ok(LogicalPlan::UndropSchema {
+                    name,
+                    if_not_exists: *if_not_exists,
+                })
+            }
             Statement::AlterMaterializedView { .. } => Ok(LogicalPlan::Empty {
                 schema: PlanSchema::new(),
             }),
