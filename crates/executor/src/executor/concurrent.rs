@@ -269,7 +269,8 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 args,
                 body,
                 or_replace,
-            } => self.execute_create_procedure(name, args, body, *or_replace),
+                if_not_exists,
+            } => self.execute_create_procedure(name, args, body, *or_replace, *if_not_exists),
             PhysicalPlan::DropProcedure { name, if_exists } => {
                 self.execute_drop_procedure(name, *if_exists)
             }
@@ -1267,6 +1268,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         args: &[ProcedureArg],
         body: &[PhysicalPlan],
         or_replace: bool,
+        if_not_exists: bool,
     ) -> Result<Table> {
         let proc = UserProcedure {
             name: name.to_string(),
@@ -1278,7 +1280,8 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 })
                 .collect(),
         };
-        self.catalog.create_procedure(proc, or_replace)?;
+        self.catalog
+            .create_procedure(proc, or_replace, if_not_exists)?;
         Ok(Table::empty(Schema::new()))
     }
 

@@ -227,6 +227,7 @@ pub enum LogicalPlan {
         args: Vec<ProcedureArg>,
         body: Vec<LogicalPlan>,
         or_replace: bool,
+        if_not_exists: bool,
     },
 
     DropProcedure {

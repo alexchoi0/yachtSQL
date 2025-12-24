@@ -290,7 +290,8 @@ impl<'a> PlanExecutor<'a> {
                 args,
                 body,
                 or_replace,
-            } => self.execute_create_procedure(name, args, body, *or_replace),
+                if_not_exists,
+            } => self.execute_create_procedure(name, args, body, *or_replace, *if_not_exists),
             PhysicalPlan::DropProcedure { name, if_exists } => {
                 self.execute_drop_procedure(name, *if_exists)
             }

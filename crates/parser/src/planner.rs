@@ -168,11 +168,12 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             }),
             Statement::CreateProcedure {
                 or_alter,
+                if_not_exists,
                 name,
                 params,
                 body,
                 ..
-            } => self.plan_create_procedure(name, params, body, *or_alter),
+            } => self.plan_create_procedure(name, params, body, *or_alter, *if_not_exists),
             Statement::DropProcedure {
                 if_exists,
                 proc_desc,
@@ -5416,6 +5417,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
         params: &Option<Vec<ast::ProcedureParam>>,
         body: &ast::ConditionalStatements,
         or_replace: bool,
+        if_not_exists: bool,
     ) -> Result<LogicalPlan> {
         let raw_name = object_name_to_raw_string(name);
         let (proc_name, or_replace) = if let Some(stripped) = raw_name.strip_prefix("__orp__") {
@@ -5450,6 +5452,7 @@ impl<'a, C: CatalogProvider> Planner<'a, C> {
             args,
             body: body_plans,
             or_replace,
+            if_not_exists,
         })
     }
 

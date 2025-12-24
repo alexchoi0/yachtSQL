@@ -325,13 +325,23 @@ impl Catalog {
         self.functions.contains_key(&name.to_uppercase())
     }
 
-    pub fn create_procedure(&mut self, proc: UserProcedure, or_replace: bool) -> Result<()> {
+    pub fn create_procedure(
+        &mut self,
+        proc: UserProcedure,
+        or_replace: bool,
+        if_not_exists: bool,
+    ) -> Result<()> {
         let key = proc.name.to_uppercase();
-        if self.procedures.contains_key(&key) && !or_replace {
-            return Err(Error::invalid_query(format!(
-                "Procedure already exists: {}",
-                proc.name
-            )));
+        if self.procedures.contains_key(&key) {
+            if if_not_exists {
+                return Ok(());
+            }
+            if !or_replace {
+                return Err(Error::invalid_query(format!(
+                    "Procedure already exists: {}",
+                    proc.name
+                )));
+            }
         }
         self.procedures.insert(key, proc);
         Ok(())

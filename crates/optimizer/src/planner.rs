@@ -408,6 +408,7 @@ impl PhysicalPlanner {
                 args,
                 body,
                 or_replace,
+                if_not_exists,
             } => {
                 let body = body
                     .iter()
@@ -418,6 +419,7 @@ impl PhysicalPlanner {
                     args: args.clone(),
                     body,
                     or_replace: *or_replace,
+                    if_not_exists: *if_not_exists,
                 })
             }
 
@@ -929,11 +931,13 @@ impl OptimizedLogicalPlan {
                 args,
                 body,
                 or_replace,
+                if_not_exists,
             } => LogicalPlan::CreateProcedure {
                 name,
                 args,
                 body: body.into_iter().map(|p| p.into_logical()).collect(),
                 or_replace,
+                if_not_exists,
             },
             OptimizedLogicalPlan::DropProcedure { name, if_exists } => {
                 LogicalPlan::DropProcedure { name, if_exists }

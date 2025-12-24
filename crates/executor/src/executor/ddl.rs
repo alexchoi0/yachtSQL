@@ -1153,6 +1153,7 @@ impl<'a> PlanExecutor<'a> {
         args: &[ProcedureArg],
         body: &[PhysicalPlan],
         or_replace: bool,
+        if_not_exists: bool,
     ) -> Result<Table> {
         let body_plans = body.iter().map(executor_plan_to_logical_plan).collect();
         let proc = UserProcedure {
@@ -1160,7 +1161,8 @@ impl<'a> PlanExecutor<'a> {
             parameters: args.to_vec(),
             body: body_plans,
         };
-        self.catalog.create_procedure(proc, or_replace)?;
+        self.catalog
+            .create_procedure(proc, or_replace, if_not_exists)?;
         Ok(Table::empty(Schema::new()))
     }
 
@@ -1492,11 +1494,13 @@ fn executor_plan_to_logical_plan(plan: &PhysicalPlan) -> yachtsql_ir::LogicalPla
             args,
             body,
             or_replace,
+            if_not_exists,
         } => LogicalPlan::CreateProcedure {
             name: name.clone(),
             args: args.clone(),
             body: body.iter().map(executor_plan_to_logical_plan).collect(),
             or_replace: *or_replace,
+            if_not_exists: *if_not_exists,
         },
         PhysicalPlan::DropProcedure { name, if_exists } => LogicalPlan::DropProcedure {
             name: name.clone(),

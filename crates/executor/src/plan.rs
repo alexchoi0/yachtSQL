@@ -262,6 +262,7 @@ pub enum PhysicalPlan {
         args: Vec<ProcedureArg>,
         body: Vec<PhysicalPlan>,
         or_replace: bool,
+        if_not_exists: bool,
     },
 
     DropProcedure {
@@ -703,11 +704,13 @@ impl PhysicalPlan {
                 args,
                 body,
                 or_replace,
+                if_not_exists,
             } => PhysicalPlan::CreateProcedure {
                 name: name.clone(),
                 args: args.clone(),
                 body: body.iter().map(Self::from_physical).collect(),
                 or_replace: *or_replace,
+                if_not_exists: *if_not_exists,
             },
 
             OptimizedLogicalPlan::DropProcedure { name, if_exists } => {

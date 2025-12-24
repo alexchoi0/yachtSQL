@@ -235,6 +235,7 @@ pub enum OptimizedLogicalPlan {
         args: Vec<ProcedureArg>,
         body: Vec<OptimizedLogicalPlan>,
         or_replace: bool,
+        if_not_exists: bool,
     },
 
     DropProcedure {
