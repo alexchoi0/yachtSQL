@@ -1767,7 +1767,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
     pub(crate) fn execute_declare(
         &mut self,
         name: &str,
-        _data_type: &DataType,
+        data_type: &DataType,
         default: Option<&Expr>,
     ) -> Result<Table> {
         let value = if let Some(expr) = default {
@@ -1775,11 +1775,24 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             let evaluator = IrEvaluator::new(&empty_schema)
                 .with_variables(&self.variables)
                 .with_user_functions(&self.user_function_defs);
-            evaluator.evaluate(expr, &Record::new())?
+            let mut evaluated = evaluator.evaluate(expr, &Record::new())?;
+
+            if let (DataType::Struct(type_fields), Value::Struct(value_fields)) =
+                (data_type, &evaluated)
+            {
+                let named_fields: Vec<(String, Value)> = type_fields
+                    .iter()
+                    .zip(value_fields.iter())
+                    .map(|(type_field, (_, v))| (type_field.name.clone(), v.clone()))
+                    .collect();
+                evaluated = Value::Struct(named_fields);
+            }
+            evaluated
         } else {
-            Value::Null
+            default_value_for_type(data_type)
         };
-        self.variables.insert(name.to_uppercase(), value);
+        self.variables.insert(name.to_uppercase(), value.clone());
+        self.session.set_variable(name, value);
         Ok(Table::empty(Schema::new()))
     }
 
@@ -2117,5 +2130,15 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         }
         self.catalog.drop_table(snapshot_name)?;
         Ok(Table::empty(Schema::new()))
+    }
+}
+
+fn default_value_for_type(data_type: &DataType) -> Value {
+    match data_type {
+        DataType::Int64 => Value::Int64(0),
+        DataType::Float64 => Value::Float64(ordered_float::OrderedFloat(0.0)),
+        DataType::Bool => Value::Bool(false),
+        DataType::String => Value::String(String::new()),
+        _ => Value::Null,
     }
 }
