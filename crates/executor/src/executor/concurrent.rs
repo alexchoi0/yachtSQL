@@ -1900,6 +1900,23 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let source_name = alias.unwrap_or(table_name);
         let target_schema = Self::schema_with_source_table(&base_schema, source_name);
 
+        let evaluator_for_defaults = IrEvaluator::new(&base_schema)
+            .with_variables(&self.variables)
+            .with_user_functions(&self.user_function_defs);
+        let empty_record = Record::new();
+        let mut default_values: Vec<Option<Value>> = vec![None; base_schema.field_count()];
+        if let Some(defaults) = self.catalog.get_table_defaults(table_name) {
+            for default in defaults {
+                if let Some(idx) = base_schema.field_index(&default.column_name) {
+                    if let Ok(val) =
+                        evaluator_for_defaults.evaluate(&default.default_expr, &empty_record)
+                    {
+                        default_values[idx] = Some(val);
+                    }
+                }
+            }
+        }
+
         let filter_has_subquery = filter
             .as_ref()
             .is_some_and(|f| Self::expr_contains_subquery(f));
@@ -1966,7 +1983,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                     Self::parse_assignment_column(&assignment.column);
                                 if let Some(col_idx) = target_schema.field_index(&base_col) {
                                     let new_val = match &assignment.value {
-                                        Expr::Default => Value::Null,
+                                        Expr::Default => {
+                                            default_values[col_idx].clone().unwrap_or(Value::Null)
+                                        }
                                         _ => {
                                             if assignments_have_subquery {
                                                 self.eval_expr_with_subqueries(
@@ -2024,11 +2043,16 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 let (base_col, field_path) =
                                     Self::parse_assignment_column(&assignment.column);
                                 if let Some(idx) = target_schema.field_index(&base_col) {
-                                    let val = self.eval_expr_with_subqueries(
-                                        &assignment.value,
-                                        &target_schema,
-                                        &record,
-                                    )?;
+                                    let val = match &assignment.value {
+                                        Expr::Default => {
+                                            default_values[idx].clone().unwrap_or(Value::Null)
+                                        }
+                                        _ => self.eval_expr_with_subqueries(
+                                            &assignment.value,
+                                            &target_schema,
+                                            &record,
+                                        )?,
+                                    };
                                     if field_path.is_empty() {
                                         new_row[idx] = val;
                                     } else {
@@ -2063,7 +2087,12 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 let (base_col, field_path) =
                                     Self::parse_assignment_column(&assignment.column);
                                 if let Some(idx) = target_schema.field_index(&base_col) {
-                                    let val = evaluator.evaluate(&assignment.value, &record)?;
+                                    let val = match &assignment.value {
+                                        Expr::Default => {
+                                            default_values[idx].clone().unwrap_or(Value::Null)
+                                        }
+                                        _ => evaluator.evaluate(&assignment.value, &record)?,
+                                    };
                                     if field_path.is_empty() {
                                         new_row[idx] = val;
                                     } else {
@@ -2232,18 +2261,23 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let target_rows: Vec<Record> = target.rows()?;
 
         let combined_schema = self.create_merge_combined_schema(&target_schema, &source_schema);
-        let evaluator = IrEvaluator::new(&combined_schema)
-            .with_variables(&self.variables)
-            .with_user_functions(&self.user_function_defs);
 
         let mut matched_target_indices: HashSet<usize> = HashSet::new();
         let mut matched_source_indices: HashSet<usize> = HashSet::new();
         let mut match_pairs: Vec<(usize, usize)> = Vec::new();
 
+        let on_has_subquery = Self::expr_contains_subquery(on);
         for (t_idx, target_row) in target_rows.iter().enumerate() {
             for (s_idx, source_row) in source_rows.iter().enumerate() {
                 let combined_record = self.create_combined_record(target_row, source_row);
-                let val = evaluator.evaluate(on, &combined_record)?;
+                let val = if on_has_subquery {
+                    self.eval_expr_with_subqueries(on, &combined_schema, &combined_record)?
+                } else {
+                    let evaluator = IrEvaluator::new(&combined_schema)
+                        .with_variables(&self.variables)
+                        .with_user_functions(&self.user_function_defs);
+                    evaluator.evaluate(on, &combined_record)?
+                };
                 if val.as_bool().unwrap_or(false) {
                     match_pairs.push((t_idx, s_idx));
                     matched_target_indices.insert(t_idx);
@@ -2255,6 +2289,8 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let mut updates: Vec<(usize, Vec<Value>)> = Vec::new();
         let mut deletes: Vec<usize> = Vec::new();
         let mut inserts: Vec<Vec<Value>> = Vec::new();
+        let mut claimed_target_indices: HashSet<usize> = HashSet::new();
+        let mut claimed_source_indices: HashSet<usize> = HashSet::new();
 
         for clause in clauses {
             match clause {
@@ -2262,20 +2298,46 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     condition,
                     assignments,
                 } => {
+                    let cond_has_subquery = condition
+                        .as_ref()
+                        .is_some_and(|c| Self::expr_contains_subquery(c));
+                    let assignments_have_subquery = assignments
+                        .iter()
+                        .any(|a| Self::expr_contains_subquery(&a.value));
+
                     for &(t_idx, s_idx) in &match_pairs {
+                        if claimed_target_indices.contains(&t_idx) {
+                            continue;
+                        }
                         let target_row = &target_rows[t_idx];
                         let source_row = &source_rows[s_idx];
                         let combined_record = self.create_combined_record(target_row, source_row);
 
                         let should_apply = match condition {
-                            Some(pred) => evaluator
-                                .evaluate(pred, &combined_record)?
-                                .as_bool()
-                                .unwrap_or(false),
+                            Some(pred) => {
+                                if cond_has_subquery {
+                                    self.eval_expr_with_subqueries(
+                                        pred,
+                                        &combined_schema,
+                                        &combined_record,
+                                    )?
+                                    .as_bool()
+                                    .unwrap_or(false)
+                                } else {
+                                    let evaluator = IrEvaluator::new(&combined_schema)
+                                        .with_variables(&self.variables)
+                                        .with_user_functions(&self.user_function_defs);
+                                    evaluator
+                                        .evaluate(pred, &combined_record)?
+                                        .as_bool()
+                                        .unwrap_or(false)
+                                }
+                            }
                             None => true,
                         };
 
-                        if should_apply && !deletes.contains(&t_idx) {
+                        if should_apply {
+                            claimed_target_indices.insert(t_idx);
                             let mut new_values = target_row.values().to_vec();
                             for assignment in assignments {
                                 let col_idx = target_schema
@@ -2285,8 +2347,18 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                     .ok_or_else(|| {
                                         Error::ColumnNotFound(assignment.column.clone())
                                     })?;
-                                let new_val =
-                                    evaluator.evaluate(&assignment.value, &combined_record)?;
+                                let new_val = if assignments_have_subquery {
+                                    self.eval_expr_with_subqueries(
+                                        &assignment.value,
+                                        &combined_schema,
+                                        &combined_record,
+                                    )?
+                                } else {
+                                    let evaluator = IrEvaluator::new(&combined_schema)
+                                        .with_variables(&self.variables)
+                                        .with_user_functions(&self.user_function_defs);
+                                    evaluator.evaluate(&assignment.value, &combined_record)?
+                                };
                                 new_values[col_idx] = new_val;
                             }
                             if let Some(pos) = updates.iter().position(|(idx, _)| *idx == t_idx) {
@@ -2298,22 +2370,44 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     }
                 }
                 MergeClause::MatchedDelete { condition } => {
+                    let cond_has_subquery = condition
+                        .as_ref()
+                        .is_some_and(|c| Self::expr_contains_subquery(c));
+
                     for &(t_idx, s_idx) in &match_pairs {
+                        if claimed_target_indices.contains(&t_idx) {
+                            continue;
+                        }
                         let target_row = &target_rows[t_idx];
                         let source_row = &source_rows[s_idx];
                         let combined_record = self.create_combined_record(target_row, source_row);
 
                         let should_apply = match condition {
-                            Some(pred) => evaluator
-                                .evaluate(pred, &combined_record)?
-                                .as_bool()
-                                .unwrap_or(false),
+                            Some(pred) => {
+                                if cond_has_subquery {
+                                    self.eval_expr_with_subqueries(
+                                        pred,
+                                        &combined_schema,
+                                        &combined_record,
+                                    )?
+                                    .as_bool()
+                                    .unwrap_or(false)
+                                } else {
+                                    let evaluator = IrEvaluator::new(&combined_schema)
+                                        .with_variables(&self.variables)
+                                        .with_user_functions(&self.user_function_defs);
+                                    evaluator
+                                        .evaluate(pred, &combined_record)?
+                                        .as_bool()
+                                        .unwrap_or(false)
+                                }
+                            }
                             None => true,
                         };
 
-                        if should_apply && !deletes.contains(&t_idx) {
+                        if should_apply {
+                            claimed_target_indices.insert(t_idx);
                             deletes.push(t_idx);
-                            updates.retain(|(idx, _)| *idx != t_idx);
                         }
                     }
                 }
@@ -2327,7 +2421,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                         .with_user_functions(&self.user_function_defs);
 
                     for (s_idx, source_row) in source_rows.iter().enumerate() {
-                        if matched_source_indices.contains(&s_idx) {
+                        if matched_source_indices.contains(&s_idx)
+                            || claimed_source_indices.contains(&s_idx)
+                        {
                             continue;
                         }
 
@@ -2340,6 +2436,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                         };
 
                         if should_apply {
+                            claimed_source_indices.insert(s_idx);
                             let mut row_values = vec![Value::Null; target_schema.field_count()];
 
                             if columns.is_empty() && values.is_empty() {
@@ -2379,7 +2476,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                         .with_user_functions(&self.user_function_defs);
 
                     for (t_idx, target_row) in target_rows.iter().enumerate() {
-                        if matched_target_indices.contains(&t_idx) {
+                        if matched_target_indices.contains(&t_idx)
+                            || claimed_target_indices.contains(&t_idx)
+                        {
                             continue;
                         }
 
@@ -2391,7 +2490,8 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                             None => true,
                         };
 
-                        if should_apply && !deletes.contains(&t_idx) {
+                        if should_apply {
+                            claimed_target_indices.insert(t_idx);
                             let mut new_values = target_row.values().to_vec();
                             for assignment in assignments {
                                 let col_idx = target_schema
@@ -2419,7 +2519,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                         .with_user_functions(&self.user_function_defs);
 
                     for (t_idx, target_row) in target_rows.iter().enumerate() {
-                        if matched_target_indices.contains(&t_idx) {
+                        if matched_target_indices.contains(&t_idx)
+                            || claimed_target_indices.contains(&t_idx)
+                        {
                             continue;
                         }
 
@@ -2431,9 +2533,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                             None => true,
                         };
 
-                        if should_apply && !deletes.contains(&t_idx) {
+                        if should_apply {
+                            claimed_target_indices.insert(t_idx);
                             deletes.push(t_idx);
-                            updates.retain(|(idx, _)| *idx != t_idx);
                         }
                     }
                 }
@@ -4462,7 +4564,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 let new_columns = columns
                     .iter()
                     .map(|uc| {
-                        let new_expr = self.substitute_outer_refs_in_expr(
+                        let new_expr = self.substitute_outer_refs_in_unnest_expr(
                             &uc.expr,
                             outer_schema,
                             outer_record,
@@ -4501,6 +4603,25 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     right: Box::new(new_right),
                     join_type: *join_type,
                     condition: new_condition,
+                    schema: schema.clone(),
+                })
+            }
+            LogicalPlan::SetOperation {
+                left,
+                right,
+                op,
+                all,
+                schema,
+            } => {
+                let new_left =
+                    self.substitute_outer_refs_in_plan(left, outer_schema, outer_record)?;
+                let new_right =
+                    self.substitute_outer_refs_in_plan(right, outer_schema, outer_record)?;
+                Ok(LogicalPlan::SetOperation {
+                    left: Box::new(new_left),
+                    right: Box::new(new_right),
+                    op: *op,
+                    all: *all,
                     schema: schema.clone(),
                 })
             }
@@ -4589,6 +4710,73 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 })
             }
             _ => Ok(expr.clone()),
+        }
+    }
+
+    fn substitute_outer_refs_in_unnest_expr(
+        &self,
+        expr: &Expr,
+        outer_schema: &Schema,
+        outer_record: &Record,
+    ) -> Result<Expr> {
+        match expr {
+            Expr::Column { table, name, index } => {
+                let should_substitute = if let Some(tbl) = table {
+                    outer_schema.fields().iter().any(|f| {
+                        f.source_table
+                            .as_ref()
+                            .is_some_and(|src| src.eq_ignore_ascii_case(tbl))
+                            && f.name.eq_ignore_ascii_case(name)
+                    })
+                } else {
+                    outer_schema.field_index(name).is_some()
+                };
+
+                if should_substitute
+                    && let Some(idx) = outer_schema.field_index_qualified(name, table.as_deref())
+                {
+                    let value = outer_record
+                        .values()
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    return Ok(Expr::Literal(Self::value_to_literal(value)));
+                }
+                Ok(Expr::Column {
+                    table: table.clone(),
+                    name: name.clone(),
+                    index: *index,
+                })
+            }
+            Expr::ScalarFunction { name, args } => {
+                let new_args = args
+                    .iter()
+                    .map(|a| self.substitute_outer_refs_in_unnest_expr(a, outer_schema, outer_record))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Expr::ScalarFunction {
+                    name: name.clone(),
+                    args: new_args,
+                })
+            }
+            Expr::StructAccess { expr: base, field } => {
+                let new_base =
+                    self.substitute_outer_refs_in_unnest_expr(base, outer_schema, outer_record)?;
+                Ok(Expr::StructAccess {
+                    expr: Box::new(new_base),
+                    field: field.clone(),
+                })
+            }
+            Expr::ArrayAccess { array, index } => {
+                let new_array =
+                    self.substitute_outer_refs_in_unnest_expr(array, outer_schema, outer_record)?;
+                let new_index =
+                    self.substitute_outer_refs_in_unnest_expr(index, outer_schema, outer_record)?;
+                Ok(Expr::ArrayAccess {
+                    array: Box::new(new_array),
+                    index: Box::new(new_index),
+                })
+            }
+            _ => self.substitute_outer_refs_in_expr(expr, outer_schema, outer_record),
         }
     }
 
