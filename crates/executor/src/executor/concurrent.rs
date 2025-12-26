@@ -1362,12 +1362,93 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
     pub(crate) fn execute_alter_table(
         &mut self,
-        _table_name: &str,
-        _operation: &AlterTableOp,
+        table_name: &str,
+        operation: &AlterTableOp,
     ) -> Result<Table> {
-        Err(Error::internal(
-            "ALTER TABLE not yet implemented in concurrent executor",
-        ))
+        match operation {
+            AlterTableOp::AddColumn {
+                column,
+                if_not_exists: _,
+            } => {
+                let table = self
+                    .tables
+                    .get_table_mut(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+
+                let field = if column.nullable {
+                    Field::nullable(column.name.clone(), column.data_type.clone())
+                } else {
+                    Field::required(column.name.clone(), column.data_type.clone())
+                };
+
+                let default_value = column.default_value.as_ref().and_then(|expr| {
+                    let empty_schema = Schema::new();
+                    let evaluator = IrEvaluator::new(&empty_schema)
+                        .with_variables(&self.variables)
+                        .with_user_functions(&self.user_function_defs);
+                    evaluator.evaluate(expr, &Record::new()).ok()
+                });
+
+                use yachtsql_storage::TableSchemaOps;
+                table.add_column(field, default_value)?;
+            }
+            AlterTableOp::DropColumn { name, if_exists: _ } => {
+                let table = self
+                    .tables
+                    .get_table_mut(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                table.drop_column(name)?;
+            }
+            AlterTableOp::RenameColumn { old_name, new_name } => {
+                let table = self
+                    .tables
+                    .get_table_mut(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                table.rename_column(old_name, new_name)?;
+            }
+            AlterTableOp::RenameTable { new_name } => {
+                self.catalog.rename_table(table_name, new_name)?;
+            }
+            AlterTableOp::AlterColumn { name, action } => {
+                let table = self
+                    .tables
+                    .get_table_mut(table_name)
+                    .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+
+                match action {
+                    yachtsql_ir::AlterColumnAction::SetNotNull => {
+                        table.set_column_not_null(name)?;
+                    }
+                    yachtsql_ir::AlterColumnAction::DropNotNull => {
+                        table.set_column_nullable(name)?;
+                    }
+                    yachtsql_ir::AlterColumnAction::SetDefault { default } => {
+                        let empty_schema = Schema::new();
+                        let evaluator = IrEvaluator::new(&empty_schema)
+                            .with_variables(&self.variables)
+                            .with_user_functions(&self.user_function_defs);
+                        let value = evaluator.evaluate(default, &Record::new())?;
+                        table.set_column_default(name, value)?;
+                    }
+                    yachtsql_ir::AlterColumnAction::DropDefault => {
+                        table.drop_column_default(name)?;
+                    }
+                    yachtsql_ir::AlterColumnAction::SetDataType { data_type } => {
+                        table.set_column_data_type(name, data_type.clone())?;
+                    }
+                    yachtsql_ir::AlterColumnAction::SetOptions { collation } => {
+                        if let Some(coll) = collation {
+                            table.set_column_collation(name, coll.clone())?;
+                        }
+                    }
+                }
+            }
+            AlterTableOp::SetOptions { options: _ } => {}
+            AlterTableOp::AddConstraint { constraint: _ } => {}
+            AlterTableOp::DropConstraint { name: _ } => {}
+            AlterTableOp::DropPrimaryKey => {}
+        }
+        Ok(Table::empty(Schema::new()))
     }
 
     pub(crate) fn execute_create_view(
