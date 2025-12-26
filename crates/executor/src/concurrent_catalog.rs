@@ -11,6 +11,13 @@ use crate::plan::{AccessType, PhysicalPlan, TableAccessSet};
 
 pub type TableHandle = Arc<RwLock<Table>>;
 
+#[derive(Debug)]
+pub struct DroppedSchemaData {
+    pub metadata: SchemaMetadata,
+    pub tables: Vec<(String, Table)>,
+    pub table_defaults: Vec<(String, Vec<ColumnDefault>)>,
+}
+
 pub struct TableLockSet<'a> {
     read_guards: Vec<(String, RwLockReadGuard<'a, Table>)>,
     write_guards: Vec<(String, RwLockWriteGuard<'a, Table>)>,
@@ -75,7 +82,7 @@ pub struct ConcurrentCatalog {
     schemas: DashMap<String, ()>,
     schema_metadata: DashMap<String, SchemaMetadata>,
     search_path: RwLock<Vec<String>>,
-    dropped_schemas: DashMap<String, ()>,
+    dropped_schemas: DashMap<String, DroppedSchemaData>,
 }
 
 impl ConcurrentCatalog {
@@ -224,13 +231,33 @@ impl ConcurrentCatalog {
             )));
         }
 
+        let mut dropped_tables = Vec::new();
+        let mut dropped_defaults = Vec::new();
         for table_key in tables_in_schema {
-            self.tables.remove(&table_key);
+            if let Some((_, handle)) = self.tables.remove(&table_key) {
+                let table = handle.read().unwrap().clone();
+                dropped_tables.push((table_key.clone(), table));
+            }
+            if let Some((_, defaults)) = self.table_defaults.remove(&table_key) {
+                dropped_defaults.push((table_key, defaults));
+            }
         }
 
         self.schemas.remove(&key);
-        self.schema_metadata.remove(&key);
-        self.dropped_schemas.insert(key, ());
+        let metadata = self
+            .schema_metadata
+            .remove(&key)
+            .map(|(_, m)| m)
+            .unwrap_or_default();
+
+        self.dropped_schemas.insert(
+            key,
+            DroppedSchemaData {
+                metadata,
+                tables: dropped_tables,
+                table_defaults: dropped_defaults,
+            },
+        );
         Ok(())
     }
 
@@ -249,18 +276,29 @@ impl ConcurrentCatalog {
                 name
             )));
         }
-        if !self.dropped_schemas.contains_key(&key) {
-            if if_not_exists {
-                return Ok(());
+        let dropped = self.dropped_schemas.remove(&key);
+        match dropped {
+            Some((_, dropped_data)) => {
+                self.schemas.insert(key.clone(), ());
+                self.schema_metadata.insert(key, dropped_data.metadata);
+                for (table_key, table) in dropped_data.tables {
+                    self.tables.insert(table_key, Arc::new(RwLock::new(table)));
+                }
+                for (table_key, defaults) in dropped_data.table_defaults {
+                    self.table_defaults.insert(table_key, defaults);
+                }
+                Ok(())
             }
-            return Err(Error::invalid_query(format!(
-                "Schema not found in drop history: {}",
-                name
-            )));
+            None => {
+                if if_not_exists {
+                    return Ok(());
+                }
+                Err(Error::invalid_query(format!(
+                    "Schema not found in drop history: {}",
+                    name
+                )))
+            }
         }
-        self.dropped_schemas.remove(&key);
-        self.schemas.insert(key, ());
-        Ok(())
     }
 
     pub fn schema_exists(&self, name: &str) -> bool {
@@ -527,5 +565,30 @@ impl ConcurrentCatalog {
 impl Default for ConcurrentCatalog {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl yachtsql_parser::CatalogProvider for ConcurrentCatalog {
+    fn get_table_schema(&self, name: &str) -> Option<Schema> {
+        self.get_table_schema(name)
+    }
+
+    fn get_view(&self, name: &str) -> Option<yachtsql_parser::ViewDefinition> {
+        self.get_view(name)
+            .map(|v| yachtsql_parser::ViewDefinition {
+                query: v.query,
+                column_aliases: v.column_aliases,
+            })
+    }
+
+    fn get_function(&self, name: &str) -> Option<yachtsql_parser::FunctionDefinition> {
+        self.get_function(name)
+            .map(|f| yachtsql_parser::FunctionDefinition {
+                name: f.name.clone(),
+                parameters: f.parameters.clone(),
+                return_type: f.return_type.clone(),
+                body: f.body.clone(),
+                is_aggregate: f.is_aggregate,
+            })
     }
 }

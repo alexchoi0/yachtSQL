@@ -130,6 +130,7 @@ pub struct ConcurrentPlanExecutor<'a> {
     pub(crate) session: &'a ConcurrentSession,
     pub(crate) tables: TableLockSet<'a>,
     pub(crate) variables: HashMap<String, Value>,
+    pub(crate) system_variables: HashMap<String, Value>,
     pub(crate) cte_results: HashMap<String, Table>,
     pub(crate) user_function_defs: HashMap<String, UserFunctionDef>,
 }
@@ -160,11 +161,14 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             .map(|r| (r.key().clone(), r.value().clone()))
             .collect();
 
+        let system_variables = session.system_variables().clone();
+
         Self {
             catalog,
             session,
             tables,
             variables,
+            system_variables,
             cte_results: HashMap::new(),
             user_function_defs,
         }
@@ -472,23 +476,20 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             PhysicalPlan::Assert { condition, message } => {
                 self.execute_assert(condition, message.as_ref())
             }
-            PhysicalPlan::ExecuteImmediate { .. } => Err(Error::internal(
-                "EXECUTE IMMEDIATE not yet implemented in concurrent executor",
-            )),
+            PhysicalPlan::ExecuteImmediate {
+                sql_expr,
+                into_variables,
+                using_params,
+            } => self.execute_execute_immediate(sql_expr, into_variables, using_params),
             PhysicalPlan::Grant { .. } => Ok(Table::empty(Schema::new())),
             PhysicalPlan::Revoke { .. } => Ok(Table::empty(Schema::new())),
-            PhysicalPlan::BeginTransaction => Err(Error::internal(
-                "BEGIN TRANSACTION not yet implemented in concurrent executor",
-            )),
-            PhysicalPlan::Commit => Err(Error::internal(
-                "COMMIT not yet implemented in concurrent executor",
-            )),
-            PhysicalPlan::Rollback => Err(Error::internal(
-                "ROLLBACK not yet implemented in concurrent executor",
-            )),
-            PhysicalPlan::TryCatch { .. } => Err(Error::internal(
-                "TRY/CATCH not yet implemented in concurrent executor",
-            )),
+            PhysicalPlan::BeginTransaction => Ok(Table::empty(Schema::new())),
+            PhysicalPlan::Commit => Ok(Table::empty(Schema::new())),
+            PhysicalPlan::Rollback => Ok(Table::empty(Schema::new())),
+            PhysicalPlan::TryCatch {
+                try_block,
+                catch_block,
+            } => self.execute_try_catch(try_block, catch_block),
             PhysicalPlan::GapFill {
                 input,
                 ts_column,
@@ -580,15 +581,26 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
     fn execute_assert(&mut self, condition: &Expr, message: Option<&Expr>) -> Result<Table> {
         let empty_schema = Schema::new();
-        let evaluator = IrEvaluator::new(&empty_schema)
-            .with_variables(&self.variables)
-            .with_user_functions(&self.user_function_defs);
         let empty_record = Record::new();
-        let result = evaluator.evaluate(condition, &empty_record)?;
+
+        let result = if Self::expr_contains_subquery(condition) {
+            self.eval_expr_with_subqueries(condition, &empty_schema, &empty_record)?
+        } else {
+            let evaluator = IrEvaluator::new(&empty_schema)
+                .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
+                .with_user_functions(&self.user_function_defs);
+            evaluator.evaluate(condition, &empty_record)?
+        };
+
         match result {
             Value::Bool(true) => Ok(Table::empty(Schema::new())),
             Value::Bool(false) => {
                 let msg = if let Some(msg_expr) = message {
+                    let evaluator = IrEvaluator::new(&empty_schema)
+                        .with_variables(&self.variables)
+                        .with_system_variables(&self.system_variables)
+                        .with_user_functions(&self.user_function_defs);
                     let msg_val = evaluator.evaluate(msg_expr, &empty_record)?;
                     match msg_val {
                         Value::String(s) => s,
@@ -625,6 +637,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         } else {
             let evaluator = IrEvaluator::new(&schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
 
             for record in input_table.rows()? {
@@ -663,6 +676,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         } else {
             let evaluator = IrEvaluator::new(&input_schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
 
             for record in input_table.rows()? {
@@ -739,6 +753,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
         let evaluator = IrEvaluator::new(&combined_schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
 
         let mut result = Table::empty(result_schema.clone());
@@ -896,9 +911,11 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             JoinType::Inner => {
                 let left_evaluator = IrEvaluator::new(&left_schema)
                     .with_variables(&self.variables)
+                    .with_system_variables(&self.system_variables)
                     .with_user_functions(&self.user_function_defs);
                 let right_evaluator = IrEvaluator::new(&right_schema)
                     .with_variables(&self.variables)
+                    .with_system_variables(&self.system_variables)
                     .with_user_functions(&self.user_function_defs);
 
                 let right_rows = right_table.rows()?;
@@ -956,6 +973,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let schema = input_table.schema().clone();
         let evaluator = IrEvaluator::new(&schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
 
         let mut rows: Vec<Record> = input_table.rows()?;
@@ -1395,6 +1413,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let input_schema = input_table.schema().clone();
         let evaluator = IrEvaluator::new(&input_schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
 
         let result_schema = plan_schema_to_schema(schema);
@@ -1472,6 +1491,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         } else {
             let evaluator = IrEvaluator::new(&schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
             let mut result = Table::empty(schema.clone());
 
@@ -1491,6 +1511,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let rows: Vec<Record> = input.rows()?;
         let evaluator = IrEvaluator::new(&schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
 
         let window_exprs = Self::collect_window_exprs(predicate);
@@ -1708,6 +1729,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let empty_schema = Schema::new();
         let evaluator = IrEvaluator::new(&empty_schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
         let empty_record = Record::new();
         let mut result = Table::empty(result_schema);
@@ -1739,6 +1761,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
         let evaluator = IrEvaluator::new(&target_schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
         let empty_record = Record::new();
 
@@ -1772,6 +1795,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 _ => {
                                     let values_evaluator = IrEvaluator::new(&empty_schema)
                                         .with_variables(&self.variables)
+                                        .with_system_variables(&self.system_variables)
                                         .with_user_functions(&self.user_function_defs);
                                     values_evaluator.evaluate(expr, &empty_rec)?
                                 }
@@ -1812,6 +1836,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 _ => {
                                     let values_evaluator = IrEvaluator::new(&empty_schema)
                                         .with_variables(&self.variables)
+                                        .with_system_variables(&self.system_variables)
                                         .with_user_functions(&self.user_function_defs);
                                     values_evaluator.evaluate(expr, &empty_rec)?
                                 }
@@ -1902,17 +1927,17 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
         let evaluator_for_defaults = IrEvaluator::new(&base_schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
         let empty_record = Record::new();
         let mut default_values: Vec<Option<Value>> = vec![None; base_schema.field_count()];
         if let Some(defaults) = self.catalog.get_table_defaults(table_name) {
             for default in defaults {
-                if let Some(idx) = base_schema.field_index(&default.column_name) {
-                    if let Ok(val) =
+                if let Some(idx) = base_schema.field_index(&default.column_name)
+                    && let Ok(val) =
                         evaluator_for_defaults.evaluate(&default.default_expr, &empty_record)
-                    {
-                        default_values[idx] = Some(val);
-                    }
+                {
+                    default_values[idx] = Some(val);
                 }
             }
         }
@@ -1966,6 +1991,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 } else {
                                     let evaluator = IrEvaluator::new(&combined_schema)
                                         .with_variables(&self.variables)
+                                        .with_system_variables(&self.system_variables)
                                         .with_user_functions(&self.user_function_defs);
                                     evaluator
                                         .evaluate(expr, &combined_record)?
@@ -1996,6 +2022,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                             } else {
                                                 let evaluator = IrEvaluator::new(&combined_schema)
                                                     .with_variables(&self.variables)
+                                                    .with_system_variables(&self.system_variables)
                                                     .with_user_functions(&self.user_function_defs);
                                                 evaluator
                                                     .evaluate(&assignment.value, &combined_record)?
@@ -2206,6 +2233,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         } else {
             let evaluator = IrEvaluator::new(&schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
 
             for record in table.rows()? {
@@ -2298,9 +2326,8 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     condition,
                     assignments,
                 } => {
-                    let cond_has_subquery = condition
-                        .as_ref()
-                        .is_some_and(|c| Self::expr_contains_subquery(c));
+                    let cond_has_subquery =
+                        condition.as_ref().is_some_and(Self::expr_contains_subquery);
                     let assignments_have_subquery = assignments
                         .iter()
                         .any(|a| Self::expr_contains_subquery(&a.value));
@@ -2326,6 +2353,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 } else {
                                     let evaluator = IrEvaluator::new(&combined_schema)
                                         .with_variables(&self.variables)
+                                        .with_system_variables(&self.system_variables)
                                         .with_user_functions(&self.user_function_defs);
                                     evaluator
                                         .evaluate(pred, &combined_record)?
@@ -2356,6 +2384,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 } else {
                                     let evaluator = IrEvaluator::new(&combined_schema)
                                         .with_variables(&self.variables)
+                                        .with_system_variables(&self.system_variables)
                                         .with_user_functions(&self.user_function_defs);
                                     evaluator.evaluate(&assignment.value, &combined_record)?
                                 };
@@ -2370,9 +2399,8 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     }
                 }
                 MergeClause::MatchedDelete { condition } => {
-                    let cond_has_subquery = condition
-                        .as_ref()
-                        .is_some_and(|c| Self::expr_contains_subquery(c));
+                    let cond_has_subquery =
+                        condition.as_ref().is_some_and(Self::expr_contains_subquery);
 
                     for &(t_idx, s_idx) in &match_pairs {
                         if claimed_target_indices.contains(&t_idx) {
@@ -2395,6 +2423,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                                 } else {
                                     let evaluator = IrEvaluator::new(&combined_schema)
                                         .with_variables(&self.variables)
+                                        .with_system_variables(&self.system_variables)
                                         .with_user_functions(&self.user_function_defs);
                                     evaluator
                                         .evaluate(pred, &combined_record)?
@@ -2929,6 +2958,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         or_replace: bool,
         if_not_exists: bool,
     ) -> Result<Table> {
+        if if_not_exists && self.catalog.procedure_exists(name) {
+            return Ok(Table::empty(Schema::new()));
+        }
         let proc = UserProcedure {
             name: name.to_string(),
             parameters: args.to_vec(),
@@ -3896,6 +3928,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             let empty_schema = Schema::new();
             let evaluator = IrEvaluator::new(&empty_schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
             let mut evaluated = evaluator.evaluate(expr, &Record::new())?;
 
@@ -3920,15 +3953,32 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
     pub(crate) fn execute_set_variable(&mut self, name: &str, value: &Expr) -> Result<Table> {
         let empty_schema = Schema::new();
-        let evaluator = IrEvaluator::new(&empty_schema)
-            .with_variables(&self.variables)
-            .with_user_functions(&self.user_function_defs);
-        let val = evaluator.evaluate(value, &Record::new())?;
+        let empty_record = Record::new();
+
+        let val = match value {
+            Expr::Subquery(plan) | Expr::ScalarSubquery(plan) => {
+                self.eval_scalar_subquery(plan, &empty_schema, &empty_record)?
+            }
+            _ => {
+                let evaluator = IrEvaluator::new(&empty_schema)
+                    .with_variables(&self.variables)
+                    .with_system_variables(&self.system_variables)
+                    .with_user_functions(&self.user_function_defs);
+                evaluator.evaluate(value, &empty_record)?
+            }
+        };
+
+        let upper_name = name.to_uppercase();
+        if upper_name == "SEARCH_PATH"
+            && let Some(schema_name) = val.as_str()
+        {
+            self.catalog.set_search_path(vec![schema_name.to_string()]);
+        }
 
         if name.starts_with("@@") {
             self.session.set_system_variable(name, val);
         } else {
-            self.variables.insert(name.to_uppercase(), val.clone());
+            self.variables.insert(upper_name, val.clone());
             self.session.set_variable(name, val);
         }
         Ok(Table::empty(Schema::new()))
@@ -3940,17 +3990,35 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         value: &Expr,
     ) -> Result<Table> {
         let empty_schema = Schema::new();
-        let evaluator = IrEvaluator::new(&empty_schema)
-            .with_variables(&self.variables)
-            .with_user_functions(&self.user_function_defs);
-        let val = evaluator.evaluate(value, &Record::new())?;
+        let empty_record = Record::new();
 
-        let field_values = match val {
-            Value::Struct(fields) => fields,
+        let field_values: Vec<(String, Value)> = match value {
+            Expr::Subquery(plan) | Expr::ScalarSubquery(plan) => {
+                let result = self.eval_scalar_subquery_as_row(plan)?;
+                match result {
+                    Value::Struct(fields) => fields,
+                    _ => {
+                        return Err(Error::invalid_query(
+                            "SET multiple variables: subquery must return a single row",
+                        ));
+                    }
+                }
+            }
             _ => {
-                return Err(Error::invalid_query(
-                    "SET multiple variables requires a STRUCT value",
-                ));
+                let evaluator = IrEvaluator::new(&empty_schema)
+                    .with_variables(&self.variables)
+                    .with_system_variables(&self.system_variables)
+                    .with_user_functions(&self.user_function_defs);
+                let val = evaluator.evaluate(value, &empty_record)?;
+
+                match val {
+                    Value::Struct(fields) => fields,
+                    _ => {
+                        return Err(Error::invalid_query(
+                            "SET multiple variables requires a STRUCT value",
+                        ));
+                    }
+                }
             }
         };
 
@@ -3979,10 +4047,17 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         else_branch: Option<&[PhysicalPlan]>,
     ) -> Result<Table> {
         let empty_schema = Schema::new();
-        let evaluator = IrEvaluator::new(&empty_schema)
-            .with_variables(&self.variables)
-            .with_user_functions(&self.user_function_defs);
-        let cond = evaluator.evaluate(condition, &Record::new())?;
+        let empty_record = Record::new();
+
+        let cond = if Self::expr_contains_subquery(condition) {
+            self.eval_expr_with_subqueries(condition, &empty_schema, &empty_record)?
+        } else {
+            let evaluator = IrEvaluator::new(&empty_schema)
+                .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
+                .with_user_functions(&self.user_function_defs);
+            evaluator.evaluate(condition, &empty_record)?
+        };
 
         let branch = if cond.as_bool().unwrap_or(false) {
             then_branch
@@ -4011,6 +4086,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         'outer: loop {
             let evaluator = IrEvaluator::new(&empty_schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
             let cond = evaluator.evaluate(condition, &Record::new())?;
 
@@ -4042,6 +4118,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                             continue 'outer;
                         }
                         return Err(Error::InvalidQuery(msg));
+                    }
+                    Err(Error::InvalidQuery(msg)) if msg == "RETURN outside of function" => {
+                        return Ok(result);
                     }
                     Err(e) => return Err(e),
                 }
@@ -4084,6 +4163,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     Err(Error::InvalidQuery(msg)) if msg.contains("CONTINUE") => {
                         continue 'outer;
                     }
+                    Err(Error::InvalidQuery(msg)) if msg == "RETURN outside of function" => {
+                        return Ok(result);
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -4114,6 +4196,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     }
                     return Err(Error::InvalidQuery(msg));
                 }
+                Err(Error::InvalidQuery(msg)) if msg == "RETURN outside of function" => {
+                    return Ok(last_result);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -4140,12 +4225,16 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     Err(Error::InvalidQuery(msg)) if msg.contains("CONTINUE") => {
                         continue 'outer;
                     }
+                    Err(Error::InvalidQuery(msg)) if msg == "RETURN outside of function" => {
+                        return Ok(result);
+                    }
                     Err(e) => return Err(e),
                 }
             }
 
             let evaluator = IrEvaluator::new(&empty_schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
             let cond = evaluator.evaluate(until_condition, &Record::new())?;
 
@@ -4171,15 +4260,35 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         body: &[PhysicalPlan],
     ) -> Result<Table> {
         let query_result = self.execute_plan(query)?;
+        let schema_fields = query_result.schema().fields();
         let mut result = Table::empty(Schema::new());
 
-        for record in query_result.rows()? {
-            if !record.values().is_empty() {
-                self.variables
-                    .insert(variable.to_uppercase(), record.values()[0].clone());
-            }
+        'outer: for record in query_result.rows()? {
+            let values = record.values();
+            let struct_fields: Vec<(String, Value)> = schema_fields
+                .iter()
+                .zip(values.iter())
+                .map(|(f, v)| (f.name.clone(), v.clone()))
+                .collect();
+            let row_value = Value::Struct(struct_fields);
+            self.variables
+                .insert(variable.to_uppercase(), row_value.clone());
+            self.session.set_variable(variable, row_value);
+
             for stmt in body {
-                result = self.execute_plan(stmt)?;
+                match self.execute_plan(stmt) {
+                    Ok(r) => result = r,
+                    Err(Error::InvalidQuery(msg)) if msg.contains("BREAK") => {
+                        return Ok(Table::empty(Schema::new()));
+                    }
+                    Err(Error::InvalidQuery(msg)) if msg.contains("CONTINUE") => {
+                        continue 'outer;
+                    }
+                    Err(Error::InvalidQuery(msg)) if msg == "RETURN outside of function" => {
+                        return Ok(result);
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
 
@@ -4195,6 +4304,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             let empty_schema = Schema::new();
             let evaluator = IrEvaluator::new(&empty_schema)
                 .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
                 .with_user_functions(&self.user_function_defs);
             let val = evaluator.evaluate(expr, &Record::new())?;
             match val {
@@ -4210,6 +4320,203 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             RaiseLevel::Warning => Ok(Table::empty(Schema::new())),
             RaiseLevel::Notice => Ok(Table::empty(Schema::new())),
         }
+    }
+
+    pub(crate) fn execute_try_catch(
+        &mut self,
+        try_block: &[(PhysicalPlan, Option<String>)],
+        catch_block: &[PhysicalPlan],
+    ) -> Result<Table> {
+        let mut last_result = Table::empty(Schema::new());
+
+        for (plan, source_sql) in try_block {
+            match self.execute_plan(plan) {
+                Ok(result) => {
+                    last_result = result;
+                }
+                Err(Error::InvalidQuery(msg)) if msg == "RETURN outside of function" => {
+                    return Ok(last_result);
+                }
+                Err(e) => {
+                    let error_message = e.to_string();
+                    let stmt_text = source_sql.clone().unwrap_or_else(|| format!("{:?}", plan));
+                    let error_struct = Value::Struct(vec![
+                        ("message".to_string(), Value::String(error_message.clone())),
+                        ("statement_text".to_string(), Value::String(stmt_text)),
+                    ]);
+                    self.variables
+                        .insert("@@ERROR".to_string(), error_struct.clone());
+                    self.system_variables
+                        .insert("@@error".to_string(), error_struct.clone());
+                    self.session.set_system_variable("@@error", error_struct);
+
+                    for catch_plan in catch_block {
+                        match self.execute_plan(catch_plan) {
+                            Ok(result) => last_result = result,
+                            Err(Error::InvalidQuery(msg))
+                                if msg == "RETURN outside of function" =>
+                            {
+                                return Ok(last_result);
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    return Ok(last_result);
+                }
+            }
+        }
+
+        Ok(last_result)
+    }
+
+    pub(crate) fn execute_execute_immediate(
+        &mut self,
+        sql_expr: &Expr,
+        into_variables: &[String],
+        using_params: &[(Expr, Option<String>)],
+    ) -> Result<Table> {
+        let empty_schema = Schema::new();
+        let empty_record = Record::new();
+
+        let sql_string = {
+            let evaluator = IrEvaluator::new(&empty_schema)
+                .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
+                .with_user_functions(&self.user_function_defs);
+            let sql_value = evaluator.evaluate(sql_expr, &empty_record)?;
+            sql_value
+                .as_str()
+                .ok_or_else(|| Error::InvalidQuery("EXECUTE IMMEDIATE requires a string".into()))?
+                .to_string()
+        };
+
+        let mut named_params: Vec<(String, Value)> = Vec::new();
+        let mut positional_values: Vec<Value> = Vec::new();
+        for (param_expr, alias) in using_params {
+            let evaluator = IrEvaluator::new(&empty_schema)
+                .with_variables(&self.variables)
+                .with_system_variables(&self.system_variables)
+                .with_user_functions(&self.user_function_defs);
+            let value = evaluator.evaluate(param_expr, &empty_record)?;
+            positional_values.push(value.clone());
+            if let Some(name) = alias {
+                named_params.push((name.to_uppercase(), value));
+            }
+        }
+
+        for (upper_name, value) in &named_params {
+            self.variables.insert(upper_name.clone(), value.clone());
+            self.session.set_variable(upper_name, value.clone());
+        }
+
+        let processed_sql = self.substitute_parameters(&sql_string, &positional_values);
+
+        let result = self.execute_dynamic_sql(&processed_sql)?;
+
+        if !into_variables.is_empty() && !result.is_empty() {
+            let rows: Vec<_> = result.rows()?.into_iter().collect();
+            if !rows.is_empty() {
+                let first_row = &rows[0];
+                let values = first_row.values();
+                for (i, var_name) in into_variables.iter().enumerate() {
+                    if let Some(val) = values.get(i) {
+                        let upper_name = var_name.to_uppercase();
+                        self.variables.insert(upper_name.clone(), val.clone());
+                        self.session.set_variable(&upper_name, val.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn substitute_parameters(&self, sql: &str, positional_values: &[Value]) -> String {
+        let mut positional_idx = 0;
+        let chars: Vec<char> = sql.chars().collect();
+        let mut output = String::new();
+        let mut i = 0;
+
+        while i < chars.len() {
+            if chars[i] == '?' {
+                if let Some(val) = positional_values.get(positional_idx) {
+                    output.push_str(&self.value_to_sql_literal(val));
+                    positional_idx += 1;
+                } else {
+                    output.push(chars[i]);
+                }
+                i += 1;
+            } else if chars[i] == '@' {
+                let start = i;
+                i += 1;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let param_name: String = chars[start..i].iter().collect();
+                let upper_name = param_name[1..].to_uppercase();
+                if let Some(val) = self.variables.get(&upper_name) {
+                    output.push_str(&self.value_to_sql_literal(val));
+                } else {
+                    output.push_str(&param_name);
+                }
+            } else {
+                output.push(chars[i]);
+                i += 1;
+            }
+        }
+
+        output
+    }
+
+    fn value_to_sql_literal(&self, val: &Value) -> String {
+        match val {
+            Value::Null => "NULL".to_string(),
+            Value::Int64(n) => n.to_string(),
+            Value::Float64(f) => f.to_string(),
+            Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            Value::Date(d) => format!("DATE '{}'", d.format("%Y-%m-%d")),
+            Value::Time(t) => format!("TIME '{}'", t.format("%H:%M:%S%.f")),
+            Value::Timestamp(ts) => format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.f")),
+            Value::DateTime(dt) => format!("DATETIME '{}'", dt.format("%Y-%m-%d %H:%M:%S%.f")),
+            _ => format!("{:?}", val),
+        }
+    }
+
+    fn execute_dynamic_sql(&mut self, sql: &str) -> Result<Table> {
+        let logical_plan = yachtsql_parser::parse_and_plan(sql, self.catalog)?;
+        let physical = optimize(&logical_plan)?;
+        let executor_plan = PhysicalPlan::from_physical(&physical);
+
+        let accesses = executor_plan.extract_table_accesses();
+        for (table_name, access_type) in accesses.accesses.iter() {
+            let upper_name = table_name.to_uppercase();
+            let already_locked = self.tables.get_table(&upper_name).is_some();
+            if !already_locked && let Some(handle) = self.catalog.get_table_handle(table_name) {
+                match access_type {
+                    crate::plan::AccessType::Read => {
+                        if let Ok(guard) = handle.read() {
+                            unsafe {
+                                let static_guard: std::sync::RwLockReadGuard<'static, Table> =
+                                    std::mem::transmute(guard);
+                                self.tables.add_read(upper_name.clone(), static_guard);
+                            }
+                        }
+                    }
+                    crate::plan::AccessType::Write | crate::plan::AccessType::WriteOptional => {
+                        if let Ok(guard) = handle.write() {
+                            unsafe {
+                                let static_guard: std::sync::RwLockWriteGuard<'static, Table> =
+                                    std::mem::transmute(guard);
+                                self.tables.add_write(upper_name.clone(), static_guard);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.execute_plan(&executor_plan)
     }
 
     pub(crate) fn execute_create_snapshot(
@@ -4307,6 +4614,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     .collect::<Result<_>>()?;
                 let evaluator = IrEvaluator::new(schema)
                     .with_variables(&self.variables)
+                    .with_system_variables(&self.system_variables)
                     .with_user_functions(&self.user_function_defs);
                 evaluator.eval_scalar_function_with_values(name, &arg_vals)
             }
@@ -4354,6 +4662,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             _ => {
                 let evaluator = IrEvaluator::new(schema)
                     .with_variables(&self.variables)
+                    .with_system_variables(&self.system_variables)
                     .with_user_functions(&self.user_function_defs);
                 evaluator.evaluate(expr, record)
             }
@@ -4387,6 +4696,35 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         }
 
         Ok(values[0].clone())
+    }
+
+    fn eval_scalar_subquery_as_row(&mut self, plan: &LogicalPlan) -> Result<Value> {
+        let physical = optimize(plan)?;
+        let executor_plan = PhysicalPlan::from_physical(&physical);
+        let result_table = self.execute_plan(&executor_plan)?;
+
+        if result_table.is_empty() {
+            return Ok(Value::Struct(vec![]));
+        }
+
+        let rows: Vec<_> = result_table.rows()?.into_iter().collect();
+        if rows.is_empty() {
+            return Ok(Value::Struct(vec![]));
+        }
+
+        let first_row = &rows[0];
+        let values = first_row.values();
+
+        let schema = result_table.schema();
+        let fields = schema.fields();
+
+        let result: Vec<(String, Value)> = fields
+            .iter()
+            .zip(values.iter())
+            .map(|(f, v)| (f.name.clone(), v.clone()))
+            .collect();
+
+        Ok(Value::Struct(result))
     }
 
     fn eval_exists_subquery(
@@ -4761,7 +5099,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             Expr::ScalarFunction { name, args } => {
                 let new_args = args
                     .iter()
-                    .map(|a| self.substitute_outer_refs_in_unnest_expr(a, outer_schema, outer_record))
+                    .map(|a| {
+                        self.substitute_outer_refs_in_unnest_expr(a, outer_schema, outer_record)
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(Expr::ScalarFunction {
                     name: name.clone(),
@@ -5214,6 +5554,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
         let evaluator = IrEvaluator::new(storage_schema)
             .with_variables(&self.variables)
+            .with_system_variables(&self.system_variables)
             .with_user_functions(&self.user_function_defs);
         let empty_record = Record::new();
 
