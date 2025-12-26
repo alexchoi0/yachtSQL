@@ -18,52 +18,52 @@ fn default_plan_cache() -> LruCache<String, OptimizedLogicalPlan> {
 }
 
 fn is_cacheable_plan(plan: &OptimizedLogicalPlan) -> bool {
-    match plan {
+    matches!(
+        plan,
         OptimizedLogicalPlan::TableScan { .. }
-        | OptimizedLogicalPlan::Sample { .. }
-        | OptimizedLogicalPlan::Filter { .. }
-        | OptimizedLogicalPlan::Project { .. }
-        | OptimizedLogicalPlan::NestedLoopJoin { .. }
-        | OptimizedLogicalPlan::CrossJoin { .. }
-        | OptimizedLogicalPlan::HashJoin { .. }
-        | OptimizedLogicalPlan::HashAggregate { .. }
-        | OptimizedLogicalPlan::Sort { .. }
-        | OptimizedLogicalPlan::Limit { .. }
-        | OptimizedLogicalPlan::TopN { .. }
-        | OptimizedLogicalPlan::Distinct { .. }
-        | OptimizedLogicalPlan::Union { .. }
-        | OptimizedLogicalPlan::Intersect { .. }
-        | OptimizedLogicalPlan::Except { .. }
-        | OptimizedLogicalPlan::Window { .. }
-        | OptimizedLogicalPlan::Unnest { .. }
-        | OptimizedLogicalPlan::Qualify { .. }
-        | OptimizedLogicalPlan::WithCte { .. }
-        | OptimizedLogicalPlan::Values { .. }
-        | OptimizedLogicalPlan::Empty { .. } => true,
-        _ => false,
-    }
+            | OptimizedLogicalPlan::Sample { .. }
+            | OptimizedLogicalPlan::Filter { .. }
+            | OptimizedLogicalPlan::Project { .. }
+            | OptimizedLogicalPlan::NestedLoopJoin { .. }
+            | OptimizedLogicalPlan::CrossJoin { .. }
+            | OptimizedLogicalPlan::HashJoin { .. }
+            | OptimizedLogicalPlan::HashAggregate { .. }
+            | OptimizedLogicalPlan::Sort { .. }
+            | OptimizedLogicalPlan::Limit { .. }
+            | OptimizedLogicalPlan::TopN { .. }
+            | OptimizedLogicalPlan::Distinct { .. }
+            | OptimizedLogicalPlan::Union { .. }
+            | OptimizedLogicalPlan::Intersect { .. }
+            | OptimizedLogicalPlan::Except { .. }
+            | OptimizedLogicalPlan::Window { .. }
+            | OptimizedLogicalPlan::Unnest { .. }
+            | OptimizedLogicalPlan::Qualify { .. }
+            | OptimizedLogicalPlan::WithCte { .. }
+            | OptimizedLogicalPlan::Values { .. }
+            | OptimizedLogicalPlan::Empty { .. }
+    )
 }
 
 fn invalidates_cache(plan: &OptimizedLogicalPlan) -> bool {
-    match plan {
+    matches!(
+        plan,
         OptimizedLogicalPlan::CreateTable { .. }
-        | OptimizedLogicalPlan::DropTable { .. }
-        | OptimizedLogicalPlan::AlterTable { .. }
-        | OptimizedLogicalPlan::Truncate { .. }
-        | OptimizedLogicalPlan::CreateView { .. }
-        | OptimizedLogicalPlan::DropView { .. }
-        | OptimizedLogicalPlan::CreateSchema { .. }
-        | OptimizedLogicalPlan::DropSchema { .. }
-        | OptimizedLogicalPlan::UndropSchema { .. }
-        | OptimizedLogicalPlan::AlterSchema { .. }
-        | OptimizedLogicalPlan::CreateFunction { .. }
-        | OptimizedLogicalPlan::DropFunction { .. }
-        | OptimizedLogicalPlan::CreateProcedure { .. }
-        | OptimizedLogicalPlan::DropProcedure { .. }
-        | OptimizedLogicalPlan::CreateSnapshot { .. }
-        | OptimizedLogicalPlan::DropSnapshot { .. } => true,
-        _ => false,
-    }
+            | OptimizedLogicalPlan::DropTable { .. }
+            | OptimizedLogicalPlan::AlterTable { .. }
+            | OptimizedLogicalPlan::Truncate { .. }
+            | OptimizedLogicalPlan::CreateView { .. }
+            | OptimizedLogicalPlan::DropView { .. }
+            | OptimizedLogicalPlan::CreateSchema { .. }
+            | OptimizedLogicalPlan::DropSchema { .. }
+            | OptimizedLogicalPlan::UndropSchema { .. }
+            | OptimizedLogicalPlan::AlterSchema { .. }
+            | OptimizedLogicalPlan::CreateFunction { .. }
+            | OptimizedLogicalPlan::DropFunction { .. }
+            | OptimizedLogicalPlan::CreateProcedure { .. }
+            | OptimizedLogicalPlan::DropProcedure { .. }
+            | OptimizedLogicalPlan::CreateSnapshot { .. }
+            | OptimizedLogicalPlan::DropSnapshot { .. }
+    )
 }
 
 pub struct AsyncQueryExecutor {

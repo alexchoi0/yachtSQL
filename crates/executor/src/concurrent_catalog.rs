@@ -7,7 +7,7 @@ use yachtsql_ir::Expr;
 use yachtsql_storage::{Schema, Table};
 
 use crate::catalog::{ColumnDefault, SchemaMetadata, UserFunction, UserProcedure, ViewDef};
-use crate::plan::{AccessType, TableAccessSet};
+use crate::plan::{AccessType, PhysicalPlan, TableAccessSet};
 
 pub type TableHandle = Arc<RwLock<Table>>;
 
@@ -70,6 +70,7 @@ pub struct ConcurrentCatalog {
     table_defaults: DashMap<String, Vec<ColumnDefault>>,
     functions: DashMap<String, UserFunction>,
     procedures: DashMap<String, UserProcedure>,
+    procedure_bodies: DashMap<String, Vec<PhysicalPlan>>,
     views: DashMap<String, ViewDef>,
     schemas: DashMap<String, ()>,
     schema_metadata: DashMap<String, SchemaMetadata>,
@@ -83,6 +84,7 @@ impl ConcurrentCatalog {
             table_defaults: DashMap::new(),
             functions: DashMap::new(),
             procedures: DashMap::new(),
+            procedure_bodies: DashMap::new(),
             views: DashMap::new(),
             schemas: DashMap::new(),
             schema_metadata: DashMap::new(),
@@ -429,6 +431,17 @@ impl ConcurrentCatalog {
 
     pub fn procedure_exists(&self, name: &str) -> bool {
         self.procedures.contains_key(&name.to_uppercase())
+    }
+
+    pub fn set_procedure_body(&self, name: &str, body: Vec<PhysicalPlan>) {
+        let key = name.to_uppercase();
+        self.procedure_bodies.insert(key, body);
+    }
+
+    pub fn get_procedure_body(&self, name: &str) -> Option<Vec<PhysicalPlan>> {
+        self.procedure_bodies
+            .get(&name.to_uppercase())
+            .map(|r| r.clone())
     }
 
     pub fn get_functions(&self) -> HashMap<String, UserFunction> {

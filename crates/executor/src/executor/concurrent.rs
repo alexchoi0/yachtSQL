@@ -1049,14 +1049,13 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let mut seen: HashSet<Vec<Value>> = HashSet::new();
         for record in left_table.rows()? {
             let values = record.values().to_vec();
-            if let Some(count) = right_set.get_mut(&values) {
-                if *count > 0 {
-                    if all || seen.insert(values.clone()) {
-                        result.push_row(values)?;
-                        if all {
-                            *count -= 1;
-                        }
-                    }
+            if let Some(count) = right_set.get_mut(&values)
+                && *count > 0
+                && (all || seen.insert(values.clone()))
+            {
+                result.push_row(values)?;
+                if all {
+                    *count -= 1;
                 }
             }
         }
@@ -1279,10 +1278,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let mut default_values: Vec<Option<Value>> = vec![None; target_schema.field_count()];
         if let Some(defaults) = self.catalog.get_table_defaults(table_name) {
             for default in defaults {
-                if let Some(idx) = target_schema.field_index(&default.column_name) {
-                    if let Ok(val) = evaluator.evaluate(&default.default_expr, &empty_record) {
-                        default_values[idx] = Some(val);
-                    }
+                if let Some(idx) = target_schema.field_index(&default.column_name)
+                    && let Ok(val) = evaluator.evaluate(&default.default_expr, &empty_record)
+                {
+                    default_values[idx] = Some(val);
                 }
             }
         }
@@ -1311,13 +1310,12 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     .map(|opt| opt.clone().unwrap_or(Value::Null))
                     .collect();
                 for (i, col_name) in columns.iter().enumerate() {
-                    if let Some(col_idx) = target_schema.field_index(col_name) {
-                        if i < record.values().len() && col_idx < fields.len() {
-                            row[col_idx] = coerce_value(
-                                record.values()[i].clone(),
-                                &fields[col_idx].data_type,
-                            )?;
-                        }
+                    if let Some(col_idx) = target_schema.field_index(col_name)
+                        && i < record.values().len()
+                        && col_idx < fields.len()
+                    {
+                        row[col_idx] =
+                            coerce_value(record.values()[i].clone(), &fields[col_idx].data_type)?;
                     }
                 }
                 target.push_row(row)?;
@@ -1767,15 +1765,11 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let proc = UserProcedure {
             name: name.to_string(),
             parameters: args.to_vec(),
-            body: body
-                .iter()
-                .map(|p| yachtsql_ir::LogicalPlan::Empty {
-                    schema: yachtsql_ir::PlanSchema::default(),
-                })
-                .collect(),
+            body: Vec::new(),
         };
         self.catalog
             .create_procedure(proc, or_replace, if_not_exists)?;
+        self.catalog.set_procedure_body(name, body.to_vec());
         Ok(Table::empty(Schema::new()))
     }
 
@@ -1852,10 +1846,12 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
         let mut last_result = Table::empty(Schema::new());
 
-        for body_plan in &proc.body {
-            let physical_plan = yachtsql_optimizer::optimize(body_plan)?;
-            let executor_plan = PhysicalPlan::from_physical(&physical_plan);
-            last_result = self.execute_plan(&executor_plan)?;
+        let body_plans = self
+            .catalog
+            .get_procedure_body(procedure_name)
+            .unwrap_or_default();
+        for body_plan in &body_plans {
+            last_result = self.execute_plan(body_plan)?;
         }
 
         for (param_name, var_name) in out_var_mappings {
@@ -2030,10 +2026,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                         if msg == "BREAK outside of loop" {
                             return Ok(Table::empty(Schema::new()));
                         }
-                        if let Some(lbl) = label {
-                            if msg == format!("BREAK:{}", lbl) {
-                                return Ok(Table::empty(Schema::new()));
-                            }
+                        if let Some(lbl) = label
+                            && msg == format!("BREAK:{}", lbl)
+                        {
+                            return Ok(Table::empty(Schema::new()));
                         }
                         return Err(Error::InvalidQuery(msg));
                     }
@@ -2041,10 +2037,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                         if msg == "CONTINUE outside of loop" {
                             continue 'outer;
                         }
-                        if let Some(lbl) = label {
-                            if msg == format!("CONTINUE:{}", lbl) {
-                                continue 'outer;
-                            }
+                        if let Some(lbl) = label
+                            && msg == format!("CONTINUE:{}", lbl)
+                        {
+                            continue 'outer;
                         }
                         return Err(Error::InvalidQuery(msg));
                     }
@@ -2078,12 +2074,11 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 match self.execute_plan(stmt) {
                     Ok(r) => result = r,
                     Err(Error::InvalidQuery(msg)) if msg.contains("BREAK") => {
-                        if let Some(lbl) = label {
-                            if msg.contains(&format!("BREAK:{}", lbl))
-                                || msg == "BREAK outside of loop"
-                            {
-                                return Ok(Table::empty(Schema::new()));
-                            }
+                        if let Some(lbl) = label
+                            && (msg.contains(&format!("BREAK:{}", lbl))
+                                || msg == "BREAK outside of loop")
+                        {
+                            return Ok(Table::empty(Schema::new()));
                         }
                         return Ok(Table::empty(Schema::new()));
                     }
@@ -2113,10 +2108,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     last_result = result;
                 }
                 Err(Error::InvalidQuery(msg)) if msg.contains("BREAK") => {
-                    if let Some(lbl) = label {
-                        if msg == format!("BREAK:{}", lbl) {
-                            return Ok(last_result);
-                        }
+                    if let Some(lbl) = label
+                        && msg == format!("BREAK:{}", lbl)
+                    {
+                        return Ok(last_result);
                     }
                     return Err(Error::InvalidQuery(msg));
                 }
