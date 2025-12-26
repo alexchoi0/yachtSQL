@@ -3112,14 +3112,25 @@ impl<'a> ConcurrentPlanExecutor<'a> {
     }
 
     fn rollback_transaction(&mut self) {
-        if let Some(snapshot) = self.catalog.take_transaction_snapshot() {
+        if let Some(mut snapshot) = self.catalog.take_transaction_snapshot() {
+            let mut restored_tables = Vec::new();
+            for (name, table_data) in &snapshot.tables {
+                if let Some(table) = self.tables.get_table_mut(name) {
+                    *table = table_data.clone();
+                    restored_tables.push(name.clone());
+                }
+            }
+            for name in restored_tables {
+                snapshot.tables.remove(&name);
+            }
             for (name, table_data) in snapshot.tables {
-                if let Some(table) = self.tables.get_table_mut(&name) {
-                    *table = table_data;
+                if let Some(handle) = self.catalog.get_table_handle(&name) {
+                    if let Ok(mut table) = handle.try_write() {
+                        *table = table_data;
+                    }
                 }
             }
         }
-        self.catalog.rollback();
     }
 
     pub(crate) fn execute_export(
