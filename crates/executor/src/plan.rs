@@ -183,6 +183,7 @@ pub enum PhysicalPlan {
 
     Delete {
         table_name: String,
+        alias: Option<String>,
         filter: Option<Expr>,
     },
 
@@ -641,8 +642,13 @@ impl PhysicalPlan {
                 filter: filter.clone(),
             },
 
-            OptimizedLogicalPlan::Delete { table_name, filter } => PhysicalPlan::Delete {
+            OptimizedLogicalPlan::Delete {
+                table_name,
+                alias,
+                filter,
+            } => PhysicalPlan::Delete {
                 table_name: table_name.clone(),
+                alias: alias.clone(),
                 filter: filter.clone(),
             },
 

@@ -17,22 +17,16 @@ mod plan;
 mod py_udf;
 mod session;
 
-#[cfg(feature = "concurrent")]
 mod async_executor;
-#[cfg(feature = "concurrent")]
 mod concurrent_catalog;
-#[cfg(feature = "concurrent")]
 mod concurrent_session;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
-#[cfg(feature = "concurrent")]
 pub use async_executor::AsyncQueryExecutor;
 pub use catalog::{Catalog, ColumnDefault, UserFunction, UserProcedure, ViewDef};
-#[cfg(feature = "concurrent")]
 pub use concurrent_catalog::{ConcurrentCatalog, TableLockSet};
-#[cfg(feature = "concurrent")]
 pub use concurrent_session::ConcurrentSession;
 pub use error::{Error, Result};
 pub use executor::{PlanExecutor, plan_schema_to_schema};

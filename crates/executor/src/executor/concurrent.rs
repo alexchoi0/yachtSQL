@@ -41,7 +41,6 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     name.clone(),
                     UserFunctionDef {
                         parameters: func.parameters.clone(),
-                        return_type: func.return_type.clone(),
                         body: func.body.clone(),
                     },
                 )
@@ -74,7 +73,6 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     name.clone(),
                     UserFunctionDef {
                         parameters: func.parameters.clone(),
-                        return_type: func.return_type.clone(),
                         body: func.body.clone(),
                     },
                 )
@@ -189,12 +187,16 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             } => self.execute_insert(table_name, columns, source),
             PhysicalPlan::Update {
                 table_name,
+                alias: _,
                 assignments,
+                from: _,
                 filter,
             } => self.execute_update(table_name, assignments, filter.as_ref()),
-            PhysicalPlan::Delete { table_name, filter } => {
-                self.execute_delete(table_name, filter.as_ref())
-            }
+            PhysicalPlan::Delete {
+                table_name,
+                alias: _,
+                filter,
+            } => self.execute_delete(table_name, filter.as_ref()),
             PhysicalPlan::Merge {
                 target_table,
                 source,
@@ -221,6 +223,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             PhysicalPlan::AlterTable {
                 table_name,
                 operation,
+                if_exists: _,
             } => self.execute_alter_table(table_name, operation),
             PhysicalPlan::Truncate { table_name } => self.execute_truncate(table_name),
             PhysicalPlan::CreateView {
@@ -261,6 +264,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 or_replace,
                 if_not_exists,
                 is_temp,
+                is_aggregate,
             } => self.execute_create_function(
                 name,
                 args,
@@ -269,6 +273,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 *or_replace,
                 *if_not_exists,
                 *is_temp,
+                *is_aggregate,
             ),
             PhysicalPlan::DropFunction { name, if_exists } => {
                 self.execute_drop_function(name, *if_exists)
@@ -354,6 +359,30 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             PhysicalPlan::Assert { condition, message } => {
                 self.execute_assert(condition, message.as_ref())
             }
+            PhysicalPlan::ExecuteImmediate { .. } => Err(Error::internal(
+                "EXECUTE IMMEDIATE not yet implemented in concurrent executor",
+            )),
+            PhysicalPlan::Grant { .. } => Err(Error::internal(
+                "GRANT not yet implemented in concurrent executor",
+            )),
+            PhysicalPlan::Revoke { .. } => Err(Error::internal(
+                "REVOKE not yet implemented in concurrent executor",
+            )),
+            PhysicalPlan::BeginTransaction => Err(Error::internal(
+                "BEGIN TRANSACTION not yet implemented in concurrent executor",
+            )),
+            PhysicalPlan::Commit => Err(Error::internal(
+                "COMMIT not yet implemented in concurrent executor",
+            )),
+            PhysicalPlan::Rollback => Err(Error::internal(
+                "ROLLBACK not yet implemented in concurrent executor",
+            )),
+            PhysicalPlan::TryCatch { .. } => Err(Error::internal(
+                "TRY/CATCH not yet implemented in concurrent executor",
+            )),
+            PhysicalPlan::GapFill { .. } => Err(Error::internal(
+                "GAP_FILL not yet implemented in concurrent executor",
+            )),
         }
     }
 
@@ -679,6 +708,76 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         schema: &PlanSchema,
     ) -> Result<Table> {
         self.execute_nested_loop_join(left, right, &JoinType::Cross, None, schema)
+    }
+
+    pub(crate) fn execute_hash_join(
+        &mut self,
+        left: &PhysicalPlan,
+        right: &PhysicalPlan,
+        join_type: &JoinType,
+        left_keys: &[Expr],
+        right_keys: &[Expr],
+        schema: &PlanSchema,
+    ) -> Result<Table> {
+        let left_table = self.execute_plan(left)?;
+        let right_table = self.execute_plan(right)?;
+        let left_schema = left_table.schema().clone();
+        let right_schema = right_table.schema().clone();
+        let result_schema = plan_schema_to_schema(schema);
+
+        match join_type {
+            JoinType::Inner => {
+                let left_evaluator = IrEvaluator::new(&left_schema)
+                    .with_variables(&self.variables)
+                    .with_user_functions(&self.user_function_defs);
+                let right_evaluator = IrEvaluator::new(&right_schema)
+                    .with_variables(&self.variables)
+                    .with_user_functions(&self.user_function_defs);
+
+                let right_rows = right_table.rows()?;
+                let mut hash_table: HashMap<Vec<Value>, Vec<Record>> = HashMap::new();
+
+                for right_record in right_rows {
+                    let key_values: Vec<Value> = right_keys
+                        .iter()
+                        .map(|expr| right_evaluator.evaluate(expr, &right_record))
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let has_null = key_values.iter().any(|v| matches!(v, Value::Null));
+                    if has_null {
+                        continue;
+                    }
+
+                    hash_table.entry(key_values).or_default().push(right_record);
+                }
+
+                let mut result = Table::empty(result_schema);
+                for left_record in left_table.rows()? {
+                    let key_values: Vec<Value> = left_keys
+                        .iter()
+                        .map(|expr| left_evaluator.evaluate(expr, &left_record))
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let has_null = key_values.iter().any(|v| matches!(v, Value::Null));
+                    if has_null {
+                        continue;
+                    }
+
+                    if let Some(matching_rows) = hash_table.get(&key_values) {
+                        for right_record in matching_rows {
+                            let mut combined = left_record.values().to_vec();
+                            combined.extend(right_record.values().to_vec());
+                            result.push_row(combined)?;
+                        }
+                    }
+                }
+
+                Ok(result)
+            }
+            _ => {
+                panic!("HashJoin only supports Inner join type currently");
+            }
+        }
     }
 
     pub(crate) fn execute_sort(
@@ -1131,12 +1230,12 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         }
 
         if let Some(query_plan) = query {
-            let result = self.execute(query_plan)?;
+            let result = self.execute_plan(query_plan)?;
             let schema = result.schema().clone();
             if or_replace && self.catalog.table_exists(table_name) {
                 self.catalog.create_or_replace_table(table_name, result);
             } else {
-                self.catalog.insert_table(table_name, result);
+                self.catalog.insert_table(table_name, result)?;
             }
             return Ok(Table::empty(schema));
         }
@@ -1260,6 +1359,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         or_replace: bool,
         if_not_exists: bool,
         is_temp: bool,
+        is_aggregate: bool,
     ) -> Result<Table> {
         if self.catalog.function_exists(name) && !or_replace {
             if if_not_exists {
@@ -1277,6 +1377,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             return_type: return_type.clone(),
             body: body.clone(),
             is_temporary: is_temp,
+            is_aggregate,
         };
         self.catalog.create_function(func, or_replace)?;
         self.refresh_user_functions();
@@ -1520,6 +1621,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         Ok(result)
     }
 
+    #[allow(unused_assignments)]
     pub(crate) fn execute_loop(
         &mut self,
         body: &[PhysicalPlan],

@@ -188,4 +188,16 @@ impl yachtsql_parser::CatalogProvider for AsyncQueryExecutor {
                 column_aliases: v.column_aliases,
             })
     }
+
+    fn get_function(&self, name: &str) -> Option<yachtsql_parser::FunctionDefinition> {
+        self.catalog
+            .get_function(name)
+            .map(|f| yachtsql_parser::FunctionDefinition {
+                name: f.name.clone(),
+                parameters: f.parameters.clone(),
+                return_type: f.return_type.clone(),
+                body: f.body.clone(),
+                is_aggregate: f.is_aggregate,
+            })
+    }
 }

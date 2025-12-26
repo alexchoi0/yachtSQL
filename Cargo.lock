@@ -5545,6 +5545,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.17",
+ "tokio",
  "unicode-normalization",
  "uuid",
 ]
@@ -5687,6 +5688,7 @@ name = "yachtsql-optimizer"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tokio",
  "yachtsql-common",
  "yachtsql-ir",
 ]
@@ -5739,6 +5741,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "tokio",
  "yachtsql-common",
 ]
 
