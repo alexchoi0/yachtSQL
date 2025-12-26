@@ -15,12 +15,11 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use yachtsql_common::error::{Error, Result};
 use yachtsql_common::types::{DataType, Value};
 use yachtsql_ir::{
-    AlterTableOp, Assignment, BinaryOp, ColumnDef, CteDefinition, ExportFormat, ExportOptions, Expr,
-    FunctionArg, FunctionBody, JoinType, LoadFormat, LoadOptions, MergeClause, PlanSchema,
-    ProcedureArg, RaiseLevel, SetOperationType, SortExpr, UnnestColumn,
+    AlterTableOp, Assignment, BinaryOp, ColumnDef, CteDefinition, ExportFormat, ExportOptions,
+    Expr, FunctionArg, FunctionBody, JoinType, LoadFormat, LoadOptions, LogicalPlan, MergeClause,
+    PlanSchema, ProcedureArg, RaiseLevel, SetOperationType, SortExpr, UnnestColumn,
 };
-use yachtsql_ir::LogicalPlan;
-use yachtsql_optimizer::{optimize, OptimizedLogicalPlan, SampleType};
+use yachtsql_optimizer::{OptimizedLogicalPlan, SampleType, optimize};
 use yachtsql_storage::{Field, FieldMode, Record, Schema, Table};
 
 use crate::catalog::{ColumnDefault, UserFunction, UserProcedure};
@@ -509,10 +508,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             return Ok(self.apply_planned_schema(table, planned_schema));
         }
 
-        if let Some(handle) = self.catalog.get_table_handle(table_name) {
-            if let Ok(guard) = handle.read() {
-                return Ok(self.apply_planned_schema(&guard, planned_schema));
-            }
+        if let Some(handle) = self.catalog.get_table_handle(table_name)
+            && let Ok(guard) = handle.read()
+        {
+            return Ok(self.apply_planned_schema(&guard, planned_schema));
         }
 
         Err(Error::TableNotFound(table_name.to_string()))
@@ -592,23 +591,20 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         let has_subquery = Self::expr_contains_subquery(predicate);
         let mut result = Table::empty(schema.clone());
 
-        if has_subquery {
-            for record in input_table.rows()? {
-                let val = self.eval_expr_with_subqueries(predicate, &schema, &record)?;
-                if val.as_bool().unwrap_or(false) {
-                    result.push_row(record.values().to_vec())?;
-                }
-            }
+        let resolved_predicate = if has_subquery {
+            self.resolve_subqueries_in_expr(predicate)?
         } else {
-            let evaluator = IrEvaluator::new(&schema)
-                .with_variables(&self.variables)
-                .with_user_functions(&self.user_function_defs);
+            predicate.clone()
+        };
 
-            for record in input_table.rows()? {
-                let val = evaluator.evaluate(predicate, &record)?;
-                if val.as_bool().unwrap_or(false) {
-                    result.push_row(record.values().to_vec())?;
-                }
+        let evaluator = IrEvaluator::new(&schema)
+            .with_variables(&self.variables)
+            .with_user_functions(&self.user_function_defs);
+
+        for record in input_table.rows()? {
+            let val = evaluator.evaluate(&resolved_predicate, &record)?;
+            if val.as_bool().unwrap_or(false) {
+                result.push_row(record.values().to_vec())?;
             }
         }
 
@@ -1291,7 +1287,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         Ok(())
     }
 
-    fn split_recursive_cte(query: &LogicalPlan, cte_name: &str) -> (Vec<LogicalPlan>, Vec<LogicalPlan>) {
+    fn split_recursive_cte(
+        query: &LogicalPlan,
+        cte_name: &str,
+    ) -> (Vec<LogicalPlan>, Vec<LogicalPlan>) {
         let mut anchors = Vec::new();
         let mut recursives = Vec::new();
 
@@ -1333,18 +1332,22 @@ impl<'a> ConcurrentPlanExecutor<'a> {
 
     fn references_table(plan: &LogicalPlan, table_name: &str) -> bool {
         match plan {
-            LogicalPlan::Scan { table_name: name, .. } => name.eq_ignore_ascii_case(table_name),
+            LogicalPlan::Scan {
+                table_name: name, ..
+            } => name.eq_ignore_ascii_case(table_name),
             LogicalPlan::Filter { input, .. } => Self::references_table(input, table_name),
             LogicalPlan::Project { input, .. } => Self::references_table(input, table_name),
             LogicalPlan::Aggregate { input, .. } => Self::references_table(input, table_name),
             LogicalPlan::Join { left, right, .. } => {
-                Self::references_table(left, table_name) || Self::references_table(right, table_name)
+                Self::references_table(left, table_name)
+                    || Self::references_table(right, table_name)
             }
             LogicalPlan::Sort { input, .. } => Self::references_table(input, table_name),
             LogicalPlan::Limit { input, .. } => Self::references_table(input, table_name),
             LogicalPlan::Distinct { input, .. } => Self::references_table(input, table_name),
             LogicalPlan::SetOperation { left, right, .. } => {
-                Self::references_table(left, table_name) || Self::references_table(right, table_name)
+                Self::references_table(left, table_name)
+                    || Self::references_table(right, table_name)
             }
             LogicalPlan::Window { input, .. } => Self::references_table(input, table_name),
             LogicalPlan::WithCte { body, .. } => Self::references_table(body, table_name),
@@ -1527,7 +1530,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                         {
                             let expr = &row_exprs[i];
                             let final_val = match expr {
-                                Expr::Default => default_values[col_idx].clone().unwrap_or(Value::Null),
+                                Expr::Default => {
+                                    default_values[col_idx].clone().unwrap_or(Value::Null)
+                                }
                                 _ => values_evaluator.evaluate(expr, &empty_rec)?,
                             };
                             row[col_idx] = coerce_value(final_val, &fields[col_idx].data_type)?;
@@ -1582,7 +1587,9 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                     {
                         let val = &record.values()[i];
                         let final_val = match val {
-                            Value::Default => default_values[col_idx].clone().unwrap_or(Value::Null),
+                            Value::Default => {
+                                default_values[col_idx].clone().unwrap_or(Value::Null)
+                            }
                             _ => val.clone(),
                         };
                         row[col_idx] = coerce_value(final_val, &fields[col_idx].data_type)?;
@@ -1606,31 +1613,69 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             .get_table(table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?
             .clone();
-        let schema = table.schema().clone();
-        let evaluator = IrEvaluator::new(&schema)
-            .with_variables(&self.variables)
-            .with_user_functions(&self.user_function_defs);
+        let base_schema = table.schema().clone();
+        let schema = Self::schema_with_source_table(&base_schema, table_name);
 
-        let mut new_table = Table::empty(schema.clone());
+        let filter_has_subquery = filter
+            .as_ref()
+            .is_some_and(|f| Self::expr_contains_subquery(f));
+        let assignments_have_subquery = assignments
+            .iter()
+            .any(|a| Self::expr_contains_subquery(&a.value));
 
-        for record in table.rows()? {
-            let matches = filter
-                .map(|f| evaluator.evaluate(f, &record))
-                .transpose()?
-                .map(|v| v.as_bool().unwrap_or(false))
-                .unwrap_or(true);
+        let mut new_table = Table::empty(base_schema.clone());
 
-            if matches {
-                let mut new_row = record.values().to_vec();
-                for assignment in assignments {
-                    if let Some(idx) = schema.field_index(&assignment.column) {
-                        let val = evaluator.evaluate(&assignment.value, &record)?;
-                        new_row[idx] = val;
+        if filter_has_subquery || assignments_have_subquery {
+            for record in table.rows()? {
+                let matches = if let Some(f) = filter {
+                    self.eval_expr_with_subqueries(f, &schema, &record)?
+                        .as_bool()
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
+
+                if matches {
+                    let mut new_row = record.values().to_vec();
+                    for assignment in assignments {
+                        if let Some(idx) = schema.field_index(&assignment.column) {
+                            let val = self.eval_expr_with_subqueries(
+                                &assignment.value,
+                                &schema,
+                                &record,
+                            )?;
+                            new_row[idx] = val;
+                        }
                     }
+                    new_table.push_row(new_row)?;
+                } else {
+                    new_table.push_row(record.values().to_vec())?;
                 }
-                new_table.push_row(new_row)?;
-            } else {
-                new_table.push_row(record.values().to_vec())?;
+            }
+        } else {
+            let evaluator = IrEvaluator::new(&schema)
+                .with_variables(&self.variables)
+                .with_user_functions(&self.user_function_defs);
+
+            for record in table.rows()? {
+                let matches = filter
+                    .map(|f| evaluator.evaluate(f, &record))
+                    .transpose()?
+                    .map(|v| v.as_bool().unwrap_or(false))
+                    .unwrap_or(true);
+
+                if matches {
+                    let mut new_row = record.values().to_vec();
+                    for assignment in assignments {
+                        if let Some(idx) = schema.field_index(&assignment.column) {
+                            let val = evaluator.evaluate(&assignment.value, &record)?;
+                            new_row[idx] = val;
+                        }
+                    }
+                    new_table.push_row(new_row)?;
+                } else {
+                    new_table.push_row(record.values().to_vec())?;
+                }
             }
         }
 
@@ -1653,22 +1698,41 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             .get_table(table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?
             .clone();
-        let schema = table.schema().clone();
-        let evaluator = IrEvaluator::new(&schema)
-            .with_variables(&self.variables)
-            .with_user_functions(&self.user_function_defs);
+        let base_schema = table.schema().clone();
+        let schema = Self::schema_with_source_table(&base_schema, table_name);
+        let has_subquery = filter
+            .as_ref()
+            .is_some_and(|f| Self::expr_contains_subquery(f));
 
-        let mut new_table = Table::empty(schema.clone());
+        let mut new_table = Table::empty(base_schema.clone());
 
-        for record in table.rows()? {
-            let matches = filter
-                .map(|f| evaluator.evaluate(f, &record))
-                .transpose()?
-                .map(|v| v.as_bool().unwrap_or(false))
-                .unwrap_or(true);
+        if has_subquery {
+            for record in table.rows()? {
+                let matches = filter
+                    .map(|f| self.eval_expr_with_subqueries(f, &schema, &record))
+                    .transpose()?
+                    .map(|v| v.as_bool().unwrap_or(false))
+                    .unwrap_or(true);
 
-            if !matches {
-                new_table.push_row(record.values().to_vec())?;
+                if !matches {
+                    new_table.push_row(record.values().to_vec())?;
+                }
+            }
+        } else {
+            let evaluator = IrEvaluator::new(&schema)
+                .with_variables(&self.variables)
+                .with_user_functions(&self.user_function_defs);
+
+            for record in table.rows()? {
+                let matches = filter
+                    .map(|f| evaluator.evaluate(f, &record))
+                    .transpose()?
+                    .map(|v| v.as_bool().unwrap_or(false))
+                    .unwrap_or(true);
+
+                if !matches {
+                    new_table.push_row(record.values().to_vec())?;
+                }
             }
         }
 
@@ -1681,16 +1745,281 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         Ok(Table::empty(Schema::new()))
     }
 
+    fn schema_with_source_table(schema: &Schema, table_name: &str) -> Schema {
+        let mut new_schema = Schema::new();
+        for field in schema.fields() {
+            let mut new_field = field.clone();
+            if new_field.source_table.is_none() {
+                new_field.source_table = Some(table_name.to_string());
+            }
+            new_schema.add_field(new_field);
+        }
+        new_schema
+    }
+
     pub(crate) fn execute_merge(
         &mut self,
-        _target_table: &str,
-        _source: &PhysicalPlan,
-        _on: &Expr,
-        _clauses: &[MergeClause],
+        target_table: &str,
+        source: &PhysicalPlan,
+        on: &Expr,
+        clauses: &[MergeClause],
     ) -> Result<Table> {
-        Err(Error::internal(
-            "MERGE not yet implemented in concurrent executor",
-        ))
+        let source_table = self.execute_plan(source)?;
+        let source_schema = source_table.schema().clone();
+        let source_rows: Vec<Record> = source_table.rows()?;
+
+        let target = self
+            .tables
+            .get_table(target_table)
+            .ok_or_else(|| Error::TableNotFound(target_table.to_string()))?;
+        let target_schema = target.schema().clone();
+        let target_rows: Vec<Record> = target.rows()?;
+
+        let combined_schema = self.create_merge_combined_schema(&target_schema, &source_schema);
+        let evaluator = IrEvaluator::new(&combined_schema)
+            .with_variables(&self.variables)
+            .with_user_functions(&self.user_function_defs);
+
+        let mut matched_target_indices: HashSet<usize> = HashSet::new();
+        let mut matched_source_indices: HashSet<usize> = HashSet::new();
+        let mut match_pairs: Vec<(usize, usize)> = Vec::new();
+
+        for (t_idx, target_row) in target_rows.iter().enumerate() {
+            for (s_idx, source_row) in source_rows.iter().enumerate() {
+                let combined_record = self.create_combined_record(target_row, source_row);
+                let val = evaluator.evaluate(on, &combined_record)?;
+                if val.as_bool().unwrap_or(false) {
+                    match_pairs.push((t_idx, s_idx));
+                    matched_target_indices.insert(t_idx);
+                    matched_source_indices.insert(s_idx);
+                }
+            }
+        }
+
+        let mut updates: Vec<(usize, Vec<Value>)> = Vec::new();
+        let mut deletes: Vec<usize> = Vec::new();
+        let mut inserts: Vec<Vec<Value>> = Vec::new();
+
+        for clause in clauses {
+            match clause {
+                MergeClause::MatchedUpdate {
+                    condition,
+                    assignments,
+                } => {
+                    for &(t_idx, s_idx) in &match_pairs {
+                        let target_row = &target_rows[t_idx];
+                        let source_row = &source_rows[s_idx];
+                        let combined_record = self.create_combined_record(target_row, source_row);
+
+                        let should_apply = match condition {
+                            Some(pred) => evaluator
+                                .evaluate(pred, &combined_record)?
+                                .as_bool()
+                                .unwrap_or(false),
+                            None => true,
+                        };
+
+                        if should_apply && !deletes.contains(&t_idx) {
+                            let mut new_values = target_row.values().to_vec();
+                            for assignment in assignments {
+                                let col_idx = target_schema
+                                    .fields()
+                                    .iter()
+                                    .position(|f| f.name.eq_ignore_ascii_case(&assignment.column))
+                                    .ok_or_else(|| {
+                                        Error::ColumnNotFound(assignment.column.clone())
+                                    })?;
+                                let new_val =
+                                    evaluator.evaluate(&assignment.value, &combined_record)?;
+                                new_values[col_idx] = new_val;
+                            }
+                            if let Some(pos) = updates.iter().position(|(idx, _)| *idx == t_idx) {
+                                updates[pos] = (t_idx, new_values);
+                            } else {
+                                updates.push((t_idx, new_values));
+                            }
+                        }
+                    }
+                }
+                MergeClause::MatchedDelete { condition } => {
+                    for &(t_idx, s_idx) in &match_pairs {
+                        let target_row = &target_rows[t_idx];
+                        let source_row = &source_rows[s_idx];
+                        let combined_record = self.create_combined_record(target_row, source_row);
+
+                        let should_apply = match condition {
+                            Some(pred) => evaluator
+                                .evaluate(pred, &combined_record)?
+                                .as_bool()
+                                .unwrap_or(false),
+                            None => true,
+                        };
+
+                        if should_apply && !deletes.contains(&t_idx) {
+                            deletes.push(t_idx);
+                            updates.retain(|(idx, _)| *idx != t_idx);
+                        }
+                    }
+                }
+                MergeClause::NotMatched {
+                    condition,
+                    columns,
+                    values,
+                } => {
+                    let source_evaluator = IrEvaluator::new(&source_schema)
+                        .with_variables(&self.variables)
+                        .with_user_functions(&self.user_function_defs);
+
+                    for (s_idx, source_row) in source_rows.iter().enumerate() {
+                        if matched_source_indices.contains(&s_idx) {
+                            continue;
+                        }
+
+                        let should_apply = match condition {
+                            Some(pred) => source_evaluator
+                                .evaluate(pred, source_row)?
+                                .as_bool()
+                                .unwrap_or(false),
+                            None => true,
+                        };
+
+                        if should_apply {
+                            let mut row_values = vec![Value::Null; target_schema.field_count()];
+
+                            if columns.is_empty() && values.is_empty() {
+                                for (i, val) in source_row.values().iter().enumerate() {
+                                    if i < row_values.len() {
+                                        row_values[i] = val.clone();
+                                    }
+                                }
+                            } else if columns.is_empty() {
+                                for (expr_idx, expr) in values.iter().enumerate() {
+                                    if expr_idx < row_values.len() {
+                                        row_values[expr_idx] =
+                                            source_evaluator.evaluate(expr, source_row)?;
+                                    }
+                                }
+                            } else {
+                                for (col_name, expr) in columns.iter().zip(values.iter()) {
+                                    let col_idx = target_schema
+                                        .fields()
+                                        .iter()
+                                        .position(|f| f.name.eq_ignore_ascii_case(col_name))
+                                        .ok_or_else(|| Error::ColumnNotFound(col_name.clone()))?;
+                                    row_values[col_idx] =
+                                        source_evaluator.evaluate(expr, source_row)?;
+                                }
+                            }
+                            inserts.push(row_values);
+                        }
+                    }
+                }
+                MergeClause::NotMatchedBySource {
+                    condition,
+                    assignments,
+                } => {
+                    let target_evaluator = IrEvaluator::new(&target_schema)
+                        .with_variables(&self.variables)
+                        .with_user_functions(&self.user_function_defs);
+
+                    for (t_idx, target_row) in target_rows.iter().enumerate() {
+                        if matched_target_indices.contains(&t_idx) {
+                            continue;
+                        }
+
+                        let should_apply = match condition {
+                            Some(pred) => target_evaluator
+                                .evaluate(pred, target_row)?
+                                .as_bool()
+                                .unwrap_or(false),
+                            None => true,
+                        };
+
+                        if should_apply && !deletes.contains(&t_idx) {
+                            let mut new_values = target_row.values().to_vec();
+                            for assignment in assignments {
+                                let col_idx = target_schema
+                                    .fields()
+                                    .iter()
+                                    .position(|f| f.name.eq_ignore_ascii_case(&assignment.column))
+                                    .ok_or_else(|| {
+                                        Error::ColumnNotFound(assignment.column.clone())
+                                    })?;
+                                let new_val =
+                                    target_evaluator.evaluate(&assignment.value, target_row)?;
+                                new_values[col_idx] = new_val;
+                            }
+                            if let Some(pos) = updates.iter().position(|(idx, _)| *idx == t_idx) {
+                                updates[pos] = (t_idx, new_values);
+                            } else {
+                                updates.push((t_idx, new_values));
+                            }
+                        }
+                    }
+                }
+                MergeClause::NotMatchedBySourceDelete { condition } => {
+                    let target_evaluator = IrEvaluator::new(&target_schema)
+                        .with_variables(&self.variables)
+                        .with_user_functions(&self.user_function_defs);
+
+                    for (t_idx, target_row) in target_rows.iter().enumerate() {
+                        if matched_target_indices.contains(&t_idx) {
+                            continue;
+                        }
+
+                        let should_apply = match condition {
+                            Some(pred) => target_evaluator
+                                .evaluate(pred, target_row)?
+                                .as_bool()
+                                .unwrap_or(false),
+                            None => true,
+                        };
+
+                        if should_apply && !deletes.contains(&t_idx) {
+                            deletes.push(t_idx);
+                            updates.retain(|(idx, _)| *idx != t_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        let target = self
+            .tables
+            .get_table_mut(target_table)
+            .ok_or_else(|| Error::TableNotFound(target_table.to_string()))?;
+
+        for (idx, new_values) in &updates {
+            target.update_row(*idx, new_values.clone())?;
+        }
+
+        deletes.sort();
+        for idx in deletes.into_iter().rev() {
+            target.remove_row(idx);
+        }
+
+        for insert_row in inserts {
+            target.push_row(insert_row)?;
+        }
+
+        Ok(Table::empty(Schema::new()))
+    }
+
+    fn create_merge_combined_schema(&self, target: &Schema, source: &Schema) -> Schema {
+        let mut combined = Schema::new();
+        for field in target.fields() {
+            combined.add_field(field.clone());
+        }
+        for field in source.fields() {
+            combined.add_field(field.clone());
+        }
+        combined
+    }
+
+    fn create_combined_record(&self, target: &Record, source: &Record) -> Record {
+        let mut values = target.values().to_vec();
+        values.extend(source.values().to_vec());
+        Record::from_values(values)
     }
 
     pub(crate) fn execute_truncate(&mut self, table_name: &str) -> Result<Table> {
@@ -3625,8 +3954,11 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 let new_sort_exprs = sort_exprs
                     .iter()
                     .map(|se| {
-                        let new_expr =
-                            self.substitute_outer_refs_in_expr(&se.expr, outer_schema, outer_record)?;
+                        let new_expr = self.substitute_outer_refs_in_expr(
+                            &se.expr,
+                            outer_schema,
+                            outer_record,
+                        )?;
                         Ok(SortExpr {
                             expr: new_expr,
                             asc: se.asc,
@@ -3674,8 +4006,11 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 let new_columns = columns
                     .iter()
                     .map(|uc| {
-                        let new_expr =
-                            self.substitute_outer_refs_in_expr(&uc.expr, outer_schema, outer_record)?;
+                        let new_expr = self.substitute_outer_refs_in_expr(
+                            &uc.expr,
+                            outer_schema,
+                            outer_record,
+                        )?;
                         Ok(UnnestColumn {
                             expr: new_expr,
                             alias: uc.alias.clone(),
@@ -3731,10 +4066,7 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                             .as_ref()
                             .is_some_and(|src| src.eq_ignore_ascii_case(tbl))
                             && f.name.eq_ignore_ascii_case(name)
-                    }) || outer_schema
-                        .fields()
-                        .iter()
-                        .any(|f| f.name.eq_ignore_ascii_case(name) && f.source_table.is_none())
+                    })
                 } else {
                     outer_schema.field_index(name).is_some()
                 };
@@ -3928,6 +4260,215 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         }
     }
 
+    fn resolve_subqueries_in_expr(&mut self, expr: &Expr) -> Result<Expr> {
+        match expr {
+            Expr::InSubquery {
+                expr: inner_expr,
+                subquery,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner_expr)?;
+                let empty_schema = Schema::new();
+                let empty_record = Record::new();
+                let substituted =
+                    self.substitute_outer_refs_in_plan(subquery, &empty_schema, &empty_record)?;
+                let physical = optimize(&substituted)?;
+                let executor_plan = PhysicalPlan::from_physical(&physical);
+                let result_table = self.execute_plan(&executor_plan)?;
+
+                let mut list_exprs = Vec::new();
+                for record in result_table.rows()? {
+                    let values = record.values();
+                    if !values.is_empty() {
+                        let literal = Self::value_to_literal(values[0].clone());
+                        list_exprs.push(Expr::Literal(literal));
+                    }
+                }
+
+                Ok(Expr::InList {
+                    expr: Box::new(resolved_inner),
+                    list: list_exprs,
+                    negated: *negated,
+                })
+            }
+            Expr::Exists { subquery, negated } => {
+                let empty_schema = Schema::new();
+                let empty_record = Record::new();
+                let substituted =
+                    self.substitute_outer_refs_in_plan(subquery, &empty_schema, &empty_record)?;
+                let physical = optimize(&substituted)?;
+                let executor_plan = PhysicalPlan::from_physical(&physical);
+                let result_table = self.execute_plan(&executor_plan)?;
+                let has_rows = !result_table.is_empty();
+                let result = if *negated { !has_rows } else { has_rows };
+                Ok(Expr::Literal(yachtsql_ir::Literal::Bool(result)))
+            }
+            Expr::Subquery(plan) | Expr::ScalarSubquery(plan) => {
+                let empty_schema = Schema::new();
+                let empty_record = Record::new();
+                let substituted =
+                    self.substitute_outer_refs_in_plan(plan, &empty_schema, &empty_record)?;
+                let physical = optimize(&substituted)?;
+                let executor_plan = PhysicalPlan::from_physical(&physical);
+                let result_table = self.execute_plan(&executor_plan)?;
+
+                if result_table.is_empty() {
+                    return Ok(Expr::Literal(yachtsql_ir::Literal::Null));
+                }
+
+                let rows: Vec<_> = result_table.rows()?.into_iter().collect();
+                if rows.is_empty() {
+                    return Ok(Expr::Literal(yachtsql_ir::Literal::Null));
+                }
+
+                let values = rows[0].values();
+                if values.is_empty() {
+                    return Ok(Expr::Literal(yachtsql_ir::Literal::Null));
+                }
+
+                let literal = Self::value_to_literal(values[0].clone());
+                Ok(Expr::Literal(literal))
+            }
+            Expr::ArraySubquery(plan) => {
+                let empty_schema = Schema::new();
+                let empty_record = Record::new();
+                let substituted =
+                    self.substitute_outer_refs_in_plan(plan, &empty_schema, &empty_record)?;
+                let physical = optimize(&substituted)?;
+                let executor_plan = PhysicalPlan::from_physical(&physical);
+                let result_table = self.execute_plan(&executor_plan)?;
+
+                let mut array_elements = Vec::new();
+                for record in result_table.rows()? {
+                    let values = record.values();
+                    if !values.is_empty() {
+                        array_elements.push(Self::value_to_literal(values[0].clone()));
+                    }
+                }
+                Ok(Expr::Literal(yachtsql_ir::Literal::Array(array_elements)))
+            }
+            Expr::BinaryOp { left, op, right } => {
+                let resolved_left = self.resolve_subqueries_in_expr(left)?;
+                let resolved_right = self.resolve_subqueries_in_expr(right)?;
+                Ok(Expr::BinaryOp {
+                    left: Box::new(resolved_left),
+                    op: *op,
+                    right: Box::new(resolved_right),
+                })
+            }
+            Expr::UnaryOp { op, expr: inner } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner)?;
+                Ok(Expr::UnaryOp {
+                    op: *op,
+                    expr: Box::new(resolved_inner),
+                })
+            }
+            Expr::Cast {
+                expr: inner,
+                data_type,
+                safe,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner)?;
+                Ok(Expr::Cast {
+                    expr: Box::new(resolved_inner),
+                    data_type: data_type.clone(),
+                    safe: *safe,
+                })
+            }
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => {
+                let resolved_operand = operand
+                    .as_ref()
+                    .map(|e| self.resolve_subqueries_in_expr(e))
+                    .transpose()?
+                    .map(Box::new);
+
+                let mut resolved_clauses = Vec::new();
+                for clause in when_clauses {
+                    resolved_clauses.push(yachtsql_ir::WhenClause {
+                        condition: self.resolve_subqueries_in_expr(&clause.condition)?,
+                        result: self.resolve_subqueries_in_expr(&clause.result)?,
+                    });
+                }
+
+                let resolved_else = else_result
+                    .as_ref()
+                    .map(|e| self.resolve_subqueries_in_expr(e))
+                    .transpose()?
+                    .map(Box::new);
+
+                Ok(Expr::Case {
+                    operand: resolved_operand,
+                    when_clauses: resolved_clauses,
+                    else_result: resolved_else,
+                })
+            }
+            Expr::ScalarFunction { name, args } => {
+                let resolved_args = args
+                    .iter()
+                    .map(|a| self.resolve_subqueries_in_expr(a))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Expr::ScalarFunction {
+                    name: name.clone(),
+                    args: resolved_args,
+                })
+            }
+            Expr::Alias { expr: inner, name } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner)?;
+                Ok(Expr::Alias {
+                    expr: Box::new(resolved_inner),
+                    name: name.clone(),
+                })
+            }
+            Expr::IsNull {
+                expr: inner,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner)?;
+                Ok(Expr::IsNull {
+                    expr: Box::new(resolved_inner),
+                    negated: *negated,
+                })
+            }
+            Expr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner)?;
+                let resolved_list = list
+                    .iter()
+                    .map(|e| self.resolve_subqueries_in_expr(e))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Expr::InList {
+                    expr: Box::new(resolved_inner),
+                    list: resolved_list,
+                    negated: *negated,
+                })
+            }
+            Expr::Between {
+                expr: inner,
+                low,
+                high,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner)?;
+                let resolved_low = self.resolve_subqueries_in_expr(low)?;
+                let resolved_high = self.resolve_subqueries_in_expr(high)?;
+                Ok(Expr::Between {
+                    expr: Box::new(resolved_inner),
+                    low: Box::new(resolved_low),
+                    high: Box::new(resolved_high),
+                    negated: *negated,
+                })
+            }
+            _ => Ok(expr.clone()),
+        }
+    }
+
     fn expr_contains_subquery(expr: &Expr) -> bool {
         match expr {
             Expr::Exists { .. }
@@ -3940,6 +4481,24 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             }
             Expr::UnaryOp { expr, .. } => Self::expr_contains_subquery(expr),
             Expr::ScalarFunction { args, .. } => args.iter().any(Self::expr_contains_subquery),
+            Expr::Cast { expr, .. } => Self::expr_contains_subquery(expr),
+            Expr::Alias { expr, .. } => Self::expr_contains_subquery(expr),
+            Expr::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => {
+                operand
+                    .as_ref()
+                    .is_some_and(|e| Self::expr_contains_subquery(e))
+                    || when_clauses.iter().any(|wc| {
+                        Self::expr_contains_subquery(&wc.condition)
+                            || Self::expr_contains_subquery(&wc.result)
+                    })
+                    || else_result
+                        .as_ref()
+                        .is_some_and(|e| Self::expr_contains_subquery(e))
+            }
             _ => false,
         }
     }
