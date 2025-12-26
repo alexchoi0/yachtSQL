@@ -317,8 +317,8 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             PhysicalPlan::AlterTable {
                 table_name,
                 operation,
-                if_exists: _,
-            } => self.execute_alter_table(table_name, operation),
+                if_exists,
+            } => self.execute_alter_table(table_name, operation, *if_exists),
             PhysicalPlan::Truncate { table_name } => self.execute_truncate(table_name),
             PhysicalPlan::CreateView {
                 name,
@@ -1481,16 +1481,29 @@ impl<'a> ConcurrentPlanExecutor<'a> {
         &mut self,
         table_name: &str,
         operation: &AlterTableOp,
+        if_exists: bool,
     ) -> Result<Table> {
+        let table_exists = self.tables.get_table(table_name).is_some();
+        if !table_exists {
+            if if_exists {
+                return Ok(Table::empty(Schema::new()));
+            }
+            return Err(Error::TableNotFound(table_name.to_string()));
+        }
+
         match operation {
             AlterTableOp::AddColumn {
                 column,
-                if_not_exists: _,
+                if_not_exists,
             } => {
                 let table = self
                     .tables
                     .get_table_mut(table_name)
                     .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+
+                if *if_not_exists && table.schema().field(&column.name).is_some() {
+                    return Ok(Table::empty(Schema::new()));
+                }
 
                 let field = if column.nullable {
                     Field::nullable(column.name.clone(), column.data_type.clone())
@@ -1509,11 +1522,17 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 use yachtsql_storage::TableSchemaOps;
                 table.add_column(field, default_value)?;
             }
-            AlterTableOp::DropColumn { name, if_exists: _ } => {
+            AlterTableOp::DropColumn {
+                name,
+                if_exists: column_if_exists,
+            } => {
                 let table = self
                     .tables
                     .get_table_mut(table_name)
                     .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+                if *column_if_exists && table.schema().field(name).is_none() {
+                    return Ok(Table::empty(Schema::new()));
+                }
                 table.drop_column(name)?;
             }
             AlterTableOp::RenameColumn { old_name, new_name } => {

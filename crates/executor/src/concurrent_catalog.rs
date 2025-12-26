@@ -115,14 +115,24 @@ impl ConcurrentCatalog {
 
         for (table_name, access_type) in &accesses.accesses {
             let resolved = self.resolve_table_name(table_name);
-            let handle = self
-                .tables
-                .get(&resolved)
-                .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
-            let handle = handle.clone();
+            let handle_opt = self.tables.get(&resolved);
 
             match access_type {
+                AccessType::WriteOptional => {
+                    if let Some(handle) = handle_opt {
+                        let handle = handle.clone();
+                        let guard = handle.write().map_err(|_| {
+                            Error::internal(format!("Lock poisoned for table: {}", table_name))
+                        })?;
+                        let guard: RwLockWriteGuard<'static, Table> =
+                            unsafe { std::mem::transmute(guard) };
+                        locks.add_write(resolved, guard);
+                    }
+                }
                 AccessType::Read => {
+                    let handle = handle_opt
+                        .ok_or_else(|| Error::TableNotFound(table_name.clone()))?
+                        .clone();
                     let guard = handle.read().map_err(|_| {
                         Error::internal(format!("Lock poisoned for table: {}", table_name))
                     })?;
@@ -131,6 +141,9 @@ impl ConcurrentCatalog {
                     locks.add_read(resolved, guard);
                 }
                 AccessType::Write => {
+                    let handle = handle_opt
+                        .ok_or_else(|| Error::TableNotFound(table_name.clone()))?
+                        .clone();
                     let guard = handle.write().map_err(|_| {
                         Error::internal(format!("Lock poisoned for table: {}", table_name))
                     })?;

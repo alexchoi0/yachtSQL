@@ -12,6 +12,7 @@ use yachtsql_optimizer::{OptimizedLogicalPlan, SampleType};
 pub enum AccessType {
     Read,
     Write,
+    WriteOptional,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -32,6 +33,12 @@ impl TableAccessSet {
 
     pub fn add_write(&mut self, table_name: String) {
         self.accesses.insert(table_name, AccessType::Write);
+    }
+
+    pub fn add_write_optional(&mut self, table_name: String) {
+        self.accesses
+            .entry(table_name)
+            .or_insert(AccessType::WriteOptional);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1127,8 +1134,16 @@ impl PhysicalPlan {
                 accesses.add_write(table_name.clone());
             }
 
-            PhysicalPlan::AlterTable { table_name, .. } => {
-                accesses.add_write(table_name.clone());
+            PhysicalPlan::AlterTable {
+                table_name,
+                if_exists,
+                ..
+            } => {
+                if *if_exists {
+                    accesses.add_write_optional(table_name.clone());
+                } else {
+                    accesses.add_write(table_name.clone());
+                }
             }
 
             PhysicalPlan::LoadData { table_name, .. } => {
