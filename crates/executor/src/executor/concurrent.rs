@@ -3539,6 +3539,15 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                 .collect();
             let schema = Schema::from_fields(fields);
             let _ = self.catalog.create_table(table_name, schema);
+            let handle = self.catalog.get_table_handle(table_name)
+                .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+            if let Ok(guard) = handle.write() {
+                unsafe {
+                    let static_guard: std::sync::RwLockWriteGuard<'static, Table> =
+                        std::mem::transmute(guard);
+                    self.tables.add_write(table_name.to_uppercase(), static_guard);
+                }
+            }
         }
 
         let schema = self
