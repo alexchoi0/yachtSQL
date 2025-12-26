@@ -1599,9 +1599,27 @@ impl<'a> ConcurrentPlanExecutor<'a> {
                             .with_user_functions(&self.user_function_defs);
                         let value = evaluator.evaluate(default, &Record::new())?;
                         table.set_column_default(name, value)?;
+
+                        let mut defaults = self
+                            .catalog
+                            .get_table_defaults(table_name)
+                            .unwrap_or_default();
+                        defaults.retain(|d| d.column_name.to_uppercase() != name.to_uppercase());
+                        defaults.push(ColumnDefault {
+                            column_name: name.clone(),
+                            default_expr: default.clone(),
+                        });
+                        self.catalog.set_table_defaults(table_name, defaults);
                     }
                     yachtsql_ir::AlterColumnAction::DropDefault => {
                         table.drop_column_default(name)?;
+
+                        let mut defaults = self
+                            .catalog
+                            .get_table_defaults(table_name)
+                            .unwrap_or_default();
+                        defaults.retain(|d| d.column_name.to_uppercase() != name.to_uppercase());
+                        self.catalog.set_table_defaults(table_name, defaults);
                     }
                     yachtsql_ir::AlterColumnAction::SetDataType { data_type } => {
                         table.set_column_data_type(name, data_type.clone())?;
