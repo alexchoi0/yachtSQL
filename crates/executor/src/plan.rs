@@ -1175,8 +1175,13 @@ impl PhysicalPlan {
                 }
             }
 
-            PhysicalPlan::CreateTable { .. }
-            | PhysicalPlan::DropTable { .. }
+            PhysicalPlan::CreateTable { query, .. } => {
+                if let Some(q) = query {
+                    q.collect_accesses(accesses);
+                }
+            }
+
+            PhysicalPlan::DropTable { .. }
             | PhysicalPlan::DropView { .. }
             | PhysicalPlan::CreateSchema { .. }
             | PhysicalPlan::DropSchema { .. }
