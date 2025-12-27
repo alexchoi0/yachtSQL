@@ -2690,10 +2690,10 @@ impl<'a> ConcurrentPlanExecutor<'a> {
             let mut field = Field::new(&col.name, col.data_type.clone(), mode);
             if let Some(ref collation) = col.collation {
                 field = field.with_collation(collation);
-            } else if let Some(ref default_coll) = schema_default_collation {
-                if col.data_type == DataType::String {
-                    field = field.with_collation(default_coll);
-                }
+            } else if let Some(ref default_coll) = schema_default_collation
+                && col.data_type == DataType::String
+            {
+                field = field.with_collation(default_coll);
             }
             schema.add_field(field);
             if let Some(ref default_expr) = col.default_value {
